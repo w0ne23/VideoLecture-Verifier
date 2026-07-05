@@ -1,0 +1,225 @@
+services:
+  db:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-graphlec}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-graphlec}"]
+      interval: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5.12
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password123}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  query_service:
+    build:
+      context: .
+      dockerfile: ./query_service/Dockerfile
+      network: host
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - QUERY_SERVICE_LLM_PROVIDER=${QUERY_SERVICE_LLM_PROVIDER:-gemini}
+      - QUERY_SERVICE_OPENAI_MODEL=${QUERY_SERVICE_OPENAI_MODEL:-gpt-5.4}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
+      - GRAPHLEC_LANCE_ROOT=/lance/lancedb
+    volumes:
+      - lance_data:/lance
+      - ./query_service:/app/query_service
+    command:
+      - uvicorn
+      - query_service.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./app/backend/Dockerfile
+      network: host
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://user:pass@db/graphlec}
+      - GOOGLE_API_KEY_1=${GOOGLE_API_KEY_1}
+      - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
+      - GRAPHRAG_API_KEY=${GRAPHRAG_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - XAI_BASE_URL=${XAI_BASE_URL:-https://api.x.ai/v1}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_THINKING=${DEEPSEEK_THINKING:-disabled}
+      - DEEPSEEK_REASONING_EFFORT=${DEEPSEEK_REASONING_EFFORT:-}
+      - DEEPSEEK_TIMEOUT_SEC=${DEEPSEEK_TIMEOUT_SEC:-180}
+      - VERIFIER_DEEPSEEK_THINKING=${VERIFIER_DEEPSEEK_THINKING:-disabled}
+      - VERIFIER_DEEPSEEK_REASONING_EFFORT=${VERIFIER_DEEPSEEK_REASONING_EFFORT:-}
+      - VERIFIER_DEEPSEEK_TIMEOUT_SEC=${VERIFIER_DEEPSEEK_TIMEOUT_SEC:-180}
+      - VERIFIER_DEEPSEEK_API_MAX_RETRIES=${VERIFIER_DEEPSEEK_API_MAX_RETRIES:-4}
+      - VERIFIER_DEEPSEEK_API_INITIAL_WAIT=${VERIFIER_DEEPSEEK_API_INITIAL_WAIT:-5}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ISSUE_JUDGE_MODELS=${ISSUE_JUDGE_MODELS:-gpt-5.4}
+      - ISSUE_JUDGE_MODEL_WEIGHTS=${ISSUE_JUDGE_MODEL_WEIGHTS:-gpt-5.4=1.0}
+      - ISSUE_JUDGE_MAX_WORKERS=${ISSUE_JUDGE_MAX_WORKERS:-6}
+      - VERIFIER_MODEL=${VERIFIER_MODEL:-gemini-2.5-flash}
+      - VERIFIER_CLAIM_EXTRACT_MODEL=${VERIFIER_CLAIM_EXTRACT_MODEL:-gemini-2.5-flash}
+      - VERIFIER_CLAIM_EXTRACT_BATCH_SIZE=${VERIFIER_CLAIM_EXTRACT_BATCH_SIZE:-2}
+      - VERIFIER_CLAIM_EXTRACT_MAX_WORKERS=${VERIFIER_CLAIM_EXTRACT_MAX_WORKERS:-4}
+      - VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE=${VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE:-auto}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_SIZE=${ISSUE_TYPE_CLASSIFIER_BATCH_SIZE:-10}
+      - ISSUE_TYPE_CLASSIFIER_MAX_WORKERS=${ISSUE_TYPE_CLASSIFIER_MAX_WORKERS:-1}
+      - ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC:-10}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES=${ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES:-2}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC:-10}
+      - ISSUE_TYPE_CLASSIFIER_GROK_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_GROK_RETRY_WAIT_SEC:-60}
+      - CLASSIFIED_ISSUE_VERIFIER_MODELS=${CLASSIFIED_ISSUE_VERIFIER_MODELS:-gpt-5.4,claude,grok}
+      - CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS=${CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS:-gpt=0.4,claude=0.4,grok=0.2}
+      - VERIFIER_CLAIM_JUDGE_MODEL=${VERIFIER_CLAIM_JUDGE_MODEL:-}
+      - VERIFIER_SLIDE_ERROR_MODEL=${VERIFIER_SLIDE_ERROR_MODEL:-gemini-2.5-flash}
+      - VERIFIER_TEMPERATURE=${VERIFIER_TEMPERATURE:-0.0}
+      - ANNOTATION_VLM_MODEL=${ANNOTATION_VLM_MODEL:-gemini-2.5-flash}
+      - QUERY_SERVICE_URL=http://query_service:8001
+      - RECOMMENDER_SERVICE_URL=http://recommender:8002
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
+      - GRAPHLEC_LANCE_ROOT=/lance/lancedb
+      - LOCAL_STORAGE_DIR=/pipeline/local_storage
+      - GRAPHLEC_SLIDE_DECODE_BACKEND=auto
+      - GRAPHLEC_FFMPEG_HWACCEL=auto
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPYCACHEPREFIX=/tmp/graphlec-pycache
+      - TRANSCRIBE_SILENCE_SPLIT_SEC=${TRANSCRIBE_SILENCE_SPLIT_SEC:-1.5}
+      - TRANSCRIBE_CHUNK_MAX_SEC=${TRANSCRIBE_CHUNK_MAX_SEC:-600}
+      - TRANSCRIBE_CHUNK_MIN_SEC=${TRANSCRIBE_CHUNK_MIN_SEC:-30}
+      - GRAPHLEC_AUDIO_TEMPO_ENABLED=${GRAPHLEC_AUDIO_TEMPO_ENABLED:-0}
+      - GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER=${GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER:-gemini}
+      - GRAPHLEC_SLIDE_TEXTUALIZER_MODEL=${GRAPHLEC_SLIDE_TEXTUALIZER_MODEL:-gpt-4.1-mini}
+      - GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER=${GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER:-gemini}
+      - GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL=${GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL:-gpt-4.1-mini}
+      - GRAPHLEC_METADATA_DIR=/app/metadata
+      - RECOMMENDER_DB_DIR=/lance/lancedb
+      - GRAPHLEC_CLEAR_NEO4J_ON_START=0
+      - GRAPHLEC_BACKEND_WORKERS=${GRAPHLEC_BACKEND_WORKERS:-3}
+      - GRAPHLEC_WORKER_PIN_CPUS=${GRAPHLEC_WORKER_PIN_CPUS:-1}
+      - GRAPHLEC_WORKER_CPU_SETS=${GRAPHLEC_WORKER_CPU_SETS:-}
+      - GRAPHLEC_ANNOT_WORKERS=${GRAPHLEC_ANNOT_WORKERS:-0}
+      - GRAPHLEC_VLM_ENABLED=${GRAPHLEC_VLM_ENABLED:-0}
+      - GRAPHLEC_VLM_PROVIDER=${GRAPHLEC_VLM_PROVIDER:-ollama}
+      - GRAPHLEC_OLLAMA_MODEL=${GRAPHLEC_OLLAMA_MODEL:-gemma3:4b}
+      - GRAPHLEC_OLLAMA_BASE_URL=${GRAPHLEC_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - GRAPHLEC_OLLAMA_BASE_URLS=${GRAPHLEC_OLLAMA_BASE_URLS:-}
+      - GRAPHLEC_VLM_WORKERS=${GRAPHLEC_VLM_WORKERS:-2}
+      - GRAPHLEC_VLM_TEMPERATURE=${GRAPHLEC_VLM_TEMPERATURE:-0.0}
+      - GRAPHLEC_VLM_TIMEOUT_SEC=${GRAPHLEC_VLM_TIMEOUT_SEC:-180}
+      - GRAPHLEC_VLM_NUM_PREDICT=${GRAPHLEC_VLM_NUM_PREDICT:-1024}
+      - GRAPHLEC_VLM_IMAGE_WIDTH=${GRAPHLEC_VLM_IMAGE_WIDTH:-768}
+      - GRAPHLEC_VLM_BATCH_IMAGES=${GRAPHLEC_VLM_BATCH_IMAGES:-10}
+      - GRAPHLEC_VLM_BATCH_OVERLAP_IMAGES=${GRAPHLEC_VLM_BATCH_OVERLAP_IMAGES:-0}
+      - GRAPHLEC_VLM_BATCH_CANDIDATES=${GRAPHLEC_VLM_BATCH_CANDIDATES:-5}
+      - GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES=${GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES:-10}
+      - GRAPHLEC_VLM_APPLY=${GRAPHLEC_VLM_APPLY:-0}
+      - GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE=${GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE:-0.65}
+    volumes:
+      - ./input:/pipeline/input
+      - ./local_storage:/pipeline/local_storage
+      - lance_data:/lance
+      - ./app/backend:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      query_service:
+        condition: service_started
+
+  recommender:
+    build:
+      context: .
+      dockerfile: ./app/backend/recommender/Dockerfile
+      network: host
+    env_file:
+      - .env
+    ports:
+      - "8002:8002"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - RECOMMENDER_LLM_PROVIDER=${RECOMMENDER_LLM_PROVIDER:-openai}
+      - RECOMMENDER_OPENAI_MODEL=${RECOMMENDER_OPENAI_MODEL:-gpt-5.4}
+      - RECOMMENDER_DB_DIR=/lance/lancedb
+    volumes:
+      - lance_data:/lance
+    command:
+      - uvicorn
+      - recommender.recommender_web:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./app/frontend/Dockerfile
+    ports:
+      - "80:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    volumes:
+      - ./app/frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+
+volumes:
+  pgdata:
+  neo4j_data:
+  neo4j_logs:
+  lance_data:

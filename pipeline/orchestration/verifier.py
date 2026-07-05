@@ -1,0 +1,85 @@
+from pathlib import Path
+
+
+def run_verifier_pipeline(
+    args,
+    *,
+    preprocess_result: dict,
+    output_dir: Path,
+    paths: dict,
+    timings: dict[str, float],
+    background: bool = True,
+    notify_stage=lambda _stage, _status: None,
+    helpers,
+) -> dict:
+    """Build verifier input and run the verifier path."""
+    meta_path = preprocess_result["meta_path"]
+    duration = preprocess_result["duration"]
+    textualized_path = preprocess_result["textualized_path"]
+    audio_result = preprocess_result["audio_result"]
+    slides_structure = audio_result.get("scenes_structure") or audio_result.get("slides_structure")
+
+    notify_stage("verifier_build_analyzer_input", "run")
+    r9 = helpers.build_analyzer_input(
+        args,
+        meta_path=meta_path,
+        textualized_path=textualized_path,
+        segments_path=audio_result.get("segments_path", str(paths["segments"])),
+        output_dir=output_dir,
+        duration=audio_result.get("duration", duration),
+        slides_structure=slides_structure,
+    )
+    timings["V1 build_analyzer_input — verifier 입력 생성"] = r9["elapsed"]
+    notify_stage("verifier_build_analyzer_input", "done")
+
+    r10: dict = {}
+    r10a: dict = {}
+    r10b: dict = {}
+
+    if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
+        notify_stage("verifier_claim_extraction", "run")
+        r10a = helpers.extract_claims(
+            args,
+            merged_clean_path=r9["merged_clean_path"],
+            output_dir=output_dir,
+        )
+        timings["V2A extract_claims — claim 추출"] = r10a["elapsed"]
+        notify_stage("verifier_claim_extraction", "done")
+        if getattr(args, "stop_after_issue_judge", False):
+            notify_stage("verifier_issue_judge", "run")
+            r10b = helpers.judge_issues(
+                args,
+                merged_clean_path=r9["merged_clean_path"],
+                output_dir=output_dir,
+                claims_jsonl=r10a["claims_jsonl"],
+            )
+            timings["V2B judge_issues — 1차 issue 판단"] = r10b["elapsed"]
+            notify_stage("verifier_issue_judge", "done")
+        timings["V2 verifier 백그라운드 시작"] = 0.0
+    elif getattr(args, "skip_analyzer", False):
+        timings["V2 verifier 백그라운드 시작"] = 0.0
+    elif background:
+        notify_stage("verifier_run", "run")
+        r10 = helpers.start_verifier_background(
+            args,
+            merged_clean_path=r9["merged_clean_path"],
+            output_dir=output_dir,
+        )
+        timings["V2 verifier 백그라운드 시작"] = r10["elapsed"]
+        notify_stage("verifier_run", "done")
+    else:
+        r10 = helpers.run_verifier(
+            args,
+            merged_clean_path=r9["merged_clean_path"],
+            output_dir=output_dir,
+            notify_stage=notify_stage,
+        )
+        timings["V2 run_verifier — verifier 실행"] = r10["elapsed"]
+        timings["V2 verifier 백그라운드 시작"] = 0.0
+
+    return {
+        "analyzer_input": r9,
+        "verifier_result": r10,
+        "claims_result": r10a,
+        "issue_judge_result": r10b,
+    }
