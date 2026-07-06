@@ -24,7 +24,6 @@ API 클라이언트 초기화 및 경로 상수 정의
 """
 
 import os
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -60,38 +59,64 @@ XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
-missing_keys: list[str] = []
-if not GEMINI_API_KEY_1:
-    missing_keys.append("GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY)")
-if not GROQ_API_KEY:
-    missing_keys.append("GROQ_API_KEY")
-
-if missing_keys:
-    print("❌ 필요한 API 키를 환경 변수로 설정해주세요:")
-    for k in missing_keys:
-        print(f"   - {k}")
-    sys.exit(1)
-
 # ──────────────────────────────────────────────────────────────
-# API 클라이언트
+# API 클라이언트 (lazy init)
+#
+# import 시점에는 아무 클라이언트도 만들지 않는다. 실제 사용 시점에 생성하고,
+# 필수 키(Gemini/Groq)가 없으면 그때 어떤 환경변수가 왜 필요한지 명시한
+# RuntimeError를 낸다. 기존 코드의 `from .config import gemini_client` 같은
+# 접근은 아래 모듈 __getattr__(PEP 562)이 받아서 처리한다.
 # ──────────────────────────────────────────────────────────────
 
-gemini_client   = genai.Client(api_key=GEMINI_API_KEY_1)  # 비디오 파이프라인용
-gemini_client_2 = genai.Client(api_key=GEMINI_API_KEY_2)  # 오디오 파이프라인용
-groq_client     = Groq(api_key=GROQ_API_KEY)
-openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is not None else None
-xai_client      = OpenAI(api_key=XAI_API_KEY, base_url=XAI_BASE_URL) if XAI_API_KEY and OpenAI is not None else None
-deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL) if DEEPSEEK_API_KEY and OpenAI is not None else None
-anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
+# name -> (생성에 쓴 키 조합, 클라이언트). 키가 바뀌면 재생성한다.
+_client_cache: dict[str, tuple[str, object | None]] = {}
 
-_openai_client_key = OPENAI_API_KEY or ""
-_xai_client_key = XAI_API_KEY or ""
-_xai_base_url = XAI_BASE_URL or ""
-_deepseek_client_key = DEEPSEEK_API_KEY or ""
-_deepseek_base_url = DEEPSEEK_BASE_URL or ""
-_anthropic_client_key = ANTHROPIC_API_KEY or ""
-_gemini_client_key_1 = GEMINI_API_KEY_1 or ""
-_gemini_client_key_2 = GEMINI_API_KEY_2 or ""
+
+def _cached_client(name: str, cache_key: str, factory):
+    entry = _client_cache.get(name)
+    if entry is not None and entry[0] == cache_key:
+        return entry[1]
+    client = factory()
+    _client_cache[name] = (cache_key, client)
+    return client
+
+
+def _gemini_env_keys() -> tuple[str, str]:
+    key_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
+    key_2 = os.getenv("GOOGLE_API_KEY_2") or key_1
+    return key_1, key_2
+
+
+def get_gemini_client():
+    """비디오 파이프라인용 Gemini 클라이언트. 키가 없으면 명확한 에러."""
+    key_1, _ = _gemini_env_keys()
+    if not key_1:
+        raise RuntimeError(
+            "Gemini API 키가 없습니다. GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY) 환경변수를 "
+            "설정하세요 — 슬라이드 텍스트화/필기 분석 단계에 필요합니다."
+        )
+    return _cached_client("gemini_1", key_1, lambda: genai.Client(api_key=key_1))
+
+
+def get_gemini_client_2():
+    """오디오 파이프라인용 Gemini 클라이언트. 키가 없으면 명확한 에러."""
+    _, key_2 = _gemini_env_keys()
+    if not key_2:
+        raise RuntimeError(
+            "Gemini API 키가 없습니다. GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY, 보조로 "
+            "GOOGLE_API_KEY_2) 환경변수를 설정하세요 — 텍스트 교정/세그먼트 그룹핑 단계에 필요합니다."
+        )
+    return _cached_client("gemini_2", key_2, lambda: genai.Client(api_key=key_2))
+
+
+def get_groq_client():
+    """Groq(Whisper 전사) 클라이언트. 키가 없으면 명확한 에러."""
+    key = os.getenv("GROQ_API_KEY") or ""
+    if not key:
+        raise RuntimeError(
+            "Groq API 키가 없습니다. GROQ_API_KEY 환경변수를 설정하세요 — 전체 전사 단계에 필요합니다."
+        )
+    return _cached_client("groq", key, lambda: Groq(api_key=key))
 
 # ──────────────────────────────────────────────────────────────
 # 기본 Gemini 모델 상수
@@ -139,69 +164,80 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
 
 
 def get_openai_client():
-    global openai_client, _openai_client_key
     current_key = os.getenv("OPENAI_API_KEY") or ""
-    if current_key != _openai_client_key:
-        _openai_client_key = current_key
-        openai_client = OpenAI(api_key=current_key) if current_key and OpenAI is not None else None
-    return openai_client
+    return _cached_client(
+        "openai", current_key,
+        lambda: OpenAI(api_key=current_key) if current_key and OpenAI is not None else None,
+    )
 
 
 def get_xai_client():
-    global xai_client, _xai_client_key, _xai_base_url
     current_key = os.getenv("XAI_API_KEY") or ""
     current_base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
-    if current_key != _xai_client_key or current_base_url != _xai_base_url:
-        _xai_client_key = current_key
-        _xai_base_url = current_base_url
-        xai_client = (
+    return _cached_client(
+        "xai", f"{current_key}|{current_base_url}",
+        lambda: (
             OpenAI(api_key=current_key, base_url=current_base_url)
             if current_key and OpenAI is not None
             else None
-        )
-    return xai_client
+        ),
+    )
 
 
 def get_deepseek_client():
-    global deepseek_client, _deepseek_client_key, _deepseek_base_url
     current_key = os.getenv("DEEPSEEK_API_KEY") or ""
     current_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    if current_key != _deepseek_client_key or current_base_url != _deepseek_base_url:
-        _deepseek_client_key = current_key
-        _deepseek_base_url = current_base_url
-        deepseek_client = (
+    return _cached_client(
+        "deepseek", f"{current_key}|{current_base_url}",
+        lambda: (
             OpenAI(api_key=current_key, base_url=current_base_url)
             if current_key and OpenAI is not None
             else None
-        )
-    return deepseek_client
+        ),
+    )
 
 
 def get_anthropic_client():
-    global anthropic_client, _anthropic_client_key
     current_key = os.getenv("ANTHROPIC_API_KEY") or ""
-    if current_key != _anthropic_client_key:
-        _anthropic_client_key = current_key
-        anthropic_client = Anthropic(api_key=current_key) if current_key and Anthropic is not None else None
-    return anthropic_client
+    return _cached_client(
+        "anthropic", current_key,
+        lambda: Anthropic(api_key=current_key) if current_key and Anthropic is not None else None,
+    )
 
 
 def get_gemini_client_sequence():
-    global gemini_client, gemini_client_2, _gemini_client_key_1, _gemini_client_key_2
-    current_key_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
-    current_key_2 = os.getenv("GOOGLE_API_KEY_2") or current_key_1
-    if current_key_1 != _gemini_client_key_1:
-        _gemini_client_key_1 = current_key_1
-        gemini_client = genai.Client(api_key=current_key_1) if current_key_1 else None
-    if current_key_2 != _gemini_client_key_2:
-        _gemini_client_key_2 = current_key_2
-        gemini_client_2 = genai.Client(api_key=current_key_2) if current_key_2 else None
+    key_1, key_2 = _gemini_env_keys()
     seq = []
-    if gemini_client_2 is not None:
-        seq.append(("gemini_client_2", gemini_client_2))
-    if gemini_client is not None and gemini_client is not gemini_client_2:
-        seq.append(("gemini_client", gemini_client))
+    if key_2:
+        seq.append(("gemini_client_2", get_gemini_client_2()))
+    if key_1 and key_1 != key_2:
+        seq.append(("gemini_client", get_gemini_client()))
+    if not seq:
+        raise RuntimeError(
+            "Gemini API 키가 없습니다. GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY) 환경변수를 설정하세요."
+        )
     return seq
+
+
+# 기존 모듈 전역 클라이언트 이름 호환 (PEP 562).
+# `from .config import gemini_client` / `config.groq_client` 접근 시 이 함수가 호출되어
+# 그 시점에 클라이언트를 생성한다. 값을 모듈에 저장하지 않으므로 매 접근마다 캐시를 거친다.
+_LAZY_CLIENT_GETTERS = {
+    "gemini_client": get_gemini_client,
+    "gemini_client_2": get_gemini_client_2,
+    "groq_client": get_groq_client,
+    "openai_client": get_openai_client,
+    "xai_client": get_xai_client,
+    "deepseek_client": get_deepseek_client,
+    "anthropic_client": get_anthropic_client,
+}
+
+
+def __getattr__(name: str):
+    getter = _LAZY_CLIENT_GETTERS.get(name)
+    if getter is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getter()
 
 
 def resolve_anthropic_model(model_name: str) -> str:
