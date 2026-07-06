@@ -1,9 +1,10 @@
 import asyncio
 import uuid
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
-from app.db import AsyncSessionLocal
+from app.config import DATABASE_URL
 from app.models import ProcessingJob
 
 
@@ -26,8 +27,16 @@ async def update_job_stage(db: AsyncSession, job_id: str, stages: list[dict], cu
 
 
 def update_job_stage_sync(job_id: str, stages: list[dict], current_stage: str) -> None:
+    # 파이프라인 자식 프로세스에서 asyncio.run()으로 호출될 때마다 이벤트 루프가
+    # 새로 생기므로, 루프에 묶이는 풀 커넥션을 재사용하면 안 된다 (asyncpg
+    # InterfaceError). 매번 NullPool 엔진을 만들고 즉시 정리한다.
     async def _run():
-        async with AsyncSessionLocal() as db:
-            await update_job_stage(db, job_id, stages, current_stage)
+        engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
+        try:
+            session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with session_factory() as db:
+                await update_job_stage(db, job_id, stages, current_stage)
+        finally:
+            await engine.dispose()
 
     asyncio.run(_run())
