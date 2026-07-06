@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
     ports:
-      - "5432:5432"
+      # graphLec의 postgres가 5432를 쓰고 있어 호스트 포트는 5433으로 노출
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
