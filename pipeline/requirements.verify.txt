@@ -1,9 +1,5 @@
-# VeriLec verify 파이프라인 전용 의존성 (preprocess + verifier 경로)
-# Docker/배포는 이 파일만 설치하면 됨 (backend/Dockerfile에서 사용).
-#
-# requirements.txt는 원본 프로젝트에서 가져온 전체 목록으로, 그래프/검색/추천
-# 잔재 의존성(graphrag, lancedb, neo4j, pandas 등)이 섞여 있어 설치 대상이 아님.
-# [GRAPH-REMNANT] 정리(pipeline/main.py 참고)가 끝나면 requirements.txt는 삭제 예정.
+# VeriLec verify 파이프라인 의존성 (preprocess + verifier 경로)
+# Docker/배포는 backend/requirements.txt와 이 파일을 설치하면 됨 (backend/Dockerfile 참고).
 #
 # 시스템 의존성 (pip 아닌 apt로 설치):
 #   sudo apt install ffmpeg   (ffmpeg + ffprobe 모두 포함)

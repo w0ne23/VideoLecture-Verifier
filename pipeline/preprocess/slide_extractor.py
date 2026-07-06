@@ -2193,7 +2193,7 @@ def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
 
     - scene_start_sec : 해당 scene_index의 base 프레임 타임스탬프
     - scene_end_sec   : 다음 scene_index의 시작 시각 (마지막 scene은 영상 길이)
-    slide_classifier에서 오디오 침묵 구간과 교차할 때 이 구간을 기준으로 사용한다.
+    오디오 침묵 구간과 교차 분석할 때 이 구간을 기준으로 사용한다.
     """
     # scene_index → base 타임스탬프 수집
     scene_starts: dict[int, float] = {}

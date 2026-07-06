@@ -40,7 +40,7 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     def write_timings(current_stage: str | None = None) -> None:
         payload = {
             'stem': stem,
-            'status': 'running',
+            'status': 'done' if current_stage == 'pipeline_done' else 'running',
             'current_stage': current_stage,
             'started_at_epoch': total_start,
             'updated_at_epoch': time.time(),
