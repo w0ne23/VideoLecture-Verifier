@@ -1,34 +1,29 @@
-# ── API 키 / 환경변수 ─────────────────────────────────────────
 .env
 .env.*
 !.env.example
 
-# ── 파이프라인 출력물 ─────────────────────────────────────────
+# Runtime storage
+storage/inputs/*
+storage/results/*
+!storage/inputs/.gitkeep
+!storage/results/.gitkeep
+local_storage/
+local_storage*/
+
+# Pipeline artifacts and media
 output/
 slides/
-backup.sql
-core.*
-**/core.*
-*.json
-*.jpg
-*.html
-*.txt
-*.pdf
-*.csv
-*.txn
-*.manifest
-*.lance
-*.sqlite3
-*.parquet
-
-# ── 입력 데이터 ───────────────────────────────────────────────
 *.mp4
 *.avi
 *.mov
 *.mkv
-audio.json
+*.wav
+*.jsonl
+*.parquet
+*.lance
+*.sqlite3
 
-# ── Python ───────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -37,75 +32,22 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.eggs/
-lib/
-!**/requirements.txt
-
-# ── 가상환경 ──────────────────────────────────────────────────
 venv/
 .venv/
 env/
-.env/
 
-# LanceDB 로컬 데이터
-data/lancedb/
-
-# Microsoft GraphRAG 로컬 workspace / cache / index 산출물
-graphrag_workspaces/
-
-# ── Jupyter ───────────────────────────────────────────────────
-.ipynb_checkpoints/
-*.ipynb
-
-# ── React + Vite (Node.js) ────────────────────────────────────
-# 추후 디렉터리 구조 변경하며 중복 등 정리
-!app/frontend/**
-!**/glob-import/dir/node_modules
-.DS_Store
-.idea
-.pnpm-store
-*.cpuprofile
-*.local
+# Logs/cache
 *.log
-/.vscode/
-/docs/.vitepress/cache
-/docs/.vitepress/.temp
-/packages/vite/LICENSE
-dist
-dist-ssr
-explorations
-node_modules
-playground-temp
-temp
-TODOs.md
-.eslintcache
+logs/
+.cache/
+huggingface_cache/
 
-# ── Local Storage ─────────────────────────────────────────────
-local_storage/
-local_storage*/
-
-# ── OS ────────────────────────────────────────────────────────
+# OS/IDE
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# ── IDE ───────────────────────────────────────────────────────
 .vscode/
-.history/
 .idea/
+.history/
 *.swp
 *.swo
-
-# ── 모델 캐시 ─────────────────────────────────────────────────
-# HuggingFace 모델 파일 (용량이 크므로 제외)
-*.bin
-*.safetensors
-*.pt
-*.pth
-*.ckpt
-huggingface_cache/
-.cache/
-
-# ── 로그 ─────────────────────────────────────────────────────
-*.log
-logs/

@@ -36,7 +36,7 @@ def extract_claims_only(
     slide_ctx: dict, batch_size: int | None = None, max_workers: int | None = None,
 ) -> tuple[list[tuple], int, dict]:
     """Run claim extraction for the classified issue pipeline."""
-    from analyzer.claim_extractor import extract_claims_only as _run
+    from pipeline.verifier.claim_extractor import extract_claims_only as _run
     return _run(contexts, current_date, hint, slide_ctx, batch_size=batch_size, max_workers=max_workers)
 
 
@@ -45,5 +45,5 @@ def judge_issue_candidates_only(
     slide_ctx: dict, log_prefix: str = "",
 ) -> tuple[list[dict], list[dict], int, dict]:
     """Run the classified pipeline's first issue candidate judge."""
-    from analyzer.issue_detector import judge_issue_candidates_only as _run
+    from pipeline.verifier.issue_detector import judge_issue_candidates_only as _run
     return _run(all_claims_by_batch, current_date, hint, slide_ctx, log_prefix=log_prefix)

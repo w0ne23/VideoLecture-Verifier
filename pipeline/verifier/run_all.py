@@ -338,8 +338,8 @@ def _classified_issue_judge_worker(args_tuple):
         _setup_worker(root, env_vars, model)
         min_confidence = _issue_judge_min_confidence_for_model(model)
         os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(min_confidence)
-        from analyzer.claim_pipeline import prepare_verification as _prepare_verification
-        from analyzer.issue_detector import judge_issue_candidates_only
+        from pipeline.verifier.claim_pipeline import prepare_verification as _prepare_verification
+        from pipeline.verifier.issue_detector import judge_issue_candidates_only
 
         ctx = _prepare_verification(merged_path, current_date=current_date)
         print(f"\n  [{model}] 1차 issue judge 시작 (min_confidence={min_confidence:.2f})", flush=True)

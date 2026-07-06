@@ -693,6 +693,8 @@ def process_audio(
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .slide_classifier 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def classify_slides(
     args, textualized_path: str, meta_path: str, silences_path: str, output_dir: Path
 ) -> dict:
@@ -860,6 +862,8 @@ def save_scene_structure(args, audio_result: dict, output_dir: Path) -> dict:
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .fusion 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def fuse_preprocessed_data(
     args,
     textualized_path: str,
@@ -1429,6 +1433,8 @@ def run_verifier(
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .json_to_graph_triples 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def generate_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
     from .json_to_graph_triples import Config as TripleConfig, GraphPipeline
 
@@ -1466,6 +1472,8 @@ def generate_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .lance_ingest 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def build_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     """fused.json → 청크 임베딩 → Parquet + LanceDB (단일 테이블, stem 필터)."""
     from .lance_ingest import default_lance_root, ingest_stem_to_lance
@@ -1594,6 +1602,8 @@ def _graphrag_workspace_dir(args, output_dir: Path, stem: str) -> Path:
     return output_dir / "graphrag"
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .fused_to_graphrag_text 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def build_graphrag_index(args, output_dir: Path) -> dict:
     """fused.json → GraphRAG workspace parquet."""
     from .config import output_paths
@@ -1756,6 +1766,8 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .generate_metadata / .metadata_db 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     """G6 metadata: 강의 메타데이터 생성."""
     from .generate_metadata import generate_metadata
@@ -1808,6 +1820,8 @@ def generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     return result
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 레포에 없는 recommender/ 디렉터리 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
 def build_recommender_index(args) -> dict:
     """G7 recommender_index: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
     recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
@@ -1848,7 +1862,7 @@ def run_preprocess_pipeline(
     notify_stage,
 ) -> dict:
     """Run shared preprocessing stages used by verifier and graph workflows."""
-    from .pipelines.preprocess import run_preprocess_pipeline as _run_preprocess_pipeline
+    from .orchestration.preprocess import run_preprocess_pipeline as _run_preprocess_pipeline
 
     return _run_preprocess_pipeline(
         args,
@@ -1863,7 +1877,7 @@ def run_preprocess_pipeline(
 
 def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dict) -> Path:
     """Persist the in-memory preprocess payload so graph_upload can resume later."""
-    from .pipelines.preprocess import save_preprocess_manifest as _save_preprocess_manifest
+    from .orchestration.preprocess import save_preprocess_manifest as _save_preprocess_manifest
 
     return _save_preprocess_manifest(
         stem,
@@ -1874,7 +1888,7 @@ def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dic
 
 def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict) -> dict:
     """Restore preprocess_result from the manifest written by run_preprocess_pipeline."""
-    from .pipelines.preprocess import load_preprocess_result_from_outputs as _load_preprocess_result_from_outputs
+    from .orchestration.preprocess import load_preprocess_result_from_outputs as _load_preprocess_result_from_outputs
 
     return _load_preprocess_result_from_outputs(stem, output_dir, paths)
 
@@ -1889,7 +1903,7 @@ def run_verifier_pipeline(
     notify_stage=lambda _stage, _status: None,
 ) -> dict:
     """Build verifier input and run the verifier path."""
-    from .pipelines.verifier import run_verifier_pipeline as _run_verifier_pipeline
+    from .orchestration.verifier import run_verifier_pipeline as _run_verifier_pipeline
 
     return _run_verifier_pipeline(
         args,
@@ -1916,21 +1930,7 @@ def run_graph_pipeline(
     record_timing,
 ) -> dict:
     """Run graph/search/recommendation artifacts after shared preprocessing and verifier start."""
-    from .pipelines.graph import run_graph_pipeline as _run_graph_pipeline
-
-    return _run_graph_pipeline(
-        args,
-        preprocess_result=preprocess_result,
-        output_dir=output_dir,
-        slides_dir=slides_dir,
-        paths=paths,
-        timings=timings,
-        stage_status=stage_status,
-        notify_stage=notify_stage,
-        write_timings=write_timings,
-        record_timing=record_timing,
-        helpers=sys.modules[__name__],
-    )
+    raise RuntimeError('Graph pipeline is not included in VeriLec')
 
 def _print_generated_files(output_files: list[str]) -> None:
     print("\n  생성된 파일:")
@@ -1942,7 +1942,7 @@ def _print_generated_files(output_files: list[str]) -> None:
 
 
 def run_pipeline(args, progress_callback=None):
-    from .pipelines.workflows import run_pipeline as _run_pipeline
+    from .orchestration.workflows import run_pipeline as _run_pipeline
 
     return _run_pipeline(args, progress_callback, helpers=sys.modules[__name__])
 
