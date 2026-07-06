@@ -105,7 +105,7 @@ def analyze_audio_features(audio_path: str) -> dict:
     # 7. 템포 (말하기 속도)
     # librosa.beat.beat_track can crash the native process on some long lecture
     # inputs. It is non-critical for the pipeline, so keep it opt-in.
-    tempo_flag = os.getenv("GRAPHLEC_AUDIO_TEMPO_ENABLED", "0").strip().lower()
+    tempo_flag = os.getenv("VERILEC_AUDIO_TEMPO_ENABLED", "0").strip().lower()
     tempo_enabled = bool(tempo_flag) and tempo_flag not in {"0", "false", "no"}
     if tempo_enabled:
         print("    - 템포 추정...")

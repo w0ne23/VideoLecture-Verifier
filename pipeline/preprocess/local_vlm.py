@@ -71,39 +71,39 @@ def env_int(name: str, default: int) -> int:
 
 
 def local_vlm_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_ENABLED", False)
+    return env_bool("VERILEC_VLM_ENABLED", False)
 
 
 def local_vlm_apply_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_APPLY", False)
+    return env_bool("VERILEC_VLM_APPLY", False)
 
 
 def local_vlm_worker_count(candidate_count: int) -> int:
     if candidate_count <= 1:
         return 1
-    workers = env_int("GRAPHLEC_VLM_WORKERS", 2)
+    workers = env_int("VERILEC_VLM_WORKERS", 2)
     return max(1, min(workers, candidate_count))
 
 
 def local_vlm_batch_image_limit() -> int:
     timeline_images = local_vlm_timeline_context_images()
-    return max(1, env_int("GRAPHLEC_VLM_BATCH_IMAGES", 10), timeline_images)
+    return max(1, env_int("VERILEC_VLM_BATCH_IMAGES", 10), timeline_images)
 
 
 def local_vlm_batch_overlap_images() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_BATCH_OVERLAP_IMAGES", 0))
+    return max(0, env_int("VERILEC_VLM_BATCH_OVERLAP_IMAGES", 0))
 
 
 def local_vlm_batch_candidate_limit() -> int:
-    return max(1, env_int("GRAPHLEC_VLM_BATCH_CANDIDATES", 5))
+    return max(1, env_int("VERILEC_VLM_BATCH_CANDIDATES", 5))
 
 
 def local_vlm_timeline_context_images() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES", 10))
+    return max(0, env_int("VERILEC_VLM_TIMELINE_CONTEXT_IMAGES", 10))
 
 
 def local_vlm_auto_build_candidates_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_AUTO_BUILD_CANDIDATES", True)
+    return env_bool("VERILEC_VLM_AUTO_BUILD_CANDIDATES", True)
 
 
 def _image_b64(path: Path) -> str:
@@ -111,7 +111,7 @@ def _image_b64(path: Path) -> str:
 
 
 def _vlm_image_width() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_IMAGE_WIDTH", 768))
+    return max(0, env_int("VERILEC_VLM_IMAGE_WIDTH", 768))
 
 
 def _image_b64_for_vlm(path: Path) -> str:
@@ -994,12 +994,12 @@ def _prompt(candidate: dict[str, Any]) -> str:
 class OllamaVLMProvider:
     def __init__(self):
         self.base_url = self._next_base_url()
-        self.model = os.getenv("GRAPHLEC_OLLAMA_MODEL", "gemma3:4b")
+        self.model = os.getenv("VERILEC_OLLAMA_MODEL", "gemma3:4b")
 
     @staticmethod
     def _base_urls() -> list[str]:
-        raw = os.getenv("GRAPHLEC_OLLAMA_BASE_URLS") or os.getenv(
-            "GRAPHLEC_OLLAMA_BASE_URL",
+        raw = os.getenv("VERILEC_OLLAMA_BASE_URLS") or os.getenv(
+            "VERILEC_OLLAMA_BASE_URL",
             "http://host.docker.internal:11434",
         )
         urls = [url.strip().rstrip("/") for url in raw.split(",") if url.strip()]
@@ -1038,8 +1038,8 @@ class OllamaVLMProvider:
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("VERILEC_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("VERILEC_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1049,7 +1049,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("VERILEC_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1087,8 +1087,8 @@ class OllamaVLMProvider:
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("VERILEC_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("VERILEC_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1098,7 +1098,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("VERILEC_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1160,9 +1160,9 @@ class OllamaVLMProvider:
 
 
 def load_provider():
-    provider = os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama").strip().lower()
+    provider = os.getenv("VERILEC_VLM_PROVIDER", "ollama").strip().lower()
     if provider != "ollama":
-        raise ValueError(f"unsupported GRAPHLEC_VLM_PROVIDER={provider!r}; only 'ollama' is implemented")
+        raise ValueError(f"unsupported VERILEC_VLM_PROVIDER={provider!r}; only 'ollama' is implemented")
     return OllamaVLMProvider()
 
 
@@ -1481,8 +1481,8 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
     payload = {
         "status": "ok" if not errors else "partial",
-        "provider": os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama"),
-        "model": os.getenv("GRAPHLEC_OLLAMA_MODEL", "gemma3:4b"),
+        "provider": os.getenv("VERILEC_VLM_PROVIDER", "ollama"),
+        "model": os.getenv("VERILEC_OLLAMA_MODEL", "gemma3:4b"),
         "candidate_count": len(candidates),
         "candidate_preparation": candidate_preparation,
         "batch_count": len(batches),
@@ -1504,8 +1504,8 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
 
 def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    min_confidence = env_float("GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE", 0.65)
-    merge_min_confidence = max(min_confidence, env_float("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", 0.95))
+    min_confidence = env_float("VERILEC_VLM_APPLY_MIN_CONFIDENCE", 0.65)
+    merge_min_confidence = max(min_confidence, env_float("VERILEC_VLM_MERGE_MIN_CONFIDENCE", 0.95))
     results = review_payload.get("results", [])
 
     scenes = sorted({int(item.get("scene_index")) for item in metadata if item.get("scene_index") is not None})

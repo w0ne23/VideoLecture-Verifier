@@ -75,18 +75,18 @@ class Config:
     # ── scene base 구조 비교 ─────────────────────────────────────────
     # 반복 PPT 템플릿에서 pHash만으로 놓치는 장면 전환을 보완한다.
     BASE_HASH_THRESHOLD          = 8     # scene_base_phash ↔ current phash 거리 임계
-    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("GRAPHLEC_SCENE_BASE_MSE_THRESHOLD", "350"))
-    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("GRAPHLEC_SCENE_BASE_CHANGED_RATIO", "0.045"))
-    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("GRAPHLEC_SCENE_STRONG_CHANGED_RATIO", "0.10"))
-    CONTENT_CROP_LEFT            = float(os.getenv("GRAPHLEC_CONTENT_CROP_LEFT", "0.12"))
-    CONTENT_CROP_TOP             = float(os.getenv("GRAPHLEC_CONTENT_CROP_TOP", "0.06"))
-    CONTENT_CROP_RIGHT           = float(os.getenv("GRAPHLEC_CONTENT_CROP_RIGHT", "0.94"))
-    CONTENT_CROP_BOTTOM          = float(os.getenv("GRAPHLEC_CONTENT_CROP_BOTTOM", "0.90"))
+    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("VERILEC_SCENE_BASE_MSE_THRESHOLD", "350"))
+    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("VERILEC_SCENE_BASE_CHANGED_RATIO", "0.045"))
+    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("VERILEC_SCENE_STRONG_CHANGED_RATIO", "0.10"))
+    CONTENT_CROP_LEFT            = float(os.getenv("VERILEC_CONTENT_CROP_LEFT", "0.12"))
+    CONTENT_CROP_TOP             = float(os.getenv("VERILEC_CONTENT_CROP_TOP", "0.06"))
+    CONTENT_CROP_RIGHT           = float(os.getenv("VERILEC_CONTENT_CROP_RIGHT", "0.94"))
+    CONTENT_CROP_BOTTOM          = float(os.getenv("VERILEC_CONTENT_CROP_BOTTOM", "0.90"))
     SAME_SCENE_EDGE_PRESERVE_THRESHOLD = float(
-        os.getenv("GRAPHLEC_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
+        os.getenv("VERILEC_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
     )
     SAME_SCENE_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
+        os.getenv("VERILEC_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
     )
 
     # ── 중복 슬라이드 감지 (후처리) ──────────────────────────────────
@@ -95,38 +95,38 @@ class Config:
     #   - 실제 동일 슬라이드 쌍의 dist → 이 값보다 크게
     #   - 실제 다른 슬라이드 쌍의 dist → 이 값보다 작게
     DUPLICATE_HASH_THRESHOLD     = 30    # 초기값, 로그 확인 후 조정 필요
-    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("GRAPHLEC_DUPLICATE_DHASH_THRESHOLD", "34"))
-    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
-    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
+    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("VERILEC_DUPLICATE_DHASH_THRESHOLD", "34"))
+    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("VERILEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
+    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("VERILEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
     DUPLICATE_CONTENT_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
+        os.getenv("VERILEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
     )
     DUPLICATE_CONTENT_EDGE_OVERLAP_MIN = float(
-        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
+        os.getenv("VERILEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
     )
-    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
-    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
-    DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
-    AGENDA_TEXT_GUARD_ENABLED = os.getenv("GRAPHLEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
-    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
-    AGENDA_TEXT_XOR_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_XOR_MAX", "0.045"))
+    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("VERILEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
+    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("VERILEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
+    DUPLICATE_FULL_HIST_MIN = float(os.getenv("VERILEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
+    AGENDA_TEXT_GUARD_ENABLED = os.getenv("VERILEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
+    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("VERILEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
+    AGENDA_TEXT_XOR_MAX = float(os.getenv("VERILEC_AGENDA_TEXT_XOR_MAX", "0.045"))
     BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
+        os.getenv("VERILEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
+        os.getenv("VERILEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
+        os.getenv("VERILEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
     )
     BUILD_CANDIDATE_CONTENT_MSE_MAX = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
+        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
     )
     BUILD_CANDIDATE_CONTENT_HIST_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
+        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
     )
     BUILD_CANDIDATE_CONTENT_HASH_MAX = int(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
+        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
     )
 
     # ── 필기 감지 ────────────────────────────────────────────────────
@@ -137,23 +137,23 @@ class Config:
     # ── 안정화 판단 ──────────────────────────────────────────────────
     STABILITY_WINDOW_SEC         = 0.7
     MIN_ANNOT_DURATION_SEC       = 0.2
-    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("GRAPHLEC_SCENE_CAPTURE_DELAY_SEC", "0.8"))
-    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("GRAPHLEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
-    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("GRAPHLEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
-    SCENE_PENDING_MAX_SEC        = float(os.getenv("GRAPHLEC_SCENE_PENDING_MAX_SEC", "2.0"))
+    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("VERILEC_SCENE_CAPTURE_DELAY_SEC", "0.8"))
+    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("VERILEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
+    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("VERILEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
+    SCENE_PENDING_MAX_SEC        = float(os.getenv("VERILEC_SCENE_PENDING_MAX_SEC", "2.0"))
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
     # 전역 판정/annotation 감지는 이 해상도로 수행한다.
     # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많다.
-    DECISION_RESIZE_WIDTH        = int(os.getenv("GRAPHLEC_SLIDE_DECISION_WIDTH", "768"))
+    DECISION_RESIZE_WIDTH        = int(os.getenv("VERILEC_SLIDE_DECISION_WIDTH", "768"))
     RESIZE_WIDTH                 = 960
-    DECODE_BACKEND               = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
-    FFMPEG_HWACCEL               = os.getenv("GRAPHLEC_FFMPEG_HWACCEL", "cuda")
+    DECODE_BACKEND               = os.getenv("VERILEC_SLIDE_DECODE_BACKEND", "auto")
+    FFMPEG_HWACCEL               = os.getenv("VERILEC_FFMPEG_HWACCEL", "cuda")
     # 서버/로컬 공통 정책: 슬라이드 추출은 항상 5분 단위 청크 병렬 처리
     EXTRACT_CHUNK_SEC            = 300.0
     EXTRACT_CHUNK_OVERLAP_SEC    = 3.0
-    EXTRACT_WORKERS              = int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0"))
+    EXTRACT_WORKERS              = int(os.getenv("VERILEC_SLIDE_EXTRACT_WORKERS", "0"))
 
 
 # ──────────────────────────────────────────────
@@ -2241,8 +2241,8 @@ def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
 def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dict]:
     """Optionally run LocalVLM review after candidate generation.
 
-    GRAPHLEC_VLM_ENABLED=1 writes llm_review_results.json.
-    GRAPHLEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
+    VERILEC_VLM_ENABLED=1 writes llm_review_results.json.
+    VERILEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
     """
     try:
         from .local_vlm import (
@@ -3462,7 +3462,7 @@ if __name__ == "__main__":
         "--decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
         default=Config.DECODE_BACKEND,
-        help="프레임 디코드 백엔드 선택 (default: 환경변수 GRAPHLEC_SLIDE_DECODE_BACKEND 또는 opencv)",
+        help="프레임 디코드 백엔드 선택 (default: 환경변수 VERILEC_SLIDE_DECODE_BACKEND 또는 opencv)",
     )
     parser.add_argument(
         "--legacy",

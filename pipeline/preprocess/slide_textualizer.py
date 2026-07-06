@@ -75,10 +75,10 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    provider: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
+    provider: str = os.getenv("VERILEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
     model: str = os.getenv(
-        "GRAPHLEC_SLIDE_TEXTUALIZER_MODEL",
-        os.getenv("GRAPHLEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
+        "VERILEC_SLIDE_TEXTUALIZER_MODEL",
+        os.getenv("VERILEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
     )
     gemini_model: str = GEMINI_GENERATIVE_MODEL
     max_retries: int = 3
