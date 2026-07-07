@@ -48,6 +48,7 @@ SCHEMA_VERSION = 1
 @dataclass
 class SampleCacheConfig:
     sample_every: int = 2
+    sample_fps: float = 10.0
     resize_width: int = 768
     jpeg_quality: int = 95
     decode_backend: str = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
@@ -268,6 +269,7 @@ def create_sample_cache(
 ) -> dict:
     cfg = cfg or SampleCacheConfig()
     cfg.sample_every = max(1, int(cfg.sample_every))
+    cfg.sample_fps = max(0.1, float(cfg.sample_fps))
     cfg.resize_width = max(160, int(cfg.resize_width))
 
     video_meta = read_video_metadata(input_path)
@@ -296,7 +298,7 @@ def create_sample_cache(
         mask_previews_path.mkdir(parents=True, exist_ok=True)
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
-    sampled_fps = max(1.0, video_meta["fps"] / cfg.sample_every)
+    sampled_fps = float(cfg.sample_fps)
 
     writer = cv2.VideoWriter(
         str(video_path),
@@ -358,11 +360,11 @@ def create_sample_cache(
         frames.append(frame_record)
 
     log.info(
-        "sample cache start: input=%s fps=%.2f frames=%s sample_every=%s size=%sx%s",
+        "sample cache start: input=%s fps=%.2f frames=%s sample_fps=%s size=%sx%s",
         input_path,
         video_meta["fps"],
         video_meta["frame_count"],
-        cfg.sample_every,
+        cfg.sample_fps,
         cfg.resize_width,
         cached_height,
     )
@@ -372,10 +374,11 @@ def create_sample_cache(
         fps=float(video_meta["fps"]),
         width=int(video_meta["width"]),
         height=int(video_meta["height"]),
-        sample_every=cfg.sample_every,
+        sample_every=1,
         decode_backend=cfg.decode_backend,
         output_width=cfg.resize_width,
         output_height=cached_height,
+        sample_fps=cfg.sample_fps,
     )
     log.info("sample cache decode backend: %s", active_backend)
 
@@ -521,6 +524,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", "-i", required=True, help="Input .mp4 path")
     parser.add_argument("--output", "-o", required=True, help="Output cache directory")
     parser.add_argument("--sample-every", type=int, default=SampleCacheConfig.sample_every)
+    parser.add_argument("--sample-fps", type=float, default=SampleCacheConfig.sample_fps)
     parser.add_argument("--resize-width", type=int, default=SampleCacheConfig.resize_width)
     parser.add_argument(
         "--decode-backend",
@@ -548,6 +552,7 @@ def main():
 
     cfg = SampleCacheConfig(
         sample_every=args.sample_every,
+        sample_fps=args.sample_fps,
         resize_width=args.resize_width,
         decode_backend=args.decode_backend,
         person_mask_batch_size=args.person_mask_batch_size,

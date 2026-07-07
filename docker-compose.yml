@@ -6,28 +6,57 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
     ports:
-      # graphLec의 postgres가 5432를 쓰고 있어 호스트 포트는 5433으로 노출
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d verilec"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+asyncpg://user:pass@db/verilec
       LOCAL_STORAGE_DIR: /app/storage
       PIPELINE_ROOT: /app
+
+      # GPU 1번만 컨테이너에 노출
+      NVIDIA_VISIBLE_DEVICES: "1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+
+      # VeriLec / GraphLec GPU decode 설정
+      GRAPHLEC_SLIDE_DECODE_BACKEND: ffmpeg-cuda
+      GRAPHLEC_GPU_ONLY: "0"
+
+      # Ultralytics / matplotlib 경고 방지용
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
+      MPLCONFIGDIR: /tmp/matplotlib
+
     volumes:
       - ./storage:/app/storage
+      - ./input:/app/input
+
     ports:
-      # graphLec 백엔드가 호스트 8000을 쓰고 있어 8020으로 노출
-      - "8020:8000"
+      - "8003:8000"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
 
 volumes:
   postgres_data:
