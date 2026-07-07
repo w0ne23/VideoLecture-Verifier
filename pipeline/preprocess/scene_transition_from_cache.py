@@ -18,10 +18,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import shutil
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 try:
     from .sample_cache import iter_sample_cache, load_sample_cache
@@ -340,24 +345,100 @@ def prune_transition_middle_frames(
     return kept, pruned, review_candidates
 
 
-def run_cache_probe(
-    cache_dir: str,
-    output_dir: str,
-    cfg: ProbeConfig,
-    regions_path: str | None = None,
-    region_guard_sec: float = 1.0,
-    prune_bursts: bool = True,
-    transient_burst_gap_sec: float = 3.0,
-    transient_burst_min_extra_scenes: int = 2,
-    save_person_mask_previews: bool = False,
-) -> list[dict]:
-    manifest = load_sample_cache(cache_dir)
-    sampled_fps = float(manifest["cache"]["sampled_fps"])
-    sample_count = int(manifest["cache"]["sample_count"])
-    guard_samples = max(0, int(round(region_guard_sec * sampled_fps))) if regions_path else 0
-    slide_regions = _load_slide_regions(regions_path, guard_samples=guard_samples)
+def _iter_sample_cache_range(
+    cache_dir: str | Path,
+    start_pos: int,
+    end_pos: int,
+):
+    """Yield sampled cache frames by 0-based video positions [start_pos, end_pos).
 
-    out_dir = Path(output_dir)
+    sampled_manifest.json keeps sample_index as 1-based, while OpenCV frame
+    seeking is 0-based. Keep that convention explicit here to avoid off-by-one
+    errors in the overlap probe.
+    """
+    cache_path = Path(cache_dir)
+    manifest = load_sample_cache(cache_path)
+    frames = list(manifest.get("frames", []))
+    sample_count = len(frames)
+    start_pos = max(0, min(int(start_pos), sample_count))
+    end_pos = max(start_pos, min(int(end_pos), sample_count))
+
+    video_path = cache_path / manifest["video_filename"]
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_pos)
+        for pos in range(start_pos, end_pos):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                raise RuntimeError(f"Sample cache video ended early: {video_path} pos={pos}")
+            yield frames[pos], frame
+    finally:
+        cap.release()
+
+
+def _probe_ranges(sample_count: int, chunk_samples: int, guard_samples: int) -> list[dict]:
+    """Build 1-based core sample ranges with 0-based/exclusive read ranges."""
+    sample_count = max(0, int(sample_count))
+    chunk_samples = max(1, int(chunk_samples))
+    guard_samples = max(0, int(guard_samples))
+    ranges: list[dict] = []
+    chunk_index = 0
+    core_start = 1
+    while core_start <= sample_count:
+        core_end = min(sample_count, core_start + chunk_samples - 1)
+        read_start_sample = max(1, core_start - guard_samples)
+        read_end_sample = min(sample_count, core_end + guard_samples)
+        ranges.append({
+            "chunk_index": chunk_index,
+            "read_start_pos": read_start_sample - 1,
+            "read_end_pos": read_end_sample,
+            "read_start_sample_index": read_start_sample,
+            "read_end_sample_index": read_end_sample,
+            "core_start_sample_index": core_start,
+            "core_end_sample_index": core_end,
+        })
+        chunk_index += 1
+        core_start = core_end + 1
+    return ranges
+
+
+def _record_sample_index(record: dict) -> int:
+    try:
+        return int(record.get("sample_index", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_frame_no(record: dict) -> int:
+    for key in ("base_frame_no", "frame_no", "scene_start_frame_no"):
+        try:
+            value = int(record.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _record_in_core(record: dict, core_start: int, core_end: int) -> bool:
+    sample_index = _record_sample_index(record)
+    return int(core_start) <= sample_index <= int(core_end)
+
+
+def _record_sort_key(record: dict) -> tuple[float, int, int]:
+    timestamp = float(
+        record.get(
+            "scene_start_sec",
+            record.get("base_timestamp_sec", record.get("timestamp_sec", 0.0)),
+        )
+        or 0.0
+    )
+    return timestamp, _record_frame_no(record), _record_sample_index(record)
+
+
+def _clear_scene_probe_output(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("scene_*.jpg"):
         stale.unlink(missing_ok=True)
@@ -365,6 +446,104 @@ def run_cache_probe(
     if preview_dir.exists():
         for stale in preview_dir.glob("scene_*_person_mask_sample_*.jpg"):
             stale.unlink(missing_ok=True)
+
+
+def _copy_record_scene_assets(record: dict, new_index: int, final_out_dir: Path) -> dict | None:
+    source_dir_raw = record.get("_parallel_source_output_dir")
+    old_filename = record.get("filename")
+    if not source_dir_raw or not old_filename:
+        log.warning("parallel scene record missing source path: %s", record)
+        return None
+
+    source_dir = Path(str(source_dir_raw))
+    src_path = source_dir / str(old_filename)
+    if not src_path.exists():
+        log.warning("parallel scene image missing: %s", src_path)
+        return None
+
+    new_filename = f"scene_{new_index:03d}_base.jpg"
+    dst_path = final_out_dir / new_filename
+    shutil.copy2(src_path, dst_path)
+
+    clean = {k: v for k, v in record.items() if not str(k).startswith("_parallel_")}
+    clean["scene_index"] = new_index
+    clean["filename"] = new_filename
+
+    preview_filename = clean.get("person_mask_preview_filename")
+    if preview_filename:
+        preview_src = source_dir / str(preview_filename)
+        if preview_src.exists():
+            preview_dir = final_out_dir / "person_mask_previews"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            sample_index = _record_sample_index(clean)
+            preview_new = f"scene_{new_index:03d}_person_mask_sample_{sample_index:06d}.jpg"
+            shutil.copy2(preview_src, preview_dir / preview_new)
+            clean["person_mask_preview_filename"] = f"person_mask_previews/{preview_new}"
+        else:
+            clean.pop("person_mask_preview_filename", None)
+
+    return clean
+
+
+def _dedupe_parallel_records(records: list[dict]) -> list[dict]:
+    """Suppress exact or near-exact duplicates introduced by overlap reads."""
+    deduped: list[dict] = []
+    seen_frame_nos: set[int] = set()
+    seen_samples: set[int] = set()
+    for record in sorted(records, key=_record_sort_key):
+        frame_no = _record_frame_no(record)
+        sample_index = _record_sample_index(record)
+        if frame_no > 0 and frame_no in seen_frame_nos:
+            continue
+        if sample_index > 0 and sample_index in seen_samples:
+            continue
+
+        timestamp, _, _ = _record_sort_key(record)
+        duplicate_nearby = False
+        for prev in reversed(deduped[-5:]):
+            prev_t, _, _ = _record_sort_key(prev)
+            if abs(timestamp - prev_t) > 0.5:
+                continue
+            if _same_region(prev, record) and abs(_record_frame_no(prev) - frame_no) <= 5:
+                duplicate_nearby = True
+                break
+        if duplicate_nearby:
+            continue
+
+        if frame_no > 0:
+            seen_frame_nos.add(frame_no)
+        if sample_index > 0:
+            seen_samples.add(sample_index)
+        deduped.append(record)
+    return deduped
+
+
+def _run_cache_probe_iter(
+    cache_dir: str,
+    output_dir: str,
+    cfg: ProbeConfig,
+    *,
+    frame_iter,
+    manifest: dict,
+    slide_regions: list[dict],
+    regions_path: str | None = None,
+    region_guard_sec: float = 1.0,
+    prune_bursts: bool = True,
+    transient_burst_gap_sec: float = 3.0,
+    transient_burst_min_extra_scenes: int = 2,
+    save_person_mask_previews: bool = False,
+    clear_output: bool = True,
+    write_json: bool = True,
+    log_prefix: str = "",
+) -> dict:
+    sampled_fps = float(manifest["cache"]["sampled_fps"])
+    sample_count = int(manifest["cache"].get("sample_count") or len(manifest.get("frames", [])))
+
+    out_dir = Path(output_dir)
+    if clear_output:
+        _clear_scene_probe_output(out_dir)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     stable_frames_required = max(2, int(cfg.delay_sec * sampled_fps))
     pending_max_frames = max(stable_frames_required, int(cfg.max_pending_sec * sampled_fps))
@@ -386,14 +565,15 @@ def run_cache_probe(
     region_pos = 0
 
     log.info(
-        "cache scene probe start: cache=%s samples=%s sampled_fps=%.3f slide_regions=%s",
+        "%scache scene probe start: cache=%s samples=%s sampled_fps=%.3f slide_regions=%s",
+        log_prefix,
         cache_dir,
         sample_count,
         sampled_fps,
         len(slide_regions) if slide_regions else "all",
     )
 
-    for frame_info, frame in iter_sample_cache(cache_dir):
+    for frame_info, frame in frame_iter:
         processed += 1
         sample_index = int(frame_info["sample_index"])
         region = None
@@ -403,7 +583,8 @@ def run_cache_probe(
                 skipped += 1
                 if active_region is not None:
                     log.info(
-                        "[region %03d] leave slide region @ %.3fs frame=%s",
+                        "%s[region %03d] leave slide region @ %.3fs frame=%s",
+                        log_prefix,
                         int(active_region["segment_index"]),
                         float(frame_info["timestamp_sec"]),
                         int(frame_info["frame_no"]),
@@ -427,7 +608,8 @@ def run_cache_probe(
                 prev_hash = None
                 pending = None
                 log.info(
-                    "[region %03d] enter slide region %.3f-%.3fs",
+                    "%s[region %03d] enter slide region %.3f-%.3fs",
+                    log_prefix,
                     int(region["segment_index"]),
                     float(region["start_sec"]),
                     float(region["end_sec"]),
@@ -450,7 +632,8 @@ def run_cache_probe(
                 and is_duplicate_scene(last_saved_base_decision, decision, cfg, last_saved_base_mask, person_mask)
             ):
                 log.info(
-                    "[suppress] duplicate region first frame @ %.3fs frame=%s",
+                    "%s[suppress] duplicate region first frame @ %.3fs frame=%s",
+                    log_prefix,
                     float(frame_info["timestamp_sec"]),
                     int(frame_info["frame_no"]),
                 )
@@ -535,7 +718,8 @@ def run_cache_probe(
                     )
                 ):
                     log.info(
-                        "[suppress] duplicate pending scene @ %.3fs frame=%s",
+                        "%s[suppress] duplicate pending scene @ %.3fs frame=%s",
+                        log_prefix,
                         float(pending["frame_info"]["timestamp_sec"]),
                         int(pending["frame_info"]["frame_no"]),
                     )
@@ -626,7 +810,8 @@ def run_cache_probe(
                 "details": details,
             }
             log.info(
-                "[pending] %s @ %.3fs frame=%s",
+                "%s[pending] %s @ %.3fs frame=%s",
+                log_prefix,
                 reason,
                 float(frame_info["timestamp_sec"]),
                 int(frame_info["frame_no"]),
@@ -639,7 +824,7 @@ def run_cache_probe(
 
         if processed % 1000 == 0:
             pct = (processed / sample_count * 100.0) if sample_count > 0 else 0.0
-            log.info("processed=%s/%s %.1f%%", processed, sample_count, pct)
+            log.info("%sprocessed=%s/%s %.1f%%", log_prefix, processed, sample_count, pct)
 
     if pending is not None:
         force_save_presence_change = str(pending.get("reason", "")).startswith("person_")
@@ -677,6 +862,10 @@ def run_cache_probe(
             record["scene_start_sec"] = float(pending["start_frame_info"]["timestamp_sec"])
             record["base_frame_no"] = int(pending["frame_info"]["frame_no"])
             record["base_timestamp_sec"] = float(pending["frame_info"]["timestamp_sec"])
+            if active_region is not None:
+                record["region_segment_index"] = int(active_region["segment_index"])
+                record["region_start_sec"] = float(active_region["start_sec"])
+                record["region_end_sec"] = float(active_region["end_sec"])
             records.append(record)
             last_saved_base_decision = pending["decision"].copy()
             last_saved_base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
@@ -717,12 +906,333 @@ def run_cache_probe(
         "scene_count": len(records),
         "scenes": records,
     }
+    if write_json:
+        with open(out_dir / "scene_transitions.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    log.info("%scache scene probe done: scenes=%s output=%s", log_prefix, len(records), out_dir)
+    return {
+        "records": records,
+        "payload": payload,
+        "processed": processed,
+        "skipped": skipped,
+        "pruned_records": pruned_records,
+        "review_candidates": review_candidates,
+    }
+
+
+def run_cache_probe(
+    cache_dir: str,
+    output_dir: str,
+    cfg: ProbeConfig,
+    regions_path: str | None = None,
+    region_guard_sec: float = 1.0,
+    prune_bursts: bool = True,
+    transient_burst_gap_sec: float = 3.0,
+    transient_burst_min_extra_scenes: int = 2,
+    save_person_mask_previews: bool = False,
+) -> list[dict]:
+    manifest = load_sample_cache(cache_dir)
+    sampled_fps = float(manifest["cache"]["sampled_fps"])
+    guard_samples = max(0, int(round(region_guard_sec * sampled_fps))) if regions_path else 0
+    slide_regions = _load_slide_regions(regions_path, guard_samples=guard_samples)
+    result = _run_cache_probe_iter(
+        cache_dir,
+        output_dir,
+        cfg,
+        frame_iter=iter_sample_cache(cache_dir),
+        manifest=manifest,
+        slide_regions=slide_regions,
+        regions_path=regions_path,
+        region_guard_sec=region_guard_sec,
+        prune_bursts=prune_bursts,
+        transient_burst_gap_sec=transient_burst_gap_sec,
+        transient_burst_min_extra_scenes=transient_burst_min_extra_scenes,
+        save_person_mask_previews=save_person_mask_previews,
+        clear_output=True,
+        write_json=True,
+    )
+    return result["records"]
+
+
+def _run_cache_probe_range_worker(
+    cache_dir: str,
+    output_dir: str,
+    cfg_payload: dict,
+    range_spec: dict,
+    regions_path: str | None,
+    region_guard_sec: float,
+    transient_burst_gap_sec: float,
+    transient_burst_min_extra_scenes: int,
+    save_person_mask_previews: bool,
+) -> dict:
+    started_at = time.perf_counter()
+    cfg = ProbeConfig(**cfg_payload)
+    manifest = load_sample_cache(cache_dir)
+    sampled_fps = float(manifest["cache"]["sampled_fps"])
+    region_guard_samples = max(0, int(round(region_guard_sec * sampled_fps))) if regions_path else 0
+    slide_regions = _load_slide_regions(regions_path, guard_samples=region_guard_samples)
+
+    chunk_index = int(range_spec["chunk_index"])
+    log_prefix = f"[scene chunk {chunk_index + 1:03d}] "
+    result = _run_cache_probe_iter(
+        cache_dir,
+        output_dir,
+        cfg,
+        frame_iter=_iter_sample_cache_range(
+            cache_dir,
+            int(range_spec["read_start_pos"]),
+            int(range_spec["read_end_pos"]),
+        ),
+        manifest=manifest,
+        slide_regions=slide_regions,
+        regions_path=regions_path,
+        region_guard_sec=region_guard_sec,
+        prune_bursts=False,
+        transient_burst_gap_sec=transient_burst_gap_sec,
+        transient_burst_min_extra_scenes=transient_burst_min_extra_scenes,
+        save_person_mask_previews=save_person_mask_previews,
+        clear_output=True,
+        write_json=True,
+        log_prefix=log_prefix,
+    )
+
+    core_start = int(range_spec["core_start_sample_index"])
+    core_end = int(range_spec["core_end_sample_index"])
+    core_records: list[dict] = []
+    for record in result["records"]:
+        if not _record_in_core(record, core_start, core_end):
+            continue
+        item = dict(record)
+        item["_parallel_chunk_index"] = chunk_index
+        item["_parallel_source_output_dir"] = str(output_dir)
+        core_records.append(item)
+
+    return {
+        "chunk_index": chunk_index,
+        "range": range_spec,
+        "output_dir": str(output_dir),
+        "records": core_records,
+        "raw_scene_count": len(result["records"]),
+        "processed": int(result["processed"]),
+        "skipped": int(result["skipped"]),
+        "elapsed": time.perf_counter() - started_at,
+    }
+
+
+def run_cache_probe_parallel(
+    cache_dir: str,
+    output_dir: str,
+    cfg: ProbeConfig,
+    regions_path: str | None = None,
+    region_guard_sec: float = 1.0,
+    prune_bursts: bool = True,
+    transient_burst_gap_sec: float = 3.0,
+    transient_burst_min_extra_scenes: int = 2,
+    save_person_mask_previews: bool = False,
+    *,
+    workers: int | None = None,
+    chunk_samples: int | None = None,
+    guard_samples: int | None = None,
+) -> list[dict]:
+    manifest = load_sample_cache(cache_dir)
+    sampled_fps = float(manifest["cache"]["sampled_fps"])
+    sample_count = int(manifest["cache"].get("sample_count") or len(manifest.get("frames", [])))
+
+    requested_workers = int(workers if workers is not None else os.getenv("GRAPHLEC_SCENE_PROBE_WORKERS", "1"))
+    chunk_samples = int(chunk_samples if chunk_samples is not None else os.getenv("GRAPHLEC_SCENE_PROBE_CHUNK_SAMPLES", "2000"))
+    guard_samples = int(guard_samples if guard_samples is not None else os.getenv("GRAPHLEC_SCENE_PROBE_GUARD_SAMPLES", "100"))
+    keep_parts = os.getenv("GRAPHLEC_SCENE_PROBE_KEEP_PARTS", "0") == "1"
+
+    chunk_samples = max(1, chunk_samples)
+    guard_samples = max(0, guard_samples)
+    ranges = _probe_ranges(sample_count, chunk_samples, guard_samples)
+    if requested_workers <= 1 or len(ranges) <= 1:
+        log.info(
+            "cache scene probe parallel skipped: workers=%s chunks=%s sample_count=%s chunk_samples=%s",
+            requested_workers,
+            len(ranges),
+            sample_count,
+            chunk_samples,
+        )
+        return run_cache_probe(
+            cache_dir,
+            output_dir,
+            cfg,
+            regions_path=regions_path,
+            region_guard_sec=region_guard_sec,
+            prune_bursts=prune_bursts,
+            transient_burst_gap_sec=transient_burst_gap_sec,
+            transient_burst_min_extra_scenes=transient_burst_min_extra_scenes,
+            save_person_mask_previews=save_person_mask_previews,
+        )
+
+    worker_count = max(1, min(requested_workers, len(ranges)))
+    out_dir = Path(output_dir)
+    _clear_scene_probe_output(out_dir)
+    parts_dir = out_dir / "_parallel_probe"
+    if parts_dir.exists():
+        shutil.rmtree(parts_dir)
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    region_guard_samples = max(0, int(round(region_guard_sec * sampled_fps))) if regions_path else 0
+    slide_regions = _load_slide_regions(regions_path, guard_samples=region_guard_samples)
+
+    log.info(
+        "cache scene probe parallel start: samples=%s sampled_fps=%.3f workers=%s chunks=%s chunk_samples=%s guard_samples=%s",
+        sample_count,
+        sampled_fps,
+        worker_count,
+        len(ranges),
+        chunk_samples,
+        guard_samples,
+    )
+
+    started_at = time.perf_counter()
+    cfg_payload = asdict(cfg)
+    result_by_index: dict[int, dict] = {}
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {}
+        for spec in ranges:
+            chunk_index = int(spec["chunk_index"])
+            chunk_out_dir = parts_dir / f"chunk_{chunk_index:03d}"
+            future = executor.submit(
+                _run_cache_probe_range_worker,
+                str(cache_dir),
+                str(chunk_out_dir),
+                cfg_payload,
+                spec,
+                regions_path,
+                region_guard_sec,
+                transient_burst_gap_sec,
+                transient_burst_min_extra_scenes,
+                save_person_mask_previews,
+            )
+            future_map[future] = spec
+            log.info(
+                "  [scene probe chunk submit %s/%s] read=%s~%s core=%s~%s",
+                chunk_index + 1,
+                len(ranges),
+                int(spec["read_start_sample_index"]),
+                int(spec["read_end_sample_index"]),
+                int(spec["core_start_sample_index"]),
+                int(spec["core_end_sample_index"]),
+            )
+
+        completed = 0
+        for future in as_completed(future_map):
+            spec = future_map[future]
+            result = future.result()
+            chunk_index = int(result["chunk_index"])
+            result_by_index[chunk_index] = result
+            completed += 1
+            log.info(
+                "  [scene probe chunk done %s/%s | idx=%s] core_records=%s raw_scenes=%s processed=%s skipped=%s elapsed=%.1fs",
+                completed,
+                len(ranges),
+                chunk_index + 1,
+                len(result.get("records", [])),
+                int(result.get("raw_scene_count", 0)),
+                int(result.get("processed", 0)),
+                int(result.get("skipped", 0)),
+                float(result.get("elapsed", 0.0)),
+            )
+
+    ordered_results = [result_by_index[idx] for idx in sorted(result_by_index)]
+    candidate_records: list[dict] = []
+    for result in ordered_results:
+        spec = result["range"]
+        core_start = int(spec["core_start_sample_index"])
+        core_end = int(spec["core_end_sample_index"])
+        for record in result.get("records", []):
+            if _record_in_core(record, core_start, core_end):
+                candidate_records.append(record)
+
+    candidate_records = _dedupe_parallel_records(candidate_records)
+    final_records: list[dict] = []
+    for new_index, record in enumerate(candidate_records, start=1):
+        copied = _copy_record_scene_assets(record, new_index, out_dir)
+        if copied is not None:
+            final_records.append(copied)
+
+    pruned_records: list[dict] = []
+    review_candidates: list[dict] = []
+    if prune_bursts:
+        final_records, pruned_records, review_candidates = prune_transition_middle_frames(
+            final_records,
+            out_dir,
+            max_gap_sec=max(0.0, transient_burst_gap_sec),
+            min_cluster_scenes=max(3, transient_burst_min_extra_scenes + 1),
+        )
+
+    processed = sum(int(result.get("processed", 0)) for result in ordered_results)
+    skipped = sum(int(result.get("skipped", 0)) for result in ordered_results)
+    payload = {
+        "cache_dir": str(cache_dir),
+        "source_input": manifest.get("input_path"),
+        "regions_path": str(regions_path) if regions_path else None,
+        "region_guard_sec": region_guard_sec if regions_path else 0.0,
+        "postprocess": {
+            "detect_transition_clusters": prune_bursts,
+            "prune_transition_middle_frames": False,
+            "transition_candidates_are_vlm_review_only": True,
+            "transient_burst_gap_sec": transient_burst_gap_sec,
+            "transition_min_cluster_scenes": max(3, transient_burst_min_extra_scenes + 1),
+            "pruned_count": len(pruned_records),
+            "pruned_records": pruned_records,
+            "review_candidate_count": len(review_candidates),
+            "review_candidates": review_candidates,
+            "person_mask_scene_previews": save_person_mask_previews,
+        },
+        "config": asdict(cfg),
+        "cache": manifest.get("cache"),
+        "source": manifest.get("source"),
+        "slide_regions": slide_regions,
+        "processed_samples": processed,
+        "skipped_samples": skipped,
+        "scene_count": len(final_records),
+        "parallel": {
+            "enabled": True,
+            "mode": "sample_overlap",
+            "workers": worker_count,
+            "requested_workers": requested_workers,
+            "chunk_samples": chunk_samples,
+            "guard_samples": guard_samples,
+            "chunk_count": len(ranges),
+            "keep_parts": keep_parts,
+            "elapsed_sec": round(time.perf_counter() - started_at, 3),
+            "chunks": [
+                {
+                    "chunk_index": int(result["chunk_index"]),
+                    "read_start_sample_index": int(result["range"]["read_start_sample_index"]),
+                    "read_end_sample_index": int(result["range"]["read_end_sample_index"]),
+                    "core_start_sample_index": int(result["range"]["core_start_sample_index"]),
+                    "core_end_sample_index": int(result["range"]["core_end_sample_index"]),
+                    "core_scene_count": len(result.get("records", [])),
+                    "raw_scene_count": int(result.get("raw_scene_count", 0)),
+                    "processed": int(result.get("processed", 0)),
+                    "skipped": int(result.get("skipped", 0)),
+                    "elapsed_sec": round(float(result.get("elapsed", 0.0)), 3),
+                }
+                for result in ordered_results
+            ],
+        },
+        "scenes": final_records,
+    }
     with open(out_dir / "scene_transitions.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    log.info("cache scene probe done: scenes=%s output=%s", len(records), out_dir)
-    return records
+    if not keep_parts:
+        shutil.rmtree(parts_dir, ignore_errors=True)
 
+    log.info(
+        "cache scene probe parallel done: scenes=%s candidates=%s output=%s elapsed=%.1fs",
+        len(final_records),
+        len(candidate_records),
+        out_dir,
+        time.perf_counter() - started_at,
+    )
+    return final_records
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Detect scene transitions from a sampled frame cache.")
@@ -767,7 +1277,7 @@ def main():
         fine_diff_threshold=max(1, args.fine_diff_threshold),
         subtle_changed_ratio=max(0.0, args.subtle_changed_ratio),
     )
-    run_cache_probe(
+    run_cache_probe_parallel(
         args.cache,
         args.output,
         cfg,

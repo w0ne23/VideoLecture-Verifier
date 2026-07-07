@@ -37,7 +37,7 @@ import tempfile
 from PIL import Image
 from pathlib import Path
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import argparse
 import json
 import logging
@@ -1896,16 +1896,16 @@ def _extract_slides_staged(
 
     try:
         from .annotation_from_cache import detect_annotations
-        from .materialize_from_cache import materialize_frames
+        from .materialize_from_cache import materialize_frames, materialize_frames_from_sample_cache
         from .sample_cache import SampleCacheConfig, create_sample_cache_chunked
-        from .scene_transition_from_cache import run_cache_probe
+        from .scene_transition_from_cache import run_cache_probe_parallel
         from .scene_transition_probe import ProbeConfig
         from .timeline_region_classifier import classify_regions
     except ImportError:  # pragma: no cover - direct script execution fallback
         from annotation_from_cache import detect_annotations
-        from materialize_from_cache import materialize_frames
+        from materialize_from_cache import materialize_frames, materialize_frames_from_sample_cache
         from sample_cache import SampleCacheConfig, create_sample_cache_chunked
-        from scene_transition_from_cache import run_cache_probe
+        from scene_transition_from_cache import run_cache_probe_parallel
         from scene_transition_probe import ProbeConfig
         from timeline_region_classifier import classify_regions
 
@@ -1944,7 +1944,7 @@ def _extract_slides_staged(
 
     log.info("  Step 2: slide region scene/base 추출")
     step_t0 = time.perf_counter()
-    run_cache_probe(
+    run_cache_probe_parallel(
         str(cache_dir),
         str(scenes_dir),
         ProbeConfig(),
@@ -1961,14 +1961,28 @@ def _extract_slides_staged(
 
     log.info("  Step 4A: LocalVLM review용 임시 frame materialize")
     step_t0 = time.perf_counter()
-    materialize_frames(
-        input_path,
-        str(scenes_path),
-        str(annotations_path),
-        str(review_dir),
-        regions_path=str(regions_path),
-        decode_backend=decode_backend or Config.DECODE_BACKEND,
-    )
+    try:
+        materialize_frames_from_sample_cache(
+            str(cache_dir),
+            str(scenes_path),
+            str(annotations_path),
+            str(review_dir),
+            regions_path=str(regions_path),
+        )
+    except Exception as exc:
+        log.warning(
+            "Step 4A sample-cache materialize failed; falling back to original video materialize: %s",
+            exc,
+            exc_info=True,
+        )
+        materialize_frames(
+            input_path,
+            str(scenes_path),
+            str(annotations_path),
+            str(review_dir),
+            regions_path=str(regions_path),
+            decode_backend=decode_backend or Config.DECODE_BACKEND,
+        )
     log.info("  Step 4A done: LocalVLM review용 임시 frame materialize elapsed=%.1fs", _elapsed(step_t0))
 
     step_t0 = time.perf_counter()
@@ -2816,7 +2830,492 @@ def limit_vlm_review_candidate_images(candidate: dict) -> dict:
 # ──────────────────────────────────────────────
 # 후처리: 같은 slide(재등장) 그룹 표시
 # ──────────────────────────────────────────────
+def _duplicate_parallel_candidate_score(candidate: dict) -> tuple:
+    metrics = candidate.get("metrics", {})
+    if candidate.get("candidate_type") == "same_slide_duplicate":
+        return (
+            int(metrics.get("content_phash", 9999)),
+            int(metrics.get("phash", 9999)),
+            float(metrics.get("content_changed", 1.0)),
+        )
+    return (
+        -float(metrics.get("prev_edge_preserve", 0.0)),
+        float(metrics.get("content_changed", 1.0)),
+        int(metrics.get("content_phash", 9999)),
+    )
+
+
+def _duplicate_parallel_pair_worker(args: tuple) -> dict:
+    i, j, la, lb, idx_a, idx_b, rep_a, rep_b, cfg = args
+    should_compare, prefilter_metrics = duplicate_pair_prefilter(rep_a, rep_b, cfg)
+    if not should_compare:
+        return {
+            "i": i,
+            "j": j,
+            "la": la,
+            "lb": lb,
+            "idx_a": idx_a,
+            "idx_b": idx_b,
+            "should_compare": False,
+            "prefilter_metrics": prefilter_metrics,
+            "is_duplicate": False,
+            "metrics": prefilter_metrics,
+        }
+
+    is_dup, metrics = duplicate_pair_decision(rep_a, rep_b, cfg)
+    return {
+        "i": i,
+        "j": j,
+        "la": la,
+        "lb": lb,
+        "idx_a": idx_a,
+        "idx_b": idx_b,
+        "should_compare": True,
+        "prefilter_metrics": prefilter_metrics,
+        "is_duplicate": bool(is_dup),
+        "metrics": metrics,
+    }
+
+
 def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
+    # Parallel Step 4A visual duplicate grouping.
+    #
+    # This replaces only the slow all-pairs duplicate comparison with a threaded
+    # implementation. The old implementation is preserved as
+    # mark_visual_duplicates_sequential() and is used automatically on failure.
+
+    if os.getenv("GRAPHLEC_DUPLICATE_PARALLEL", "1") == "0":
+        return mark_visual_duplicates_sequential(metadata, out_path, cfg)
+
+    from collections import defaultdict
+    import time
+
+    started_at = time.perf_counter()
+    workers = max(1, int(os.getenv("GRAPHLEC_DUPLICATE_WORKERS", "8")))
+    log_pairs = os.getenv("GRAPHLEC_DUPLICATE_LOG_PAIRS", "0") == "1"
+
+    try:
+        cache_dir = out_path.parent / "sample_cache"
+
+        def _load_metadata_person_mask(item: dict) -> np.ndarray | None:
+            filename = item.get("person_mask_filename")
+            if not filename:
+                return None
+            path = cache_dir / str(filename)
+            if not path.exists():
+                return None
+            try:
+                return np.load(path, allow_pickle=False).astype(bool)
+            except Exception:
+                log.warning("  [중복 감지] person mask 로드 실패: %s", path, exc_info=True)
+                return None
+
+        def _metadata_presence_ratio(item: dict | None) -> float:
+            if not item:
+                return 0.0
+            try:
+                ratio = float(item.get("person_presence_ratio", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                ratio = 0.0
+            if ratio > 0.0:
+                return ratio
+            filename = item.get("person_presence_mask_filename")
+            if not filename:
+                return 0.0
+            path = cache_dir / str(filename)
+            if not path.exists():
+                return 0.0
+            try:
+                mask = np.load(path, allow_pickle=False).astype(bool)
+                return float(np.mean(mask))
+            except Exception:
+                log.warning("  [중복 감지] person presence mask 로드 실패: %s", path, exc_info=True)
+                return 0.0
+
+        groups: dict[int, list] = defaultdict(list)
+        for m in metadata:
+            groups[int(m["scene_index"])].append(m)
+
+        pool: dict[str, tuple[int, str, dict]] = {}
+        base_pool: dict[int, str] = {}
+        base_items: dict[int, dict] = {}
+
+        for idx in sorted(groups.keys()):
+            frames = groups[idx]
+            base_list = [f for f in frames if f.get("capture_type") == "base"]
+            annot_list = [f for f in frames if f.get("capture_type") == "annotation"]
+
+            if base_list:
+                pool[f"base{idx}"] = (idx, base_list[0]["filename"], base_list[0])
+                base_pool[idx] = base_list[0]["filename"]
+                base_items[idx] = base_list[0]
+            if annot_list:
+                pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"], annot_list[-1])
+
+        representatives: dict[str, dict] = {}
+        feature_started_at = time.perf_counter()
+        for label, (_, fname, item) in pool.items():
+            img = cv2.imread(str(out_path / fname))
+            if img is not None:
+                representatives[label] = duplicate_frame_features(
+                    img,
+                    cfg,
+                    mask=_load_metadata_person_mask(item),
+                )
+            else:
+                log.warning("  [중복 감지] 이미지 로드 실패: %s", fname)
+        feature_elapsed = time.perf_counter() - feature_started_at
+
+        labels = sorted(representatives.keys())
+        duplicate_map: dict[int, set[int]] = defaultdict(set)
+        auto_confirmed_scene_pairs: set[tuple[int, int]] = set()
+        review_candidates_by_key: dict[tuple[str, int, int], dict] = {}
+
+        def _add_review_candidate(candidate: dict, allow_auto_confirmed: bool = False):
+            scene_a, scene_b = sorted(candidate["scene_indices"])
+            if not allow_auto_confirmed and (scene_a, scene_b) in auto_confirmed_scene_pairs:
+                return
+            key = (candidate["candidate_type"], scene_a, scene_b)
+            previous = review_candidates_by_key.get(key)
+            if previous is None or _duplicate_parallel_candidate_score(candidate) < _duplicate_parallel_candidate_score(previous):
+                review_candidates_by_key[key] = candidate
+
+        def _is_base_label(label: str) -> bool:
+            return label.startswith("base")
+
+        def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
+            if not (_is_base_label(label_a) and _is_base_label(label_b)):
+                return False
+            if metrics.get("reason") not in {"strict", "near-identical"}:
+                return False
+            return (
+                metrics["phash"] <= 22
+                and metrics["content_phash"] <= 20
+                and metrics["changed"] <= 0.065
+                and metrics["content_changed"] <= 0.08
+                and metrics["mse"] <= 0.007
+                and metrics["content_mse"] <= 0.009
+                and metrics["edge"] >= 0.87
+                and metrics["content_edge"] >= 0.87
+                and metrics["hist"] >= 0.995
+                and metrics["content_hist"] >= 0.995
+            )
+
+        log.info("\n──────── 슬라이드 간 복합 비교 병렬 실행 (같은 슬라이드 판정용) ────────")
+        log.info(
+            "  thresholds: phash<=%s, content_phash<=%s, content_edge>=%.2f workers=%s",
+            cfg.DUPLICATE_HASH_THRESHOLD,
+            cfg.DUPLICATE_CONTENT_HASH_THRESHOLD,
+            cfg.DUPLICATE_CONTENT_EDGE_OVERLAP_MIN,
+            workers,
+        )
+
+        pair_args: list[tuple] = []
+        for i in range(len(labels)):
+            for j in range(i + 1, len(labels)):
+                la, lb = labels[i], labels[j]
+                idx_a = pool[la][0]
+                idx_b = pool[lb][0]
+                if idx_a == idx_b:
+                    continue
+                pair_args.append((
+                    i,
+                    j,
+                    la,
+                    lb,
+                    idx_a,
+                    idx_b,
+                    representatives[la],
+                    representatives[lb],
+                    cfg,
+                ))
+
+        pair_started_at = time.perf_counter()
+        pair_results: list[dict] = []
+        if workers <= 1 or len(pair_args) <= 1:
+            pair_results = [_duplicate_parallel_pair_worker(args) for args in pair_args]
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(pair_args))) as executor:
+                future_map = {executor.submit(_duplicate_parallel_pair_worker, args): args for args in pair_args}
+                completed = 0
+                total = len(future_map)
+                for future in as_completed(future_map):
+                    pair_results.append(future.result())
+                    completed += 1
+                    if completed % 200 == 0 or completed == total:
+                        log.info("  duplicate pair progress: completed=%s/%s", completed, total)
+        pair_elapsed = time.perf_counter() - pair_started_at
+
+        pair_results.sort(key=lambda r: (int(r["i"]), int(r["j"])))
+
+        pair_count = len(pair_results)
+        prefilter_skipped = 0
+        compared_count = 0
+        duplicate_count = 0
+
+        for result in pair_results:
+            la = result["la"]
+            lb = result["lb"]
+            idx_a = int(result["idx_a"])
+            idx_b = int(result["idx_b"])
+            should_compare = bool(result["should_compare"])
+            metrics = result["metrics"]
+
+            if not should_compare:
+                prefilter_skipped += 1
+                if log_pairs:
+                    pm = result.get("prefilter_metrics", metrics)
+                    log.info(
+                        f"  {la:<14} ↔ {lb:<14}  "
+                        f"{pm['phash']:>4} {pm['dhash']:>4} "
+                        f"{pm['content_phash']:>4} "
+                        f"{'-':>5} {'-':>6} {pm['hist']:>5.3f}  [cheap-skip]"
+                    )
+                continue
+
+            compared_count += 1
+            is_dup = bool(result["is_duplicate"])
+            if is_dup:
+                duplicate_count += 1
+            flag = f"★ 같은 슬라이드({metrics.get('reason', '')})" if is_dup else ""
+
+            if log_pairs:
+                log.info(
+                    f"  {la:<14} ↔ {lb:<14}  "
+                    f"{metrics['phash']:>4} {metrics['dhash']:>4} {metrics['content_phash']:>4} "
+                    f"{metrics['content_changed']:>5.3f} {metrics['content_edge']:>6.3f} "
+                    f"{metrics['hist']:>5.3f}  {flag}"
+                )
+
+            if is_dup and _is_auto_confirmed_duplicate(la, lb, metrics):
+                scene_pair = tuple(sorted((idx_a, idx_b)))
+                auto_confirmed_scene_pairs.add(scene_pair)
+                review_candidates_by_key.pop(("same_slide_duplicate", *scene_pair), None)
+                review_candidates_by_key.pop(("same_slide_build", *scene_pair), None)
+                duplicate_map[idx_a].add(idx_b)
+                duplicate_map[idx_b].add(idx_a)
+            elif is_dup:
+                _add_review_candidate({
+                    "candidate_type": "same_slide_duplicate",
+                    "source": "visual_duplicate_postprocess",
+                    "proposed_decision": "needs_vlm_same_slide_check",
+                    "scene_indices": [idx_a, idx_b],
+                    "labels": [la, lb],
+                    "filenames": [pool[la][1], pool[lb][1]],
+                    "reason": metrics.get("reason", ""),
+                    "metrics": metrics,
+                })
+
+        log.info("──────────────────────────────────────────────────────────────\n")
+        log.info(
+            "  duplicate prefilter: compared=%s skipped=%s total=%s",
+            compared_count,
+            prefilter_skipped,
+            pair_count,
+        )
+
+        base_representatives: dict[int, dict] = {}
+        for idx, _fname in base_pool.items():
+            label = f"base{idx}"
+            if label in representatives:
+                base_representatives[idx] = representatives[label]
+
+        build_started_at = time.perf_counter()
+        build_count = 0
+        ordered_base_indices = sorted(base_representatives)
+        for pos in range(len(ordered_base_indices) - 1):
+            idx_a = ordered_base_indices[pos]
+            idx_b = ordered_base_indices[pos + 1]
+            if idx_b <= idx_a:
+                continue
+            is_build, build_metrics = build_pair_decision(
+                base_representatives[idx_a],
+                base_representatives[idx_b],
+                cfg,
+            )
+            if not is_build:
+                continue
+            if (idx_a, idx_b) in auto_confirmed_scene_pairs:
+                continue
+            build_count += 1
+            review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
+            _add_review_candidate({
+                "candidate_type": "same_slide_build",
+                "source": "adjacent_base_build_postprocess",
+                "proposed_decision": "same_slide_build",
+                "scene_indices": [idx_a, idx_b],
+                "labels": [f"base{idx_a}", f"base{idx_b}"],
+                "filenames": [base_pool[idx_a], base_pool[idx_b]],
+                "reason": build_metrics["reason"],
+                "metrics": build_metrics,
+            })
+        build_elapsed = time.perf_counter() - build_started_at
+
+        provisional_parent = {idx: idx for idx in groups.keys()}
+
+        def provisional_find(x: int) -> int:
+            while provisional_parent[x] != x:
+                provisional_parent[x] = provisional_parent[provisional_parent[x]]
+                x = provisional_parent[x]
+            return x
+
+        def provisional_union(x: int, y: int) -> None:
+            if x not in provisional_parent or y not in provisional_parent:
+                return
+            px, py = provisional_find(x), provisional_find(y)
+            if px != py:
+                provisional_parent[max(px, py)] = min(px, py)
+
+        for idx_a, neighbors in duplicate_map.items():
+            for idx_b in neighbors:
+                provisional_union(idx_a, idx_b)
+
+        provisional_groups: dict[int, set[int]] = defaultdict(set)
+        for idx in groups.keys():
+            provisional_groups[provisional_find(idx)].add(idx)
+
+        boundary_started_at = time.perf_counter()
+        boundary_count = 0
+        for members in provisional_groups.values():
+            ordered = sorted(idx for idx in members if idx in base_representatives and idx in base_pool)
+            if len(ordered) < 3:
+                continue
+            for idx_a, idx_b in zip(ordered, ordered[1:]):
+                _, metrics = duplicate_pair_decision(base_representatives[idx_a], base_representatives[idx_b], cfg)
+                boundary_count += 1
+                _add_review_candidate({
+                    "candidate_type": "same_slide_duplicate",
+                    "source": "auto_group_boundary_review",
+                    "proposed_decision": "needs_vlm_same_slide_check",
+                    "scene_indices": [idx_a, idx_b],
+                    "labels": [f"base{idx_a}", f"base{idx_b}"],
+                    "filenames": [base_pool[idx_a], base_pool[idx_b]],
+                    "reason": metrics.get("reason") or "auto_group_boundary",
+                    "metrics": metrics,
+                }, allow_auto_confirmed=True)
+        boundary_elapsed = time.perf_counter() - boundary_started_at
+
+        review_candidates = [
+            limit_vlm_review_candidate_images(candidate)
+            for candidate in sorted(
+                review_candidates_by_key.values(),
+                key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
+            )
+        ]
+        review_payload = {
+            "version": 1,
+            "description": (
+                "LocalLLM/VLM 검증용 후보. same_slide_duplicate는 규칙 기반 같은 슬라이드 후보이고, "
+                "same_slide_build는 연속 base가 같은 강의자료 슬라이드의 build 단계일 가능성이 있는 후보이다."
+            ),
+            "candidate_count": len(review_candidates),
+            "candidates": review_candidates,
+        }
+        review_path = out_path / "llm_review_candidates.json"
+        with open(review_path, "w", encoding="utf-8") as f:
+            json.dump(review_payload, f, ensure_ascii=False, indent=2)
+        log.info(
+            "LocalLLM/VLM 검증 후보 저장: %s (count=%s)",
+            review_path,
+            len(review_candidates),
+        )
+
+        all_indices = list(groups.keys())
+        parent = {idx: idx for idx in all_indices}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        for idx_a, neighbors in duplicate_map.items():
+            for idx_b in neighbors:
+                union(idx_a, idx_b)
+
+        dup_groups: dict[int, set[int]] = defaultdict(set)
+        for idx in all_indices:
+            dup_groups[find(idx)].add(idx)
+
+        group_of: dict[int, set[int]] = {}
+        for members in dup_groups.values():
+            for idx in members:
+                group_of[idx] = members
+
+        canonical_by_scene: dict[int, int] = {}
+        for members in dup_groups.values():
+            canonical = min(
+                members,
+                key=lambda idx: (_metadata_presence_ratio(base_items.get(idx)), idx),
+            )
+            for idx in members:
+                canonical_by_scene[idx] = canonical
+
+        family_visit_order: dict[int, int] = {}
+        family_prev_visit: dict[int, int | None] = {}
+        family_next_visit: dict[int, int | None] = {}
+        for members in dup_groups.values():
+            ordered = sorted(members)
+            for pos, idx in enumerate(ordered, start=1):
+                family_visit_order[idx] = pos
+                family_prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
+                family_next_visit[idx] = ordered[pos] if pos < len(ordered) else None
+
+        for m in metadata:
+            idx = int(m["scene_index"])
+            members = sorted(group_of.get(idx, {idx}))
+            others = [x for x in members if x != idx]
+            m["duplicate_of"] = others
+            m["scene_group"] = members
+            canonical = canonical_by_scene.get(idx, members[0])
+            m["scene_canonical"] = canonical
+            m["scene_group_size"] = len(members)
+            m["same_slide_group"] = members
+            m["same_slide_canonical"] = canonical
+            m["same_slide_group_size"] = len(members)
+            m["same_slide_visit_order"] = family_visit_order.get(idx, 1)
+            m["same_slide_is_revisit"] = family_visit_order.get(idx, 1) > 1
+            m["same_slide_previous"] = family_prev_visit.get(idx)
+            m["same_slide_next"] = family_next_visit.get(idx)
+            m["slide_group"] = members
+            m["slide_canonical_index"] = canonical
+            m["slide_group_size"] = len(members)
+            m["slide_visit_order"] = family_visit_order.get(idx, 1)
+            m["slide_is_revisit"] = family_visit_order.get(idx, 1) > 1
+            m["previous_scene_index"] = family_prev_visit.get(idx)
+            m["next_scene_index"] = family_next_visit.get(idx)
+
+        log.info(
+            "  duplicate parallel timings: features=%.1fs pairs=%.1fs build=%.1fs boundary=%.1fs total=%.1fs "
+            "pairs=%s compared=%s skipped=%s duplicates=%s build_candidates=%s boundary_reviews=%s",
+            feature_elapsed,
+            pair_elapsed,
+            build_elapsed,
+            boundary_elapsed,
+            time.perf_counter() - started_at,
+            pair_count,
+            compared_count,
+            prefilter_skipped,
+            duplicate_count,
+            build_count,
+            boundary_count,
+        )
+        return metadata
+
+    except Exception as exc:
+        log.warning(
+            "parallel mark_visual_duplicates failed; falling back to sequential implementation: %s",
+            exc,
+            exc_info=True,
+        )
+        return mark_visual_duplicates_sequential(metadata, out_path, cfg)
+
+def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Config) -> list:
     """
     모든 슬라이드의 대표 프레임(base + clean_final + last_annot)을 풀에 쌓고
     전체 쌍(all-pairs)을 비교하여 같은 슬라이드 그룹을 표시한다.

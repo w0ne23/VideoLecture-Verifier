@@ -356,6 +356,201 @@ def _materialize_missing_with_timestamp(
     return recovered
 
 
+def _targets_by_sample_index(metadata: list[dict]) -> dict[int, list[dict]]:
+    targets_by_sample: dict[int, list[dict]] = {}
+    missing: list[dict] = []
+    for item in metadata:
+        sample_index = int(item.get("sample_index") or 0)
+        if sample_index <= 0:
+            missing.append(item)
+            continue
+        targets_by_sample.setdefault(sample_index, []).append(item)
+    if missing:
+        examples = [
+            {
+                "filename": item.get("filename"),
+                "scene_index": item.get("scene_index"),
+                "capture_type": item.get("capture_type"),
+                "frame_no": item.get("frame_no"),
+            }
+            for item in missing[:5]
+        ]
+        raise RuntimeError(
+            "Cannot materialize from sample cache because some metadata records "
+            f"do not have sample_index. examples={examples}"
+        )
+    return targets_by_sample
+
+
+def _materialize_from_sample_cache_random(
+    cache_dir: str | Path,
+    output_dir: Path,
+    metadata: list[dict],
+) -> set[int]:
+    cache_path = Path(cache_dir)
+    manifest_path = cache_path / "sampled_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Sample cache manifest not found: {manifest_path}")
+
+    manifest = _load_json(manifest_path)
+    video_path = cache_path / manifest.get("video_filename", "sampled_frames.avi")
+    if not video_path.exists():
+        raise FileNotFoundError(f"Sample cache video not found: {video_path}")
+
+    targets_by_sample = _targets_by_sample_index(metadata)
+    wanted = set(targets_by_sample)
+    saved: set[int] = set()
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open sample cache video: {video_path}")
+
+    try:
+        for sample_index in sorted(wanted):
+            # manifest sample_index is 1-based, OpenCV frame position is 0-based.
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, sample_index - 1))
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                log.warning("sample cache seek/read failed: sample_index=%s", sample_index)
+                continue
+            for item in targets_by_sample[sample_index]:
+                _save_frame(frame, output_dir / item["filename"])
+            saved.add(sample_index)
+    finally:
+        cap.release()
+
+    return saved
+
+
+def _materialize_from_sample_cache_sequential(
+    cache_dir: str | Path,
+    output_dir: Path,
+    metadata: list[dict],
+    already_saved: set[int],
+) -> set[int]:
+    # Sequential fallback over sampled_frames.avi for any failed random seeks.
+
+    cache_path = Path(cache_dir)
+    manifest = _load_json(cache_path / "sampled_manifest.json")
+    video_path = cache_path / manifest.get("video_filename", "sampled_frames.avi")
+    frames = manifest.get("frames", [])
+    targets_by_sample = _targets_by_sample_index(metadata)
+    missing = set(targets_by_sample) - set(already_saved)
+    recovered: set[int] = set()
+
+    if not missing:
+        return recovered
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open sample cache video: {video_path}")
+
+    try:
+        for frame_info in frames:
+            sample_index = int(frame_info["sample_index"])
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                raise RuntimeError(f"Sample cache video ended early: {video_path}")
+            if sample_index not in missing:
+                continue
+            for item in targets_by_sample[sample_index]:
+                _save_frame(frame, output_dir / item["filename"])
+            recovered.add(sample_index)
+            if recovered == missing:
+                break
+    finally:
+        cap.release()
+
+    return recovered
+
+
+def materialize_frames_from_sample_cache(
+    cache_dir: str,
+    scenes_path: str,
+    annotations_path: str,
+    output_dir: str,
+    regions_path: str | None = None,
+) -> dict:
+    # Materialize Step 4A review images from Step 0 sample cache.
+    #
+    # This keeps metadata identical to build_metadata(): frame_no/timestamp_sec
+    # remain original-video coordinates. Only the temporary review image pixels are
+    # loaded from sample_cache/sampled_frames.avi using sample_index.
+    #
+    # This function is intended for Step 4A review only. Step 4B final output
+    # should continue using materialize_frames() from the original video.
+
+    scene_payload = _load_json(scenes_path)
+    annotation_payload = _load_json(annotations_path)
+    cache_manifest = _load_json(Path(cache_dir) / "sampled_manifest.json")
+
+    source_meta = cache_manifest.get("source", {}) or scene_payload.get("source", {})
+    fps = float(source_meta.get("fps") or scene_payload.get("source", {}).get("fps") or 0.0)
+    if fps <= 0:
+        raise RuntimeError(f"Cannot read source FPS from sample cache or scene payload: {cache_dir}")
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("scene_*.jpg"):
+        stale.unlink(missing_ok=True)
+    for stale in out_dir.glob("slide_*.jpg"):
+        stale.unlink(missing_ok=True)
+
+    metadata = build_metadata(scene_payload, annotation_payload, fps, regions_path=regions_path)
+    targets_by_sample = _targets_by_sample_index(metadata)
+    target_sample_count = len(targets_by_sample)
+
+    log.info(
+        "sample-cache materialize start: cache=%s targets=%s records=%s output=%s",
+        cache_dir,
+        target_sample_count,
+        len(metadata),
+        output_dir,
+    )
+
+    saved = _materialize_from_sample_cache_random(cache_dir, out_dir, metadata)
+    recovered = _materialize_from_sample_cache_sequential(cache_dir, out_dir, metadata, saved)
+    all_saved = saved | recovered
+
+    missing = sorted(set(targets_by_sample) - all_saved)
+    if missing:
+        raise RuntimeError(
+            f"Failed to materialize sample_index values from sample cache: "
+            f"{missing[:20]}{'...' if len(missing) > 20 else ''}"
+        )
+
+    metadata_path = out_dir / METADATA_FILENAME
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    payload = {
+        "schema_version": 1,
+        "input_path": str(cache_manifest.get("input_path") or scene_payload.get("source_input") or ""),
+        "cache_dir": str(cache_dir),
+        "scenes_path": str(scenes_path),
+        "annotations_path": str(annotations_path),
+        "regions_path": str(regions_path) if regions_path else None,
+        "output_dir": str(output_dir),
+        "fps": fps,
+        "decode_backend": "sample_cache",
+        "source": "sample_cache",
+        "record_count": len(metadata),
+        "target_sample_count": target_sample_count,
+        "random_saved_sample_count": len(saved),
+        "fallback_saved_sample_count": len(recovered),
+        "metadata_path": str(metadata_path),
+    }
+    with open(out_dir / MATERIALIZED_FILENAME, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    log.info(
+        "sample-cache materialize done: records=%s samples=%s output=%s",
+        len(metadata),
+        len(all_saved),
+        output_dir,
+    )
+    return payload
+
 def materialize_frames(
     input_path: str,
     scenes_path: str,
