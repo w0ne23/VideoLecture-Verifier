@@ -94,7 +94,6 @@ def _build_issue_candidate_prompt(
     min_confidence = issue_judge_min_confidence()
     claim_lines = []
     for i, c in enumerate(claims, 1):
-        approx = " [근사치]" if c.get("is_approximate") else ""
         claim_id = _claim_id(c) or f"claim_{i}"
         context_id = _context_id(c)
         claim_text = str(c.get("claim_text") or "").strip()
@@ -102,16 +101,12 @@ def _build_issue_candidate_prompt(
         lines = [
             f"{i}. claim_id: {claim_id}",
             f"   context_id: {context_id}",
-            f"   claim_type: {c.get('claim_type', '?')}{approx}",
+            f"   claim_type: {c.get('claim_type', '?')}",
             f"   resolved_claim: {resolved or claim_text}",
             f"   claim_text: {claim_text}",
         ]
         if c.get("context_ids"):
             lines.append(f"   context_ids: {', '.join(str(x) for x in c.get('context_ids') or [])}")
-        if c.get("antecedent_context_ids"):
-            lines.append(
-                f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
-            )
         claim_lines.append("\n".join(lines))
 
     return f"""당신은 강의 claim 목록에서 1차 issue 후보만 선별하는 판정자입니다.

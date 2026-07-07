@@ -579,13 +579,6 @@ def _extract_claims(
                 c["resolved_claim"] = resolved_claim
                 c.pop("claim_id", None)
                 c["context_ids"] = [str(c.get("context_id") or "")]
-                c.pop("resolution_status", None)
-                c.pop("antecedent_context_ids", None)
-                c.pop("claim_fingerprint", None)
-                c.pop("is_approximate", None)
-                c.pop("context_note", None)
-                c.pop("verification_question", None)
-                c.pop("verificationQuestion", None)
                 cleaned.append(c)
             cleaned = _dedupe_overlapping_claims(cleaned)
             for claim in cleaned:
