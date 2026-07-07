@@ -453,6 +453,7 @@ def _create_sample_cache_impl(
         "schema_version": SCHEMA_VERSION,
         "input_path": input_path,
         "video_filename": VIDEO_FILENAME,
+        "decode_backend": active_backend,
         "config": asdict(cfg),
         "person_masks": {
             "enabled": masks_enabled,
@@ -476,6 +477,7 @@ def _create_sample_cache_impl(
             "width": cfg.resize_width,
             "height": cached_height,
             "sample_count": sample_index,
+            "decode_backend": active_backend,
         },
         "range": {
             "chunk_index": chunk_index,
@@ -581,6 +583,8 @@ def _merge_chunk_caches(
     manifest_paths: list[Path],
     specs: list[dict],
 ) -> dict:
+    import time
+
     video_meta = read_video_metadata(input_path)
     output_path = Path(output_dir)
     video_path, merged_manifest_path, _, _, _ = _prepare_output_dirs(output_path, cfg)
@@ -601,11 +605,36 @@ def _merge_chunk_caches(
     sample_index = 0
     prev_decision = None
     prev_phash = None
+    merge_started_at = time.perf_counter()
+    progress_interval = 2000
+
+    total_chunk_frames = 0
+    for chunk_manifest_path in manifest_paths:
+        try:
+            payload = json.loads(chunk_manifest_path.read_text(encoding="utf-8"))
+            total_chunk_frames += len(payload.get("frames", []))
+        except Exception:
+            pass
+    log.info(
+        "sample cache merge start: chunks=%s candidate_frames=%s output=%s",
+        len(specs),
+        total_chunk_frames,
+        output_path,
+    )
 
     try:
         for chunk_manifest_path, spec in zip(manifest_paths, specs):
             payload = json.loads(chunk_manifest_path.read_text(encoding="utf-8"))
             chunk_dir = chunk_manifest_path.parent
+            chunk_frame_count = len(payload.get("frames", []))
+            log.info(
+                "  [sample merge chunk start %s/%s] core=%.1fs~%.1fs frames=%s",
+                int(spec["chunk_index"]) + 1,
+                len(specs),
+                float(spec["core_start_sec"]),
+                float(spec["core_end_sec"]),
+                chunk_frame_count,
+            )
             cap = cv2.VideoCapture(str(chunk_dir / payload["video_filename"]))
             if not cap.isOpened():
                 raise FileNotFoundError(f"Cannot open chunk sampled video: {chunk_dir / payload['video_filename']}")
@@ -669,8 +698,24 @@ def _merge_chunk_caches(
                     frames.append(frame_record)
                     prev_decision = decision
                     prev_phash = phash_int
+                    if sample_index % progress_interval == 0:
+                        pct = (sample_index / total_chunk_frames * 100.0) if total_chunk_frames > 0 else 0.0
+                        log.info(
+                            "  [sample merge progress] merged=%s/%s %.1f%% elapsed=%.1fs",
+                            sample_index,
+                            total_chunk_frames,
+                            pct,
+                            time.perf_counter() - merge_started_at,
+                        )
             finally:
                 cap.release()
+            log.info(
+                "  [sample merge chunk done %s/%s] merged_samples=%s elapsed=%.1fs",
+                int(spec["chunk_index"]) + 1,
+                len(specs),
+                sample_index,
+                time.perf_counter() - merge_started_at,
+            )
     finally:
         writer.release()
 
@@ -719,7 +764,13 @@ def _merge_chunk_caches(
     }
     with open(merged_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
-    log.info("chunked sample cache merged: chunks=%s samples=%s output=%s", len(specs), len(frames), output_path)
+    log.info(
+        "chunked sample cache merged: chunks=%s samples=%s output=%s elapsed=%.1fs",
+        len(specs),
+        len(frames),
+        output_path,
+        time.perf_counter() - merge_started_at,
+    )
     return manifest
 
 
