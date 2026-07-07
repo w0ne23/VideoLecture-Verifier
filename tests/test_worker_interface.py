@@ -3,6 +3,9 @@
 worker.py가 넘기는 인자 조합이 get_parser에서 항상 파싱돼야 한다.
 파서에서 옵션을 제거할 때 이 테스트가 깨지면 워커도 함께 고쳐야 한다는 신호다.
 """
+import pytest
+
+pytest.importorskip('librosa', reason='pipeline.main이 librosa를 import함')
 
 
 def test_worker_argument_contract():

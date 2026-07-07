@@ -4,7 +4,10 @@ import 시점에 죽지 않고, 필수 키 누락은 명확한 에러, 선택 �
 """
 import pytest
 
-import pipeline.config as config
+pytest.importorskip('groq', reason='pipeline API 클라이언트 의존성 미설치')
+pytest.importorskip('google.genai', reason='pipeline API 클라이언트 의존성 미설치')
+
+import pipeline.config as config  # noqa: E402
 
 GEMINI_VARS = ['GOOGLE_API_KEY_1', 'GOOGLE_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY_2']
 OPTIONAL_VARS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'XAI_API_KEY', 'DEEPSEEK_API_KEY']
