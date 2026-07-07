@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: verilec
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U user -d verilec"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://user:pass@localhost:5432/verilec
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        # torch/cv2 등 무거운 vision 의존성은 CI에서 제외 — 해당 테스트는 자동 skip.
+        # groq/google-genai(설정 lazy init)와 librosa(pipeline.main import)는 포함.
+        run: |
+          pip install -r backend/requirements.txt -r requirements-dev.txt
+          pip install groq google-genai librosa json-repair
+      - name: Run tests
+        run: pytest
