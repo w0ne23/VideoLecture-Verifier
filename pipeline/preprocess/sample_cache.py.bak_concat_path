@@ -700,16 +700,10 @@ def _ffmpeg_concat_escape(path: Path) -> str:
 
 
 def _concat_merge_parts_ffmpeg(part_paths: list[Path], list_path: Path, output_video_path: Path) -> None:
-    # ffmpeg concat resolves relative `file ...` entries relative to the list
-    # file location. Use absolute paths to avoid duplicated path prefixes when
-    # output_dir itself is relative, e.g. output_slides_staged/sample_cache.
-    list_path = list_path.resolve()
-    output_video_path = output_video_path.resolve()
     list_path.parent.mkdir(parents=True, exist_ok=True)
-
     with open(list_path, "w", encoding="utf-8") as f:
         for part in part_paths:
-            f.write(f"file '{_ffmpeg_concat_escape(part.resolve())}'\n")
+            f.write(f"file '{_ffmpeg_concat_escape(part)}'\n")
 
     cmd = [
         "ffmpeg",

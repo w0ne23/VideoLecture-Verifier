@@ -16,9 +16,8 @@ import logging
 import math
 import os
 import shutil
-import subprocess
 import tempfile
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
@@ -585,190 +584,6 @@ def _copy_optional_mask(
     return dst_rel_filename
 
 
-def _write_merge_part_worker(
-    chunk_manifest_path: str,
-    spec: dict,
-    part_path: str,
-    cfg: SampleCacheConfig,
-    sampled_fps: float,
-    resize_width: int,
-    cached_height: int,
-) -> dict:
-    """Write one merge part AVI from one chunk cache.
-
-    The worker reads the temporary chunk sampled_frames.avi and writes only the
-    non-overlap core samples into part_XXX.avi. It also returns the selected
-    manifest frame items in exactly the same order as frames written to the part
-    file. Final sample_index re-numbering happens in the parent merge process.
-    """
-
-    import time
-
-    started_at = time.perf_counter()
-    chunk_manifest = Path(chunk_manifest_path)
-    chunk_dir = chunk_manifest.parent
-    part = Path(part_path)
-    part.parent.mkdir(parents=True, exist_ok=True)
-    part.unlink(missing_ok=True)
-
-    payload = json.loads(chunk_manifest.read_text(encoding="utf-8"))
-    chunk_video_path = chunk_dir / payload["video_filename"]
-
-    cap = cv2.VideoCapture(str(chunk_video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open chunk sampled video: {chunk_video_path}")
-
-    writer = cv2.VideoWriter(
-        str(part),
-        cv2.VideoWriter_fourcc(*"MJPG"),
-        float(sampled_fps),
-        (int(resize_width), int(cached_height)),
-    )
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError(f"Cannot open merge part writer: {part}")
-
-    selected_frames: list[dict] = []
-    skipped_overlap = 0
-    fallback_phash_count = 0
-    video_read_elapsed = 0.0
-    video_write_elapsed = 0.0
-    metric_fallback_elapsed = 0.0
-
-    try:
-        core_start = float(spec["core_start_sec"])
-        core_end = float(spec["core_end_sec"])
-        is_last = bool(spec.get("is_last"))
-
-        for item in payload.get("frames", []):
-            read_t0 = time.perf_counter()
-            ret, frame = cap.read()
-            video_read_elapsed += time.perf_counter() - read_t0
-            if not ret or frame is None:
-                raise RuntimeError(f"Chunk sampled video ended early: {chunk_video_path}")
-
-            timestamp = float(item["timestamp_sec"])
-            if timestamp < core_start - 1e-6:
-                skipped_overlap += 1
-                continue
-            if is_last:
-                if timestamp > core_end + 1e-6:
-                    skipped_overlap += 1
-                    continue
-            elif timestamp >= core_end - 1e-6:
-                skipped_overlap += 1
-                continue
-
-            write_t0 = time.perf_counter()
-            writer.write(frame)
-            video_write_elapsed += time.perf_counter() - write_t0
-
-            selected = dict(item)
-            selected["frame_no"] = int(item["frame_no"])
-            selected["timestamp_sec"] = round(float(item["timestamp_sec"]), 6)
-
-            # In normal chunk caches this already exists. Keep a fallback so old
-            # caches or partially written manifests still remain usable.
-            if selected.get("phash_int") is None:
-                metric_t0 = time.perf_counter()
-                selected["phash_int"] = compute_phash_int(to_decision_frame(frame))
-                metric_fallback_elapsed += time.perf_counter() - metric_t0
-                fallback_phash_count += 1
-
-            selected_frames.append(selected)
-    finally:
-        cap.release()
-        writer.release()
-
-    return {
-        "chunk_index": int(spec["chunk_index"]),
-        "chunk_dir": str(chunk_dir),
-        "part_path": str(part),
-        "selected_count": len(selected_frames),
-        "skipped_overlap": skipped_overlap,
-        "fallback_phash_count": fallback_phash_count,
-        "video_read_elapsed": video_read_elapsed,
-        "video_write_elapsed": video_write_elapsed,
-        "metric_fallback_elapsed": metric_fallback_elapsed,
-        "elapsed": time.perf_counter() - started_at,
-        "frames": selected_frames,
-    }
-
-
-def _ffmpeg_concat_escape(path: Path) -> str:
-    return str(path).replace("'", "'\\''")
-
-
-def _concat_merge_parts_ffmpeg(part_paths: list[Path], list_path: Path, output_video_path: Path) -> None:
-    # ffmpeg concat resolves relative `file ...` entries relative to the list
-    # file location. Use absolute paths to avoid duplicated path prefixes when
-    # output_dir itself is relative, e.g. output_slides_staged/sample_cache.
-    list_path = list_path.resolve()
-    output_video_path = output_video_path.resolve()
-    list_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(list_path, "w", encoding="utf-8") as f:
-        for part in part_paths:
-            f.write(f"file '{_ffmpeg_concat_escape(part.resolve())}'\n")
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-c",
-        "copy",
-        str(output_video_path),
-    ]
-    subprocess.run(cmd, check=True)
-
-
-def _concat_merge_parts_opencv(
-    part_paths: list[Path],
-    output_video_path: Path,
-    sampled_fps: float,
-    resize_width: int,
-    cached_height: int,
-) -> int:
-    """Fallback concat path if ffmpeg stream-copy concat fails."""
-
-    output_video_path.unlink(missing_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_video_path),
-        cv2.VideoWriter_fourcc(*"MJPG"),
-        float(sampled_fps),
-        (int(resize_width), int(cached_height)),
-    )
-    if not writer.isOpened():
-        raise RuntimeError(f"Cannot open fallback merged sample cache writer: {output_video_path}")
-
-    written = 0
-    try:
-        for part in part_paths:
-            cap = cv2.VideoCapture(str(part))
-            if not cap.isOpened():
-                raise FileNotFoundError(f"Cannot open merge part video: {part}")
-            try:
-                while True:
-                    ret, frame = cap.read()
-                    if not ret or frame is None:
-                        break
-                    writer.write(frame)
-                    written += 1
-            finally:
-                cap.release()
-    finally:
-        writer.release()
-    return written
-
-
 def _merge_chunk_caches(
     input_path: str,
     output_dir: str,
@@ -784,13 +599,27 @@ def _merge_chunk_caches(
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
     sampled_fps = float(cfg.sample_fps)
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        sampled_fps,
+        (cfg.resize_width, cached_height),
+    )
+    if not writer.isOpened():
+        raise RuntimeError(f"Cannot open merged sample cache writer: {video_path}")
+
+    frames: list[dict] = []
+    seen_frame_nos: set[int] = set()
+    sample_index = 0
     merge_started_at = time.perf_counter()
+    progress_interval = 2000
 
-    parts_dir = output_path / "_merge_parts"
-    if parts_dir.exists():
-        shutil.rmtree(parts_dir, ignore_errors=True)
-    parts_dir.mkdir(parents=True, exist_ok=True)
-
+    video_io_elapsed = 0.0
+    mask_materialize_elapsed = 0.0
+    metric_fallback_elapsed = 0.0
+    fallback_phash_count = 0
+    skipped_overlap_frames = 0
+    skipped_duplicate_frames = 0
     total_chunk_frames = 0
     for chunk_manifest_path in manifest_paths:
         try:
@@ -798,261 +627,135 @@ def _merge_chunk_caches(
             total_chunk_frames += len(payload.get("frames", []))
         except Exception:
             pass
-
-    requested_workers = int(
-        os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS",
-            os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2"),
-        )
-    )
-    merge_workers = max(1, min(requested_workers, len(specs) if specs else 1))
-
     log.info(
-        "sample cache merge start: chunks=%s candidate_frames=%s output=%s merge_workers=%s",
+        "sample cache merge start: chunks=%s candidate_frames=%s output=%s",
         len(specs),
         total_chunk_frames,
         output_path,
-        merge_workers,
     )
 
-    part_started_at = time.perf_counter()
-    part_by_index: dict[int, dict] = {}
-    with ProcessPoolExecutor(max_workers=merge_workers) as executor:
-        future_map = {}
+    try:
         for chunk_manifest_path, spec in zip(manifest_paths, specs):
-            chunk_index = int(spec["chunk_index"])
-            part_path = parts_dir / f"part_{chunk_index:03d}.avi"
-            future = executor.submit(
-                _write_merge_part_worker,
-                str(chunk_manifest_path),
-                dict(spec),
-                str(part_path),
-                cfg,
-                sampled_fps,
-                int(cfg.resize_width),
-                int(cached_height),
-            )
-            future_map[future] = spec
+            payload = json.loads(chunk_manifest_path.read_text(encoding="utf-8"))
+            chunk_dir = chunk_manifest_path.parent
+            chunk_frame_count = len(payload.get("frames", []))
             log.info(
-                "  [sample merge part submit %s/%s] core=%.1fs~%.1fs",
-                chunk_index + 1,
+                "  [sample merge chunk start %s/%s] core=%.1fs~%.1fs frames=%s",
+                int(spec["chunk_index"]) + 1,
                 len(specs),
                 float(spec["core_start_sec"]),
                 float(spec["core_end_sec"]),
+                chunk_frame_count,
             )
+            cap = cv2.VideoCapture(str(chunk_dir / payload["video_filename"]))
+            if not cap.isOpened():
+                raise FileNotFoundError(f"Cannot open chunk sampled video: {chunk_dir / payload['video_filename']}")
+            try:
+                core_start = float(spec["core_start_sec"])
+                core_end = float(spec["core_end_sec"])
+                is_last = bool(spec.get("is_last"))
+                for item in payload.get("frames", []):
+                    io_t0 = time.perf_counter()
+                    ret, frame = cap.read()
+                    video_io_elapsed += time.perf_counter() - io_t0
+                    if not ret or frame is None:
+                        raise RuntimeError(f"Chunk sampled video ended early: {chunk_dir / payload['video_filename']}")
+                    timestamp = float(item["timestamp_sec"])
+                    if timestamp < core_start - 1e-6:
+                        skipped_overlap_frames += 1
+                        continue
+                    if is_last:
+                        if timestamp > core_end + 1e-6:
+                            skipped_overlap_frames += 1
+                            continue
+                    elif timestamp >= core_end - 1e-6:
+                        skipped_overlap_frames += 1
+                        continue
+                    frame_no = int(item["frame_no"])
+                    if frame_no in seen_frame_nos:
+                        skipped_duplicate_frames += 1
+                        continue
+                    seen_frame_nos.add(frame_no)
 
-        completed = 0
-        for future in as_completed(future_map):
-            result = future.result()
-            chunk_index = int(result["chunk_index"])
-            part_by_index[chunk_index] = result
-            completed += 1
+                    sample_index += 1
+
+                    io_t0 = time.perf_counter()
+                    writer.write(frame)
+                    video_io_elapsed += time.perf_counter() - io_t0
+
+                    # Chunk workers already computed these per-sample metrics.
+                    # Step 1 computes motion metrics independently in parallel,
+                    # so recomputing pHash/MSE during merge is unnecessary overhead.
+                    phash_int = item.get("phash_int")
+                    if phash_int is None:
+                        metric_t0 = time.perf_counter()
+                        phash_int = compute_phash_int(to_decision_frame(frame))
+                        metric_fallback_elapsed += time.perf_counter() - metric_t0
+                        fallback_phash_count += 1
+
+                    frame_record = {
+                        "sample_index": sample_index,
+                        "frame_no": frame_no,
+                        "timestamp_sec": round(timestamp, 6),
+                        "phash_int": phash_int,
+                        "prev_mse": item.get("prev_mse"),
+                        "prev_hash_dist": item.get("prev_hash_dist"),
+                    }
+                    mask_t0 = time.perf_counter()
+                    presence_dst = _copy_optional_mask(
+                        chunk_dir,
+                        output_path,
+                        item.get("person_presence_mask_filename"),
+                        f"{PRESENCE_MASKS_DIRNAME}/person_presence_mask_{sample_index:06d}.npy",
+                    )
+                    if presence_dst:
+                        frame_record["person_presence_mask_filename"] = presence_dst
+                        if item.get("person_presence_ratio") is not None:
+                            frame_record["person_presence_ratio"] = item.get("person_presence_ratio")
+                    person_dst = _copy_optional_mask(
+                        chunk_dir,
+                        output_path,
+                        item.get("person_mask_filename"),
+                        f"{MASKS_DIRNAME}/person_mask_{sample_index:06d}.npy",
+                    )
+                    if person_dst:
+                        frame_record["person_mask_filename"] = person_dst
+                        if item.get("person_mask_inherited"):
+                            frame_record["person_mask_inherited"] = True
+                            frame_record["person_mask_inherited_distance"] = item.get("person_mask_inherited_distance")
+                    mask_materialize_elapsed += time.perf_counter() - mask_t0
+                    frames.append(frame_record)
+                    if sample_index % progress_interval == 0:
+                        pct = (sample_index / total_chunk_frames * 100.0) if total_chunk_frames > 0 else 0.0
+                        log.info(
+                            "  [sample merge progress] merged=%s/%s %.1f%% elapsed=%.1fs",
+                            sample_index,
+                            total_chunk_frames,
+                            pct,
+                            time.perf_counter() - merge_started_at,
+                        )
+            finally:
+                cap.release()
             log.info(
-                "  [sample merge part done %s/%s | idx=%s] selected=%s skipped_overlap=%s elapsed=%.1fs",
-                completed,
+                "  [sample merge chunk done %s/%s] merged_samples=%s elapsed=%.1fs",
+                int(spec["chunk_index"]) + 1,
                 len(specs),
-                chunk_index + 1,
-                int(result["selected_count"]),
-                int(result["skipped_overlap"]),
-                float(result["elapsed"]),
+                sample_index,
+                time.perf_counter() - merge_started_at,
             )
-
-    ordered_indices = sorted(part_by_index)
-    ordered_results = [part_by_index[idx] for idx in ordered_indices]
-    part_paths = [Path(result["part_path"]) for result in ordered_results]
-    part_wall_elapsed = time.perf_counter() - part_started_at
-
-    if not part_paths:
-        raise RuntimeError("No merge part videos were produced")
-
-    concat_started_at = time.perf_counter()
-    concat_mode = "ffmpeg-copy"
-    try:
-        _concat_merge_parts_ffmpeg(part_paths, parts_dir / "parts.txt", video_path)
-        concat_written_frames = None
-    except Exception as exc:
-        concat_mode = "opencv-fallback"
-        log.warning("ffmpeg concat failed; falling back to OpenCV concat: %s", exc)
-        concat_written_frames = _concat_merge_parts_opencv(
-            part_paths,
-            video_path,
-            sampled_fps,
-            int(cfg.resize_width),
-            int(cached_height),
-        )
-    concat_elapsed = time.perf_counter() - concat_started_at
-
-    frame_count_probe = -1
-    try:
-        cap = cv2.VideoCapture(str(video_path))
-        if cap.isOpened():
-            frame_count_probe = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or -1)
-        cap.release()
-    except Exception:
-        frame_count_probe = -1
-
-    manifest_started_at = time.perf_counter()
-    frames: list[dict] = []
-    seen_frame_nos: set[int] = set()
-    sample_index = 0
-    duplicate_frame_count = 0
-
-    mask_workers_requested = int(
-        os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS",
-            str(max(1, merge_workers)),
-        )
-    )
-    mask_workers = max(1, mask_workers_requested)
-    mask_copy_started_at = time.perf_counter()
-    mask_future_map = {}
-
-    def _apply_presence_result(frame_record: dict, item: dict, rel_filename: str | None) -> None:
-        if not rel_filename:
-            return
-        frame_record["person_presence_mask_filename"] = rel_filename
-        if item.get("person_presence_ratio") is not None:
-            frame_record["person_presence_ratio"] = item.get("person_presence_ratio")
-
-    def _apply_person_result(frame_record: dict, item: dict, rel_filename: str | None) -> None:
-        if not rel_filename:
-            return
-        frame_record["person_mask_filename"] = rel_filename
-        if item.get("person_mask_inherited"):
-            frame_record["person_mask_inherited"] = True
-            frame_record["person_mask_inherited_distance"] = item.get("person_mask_inherited_distance")
-
-    def _schedule_or_copy_mask(
-        executor: ThreadPoolExecutor | None,
-        frame_record: dict,
-        item: dict,
-        chunk_dir: Path,
-        src_key: str,
-        dst_rel_filename: str,
-        kind: str,
-    ) -> None:
-        src_filename = item.get(src_key)
-        if not src_filename:
-            return
-        if executor is None:
-            rel = _copy_optional_mask(chunk_dir, output_path, src_filename, dst_rel_filename)
-            if kind == "presence":
-                _apply_presence_result(frame_record, item, rel)
-            else:
-                _apply_person_result(frame_record, item, rel)
-            return
-
-        future = executor.submit(
-            _copy_optional_mask,
-            chunk_dir,
-            output_path,
-            src_filename,
-            dst_rel_filename,
-        )
-        mask_future_map[future] = (kind, frame_record, item)
-
-    executor_ctx = ThreadPoolExecutor(max_workers=mask_workers) if mask_workers > 1 else None
-    try:
-        if executor_ctx is not None:
-            executor_ctx.__enter__()
-
-        for result in ordered_results:
-            chunk_dir = Path(result["chunk_dir"])
-            for item in result.get("frames", []):
-                frame_no = int(item["frame_no"])
-                if frame_no in seen_frame_nos:
-                    duplicate_frame_count += 1
-                    raise RuntimeError(
-                        f"Duplicate frame_no during two-stage merge: frame_no={frame_no}. "
-                        "This would desync sampled_frames.avi and sampled_manifest.json."
-                    )
-                seen_frame_nos.add(frame_no)
-
-                sample_index += 1
-                frame_record = {
-                    "sample_index": sample_index,
-                    "frame_no": frame_no,
-                    "timestamp_sec": round(float(item["timestamp_sec"]), 6),
-                    "phash_int": item.get("phash_int"),
-                    "prev_mse": item.get("prev_mse"),
-                    "prev_hash_dist": item.get("prev_hash_dist"),
-                }
-
-                _schedule_or_copy_mask(
-                    executor_ctx,
-                    frame_record,
-                    item,
-                    chunk_dir,
-                    "person_presence_mask_filename",
-                    f"{PRESENCE_MASKS_DIRNAME}/person_presence_mask_{sample_index:06d}.npy",
-                    "presence",
-                )
-                _schedule_or_copy_mask(
-                    executor_ctx,
-                    frame_record,
-                    item,
-                    chunk_dir,
-                    "person_mask_filename",
-                    f"{MASKS_DIRNAME}/person_mask_{sample_index:06d}.npy",
-                    "person",
-                )
-
-                frames.append(frame_record)
-
-        if executor_ctx is not None:
-            completed = 0
-            total = len(mask_future_map)
-            for future in as_completed(mask_future_map):
-                kind, frame_record, item = mask_future_map[future]
-                rel = future.result()
-                if kind == "presence":
-                    _apply_presence_result(frame_record, item, rel)
-                else:
-                    _apply_person_result(frame_record, item, rel)
-                completed += 1
-                if completed % 2000 == 0 or completed == total:
-                    log.info(
-                        "  [sample merge mask materialize] completed=%s/%s",
-                        completed,
-                        total,
-                    )
     finally:
-        if executor_ctx is not None:
-            executor_ctx.__exit__(None, None, None)
+        writer.release()
 
-    mask_materialize_elapsed = time.perf_counter() - mask_copy_started_at
-
-    post_started_at = time.perf_counter()
-    # The frames are already ordered by part order, but keep an explicit stable
-    # sort to preserve the previous merge behavior and guard against future
-    # changes in chunk scheduling.
+    post_t0 = time.perf_counter()
     frames.sort(key=lambda x: (float(x["timestamp_sec"]), int(x["frame_no"])))
+    # Re-number once more after sorting, because chunk workers can complete out of order.
+    # Also rename references are already unique and ordered by the earlier write pass, so leave files as-is.
     for idx, frame in enumerate(frames, start=1):
         frame["sample_index"] = idx
 
     mask_fill_gap_samples = max(0, int(round(float(cfg.person_mask_fill_gap_sec) * sampled_fps)))
     inherited_masks = _fill_short_person_mask_gaps(frames, max_gap=mask_fill_gap_samples)
-    postprocess_elapsed = time.perf_counter() - post_started_at
-
-    part_video_read_elapsed = sum(float(result.get("video_read_elapsed", 0.0)) for result in ordered_results)
-    part_video_write_elapsed = sum(float(result.get("video_write_elapsed", 0.0)) for result in ordered_results)
-    metric_fallback_elapsed = sum(float(result.get("metric_fallback_elapsed", 0.0)) for result in ordered_results)
-    fallback_phash_count = sum(int(result.get("fallback_phash_count", 0)) for result in ordered_results)
-    skipped_overlap_frames = sum(int(result.get("skipped_overlap", 0)) for result in ordered_results)
-
-    if frame_count_probe >= 0 and frame_count_probe != len(frames):
-        log.warning(
-            "merged sampled video frame count mismatch: video=%s manifest=%s concat_mode=%s",
-            frame_count_probe,
-            len(frames),
-            concat_mode,
-        )
-    if concat_written_frames is not None and concat_written_frames != len(frames):
-        log.warning(
-            "fallback concat written frame count mismatch: written=%s manifest=%s",
-            concat_written_frames,
-            len(frames),
-        )
+    postprocess_elapsed = time.perf_counter() - post_t0
 
     person_masks_payload = {
         "enabled": bool(cfg.person_masks),
@@ -1084,45 +787,27 @@ def _merge_chunk_caches(
             "sample_count": len(frames),
             "chunked": True,
             "chunk_count": len(specs),
-            "merge_mode": "parallel_parts_concat",
-            "merge_workers": merge_workers,
-            "merge_mask_workers": mask_workers,
-            "concat_mode": concat_mode,
         },
         "chunks": specs,
         "frames": frames,
     }
-
-    manifest_write_started_at = time.perf_counter()
+    manifest_t0 = time.perf_counter()
     with open(merged_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
-    manifest_write_elapsed = time.perf_counter() - manifest_write_started_at
-    manifest_build_elapsed = time.perf_counter() - manifest_started_at
-
-    if os.getenv("GRAPHLEC_SAMPLE_CACHE_KEEP_MERGE_PARTS", "0") != "1":
-        shutil.rmtree(parts_dir, ignore_errors=True)
+    manifest_write_elapsed = time.perf_counter() - manifest_t0
 
     log.info(
-        "sample cache merge timings: part_wall=%.1fs part_video_read_sum=%.1fs "
-        "part_video_write_sum=%.1fs concat=%.1fs mask_materialize=%.1fs "
-        "metric_fallback=%.1fs postprocess=%.1fs manifest_build=%.1fs "
-        "manifest_write=%.1fs skipped_overlap=%s skipped_duplicate=%s "
-        "fallback_phash=%s concat_mode=%s video_frames=%s manifest_frames=%s",
-        part_wall_elapsed,
-        part_video_read_elapsed,
-        part_video_write_elapsed,
-        concat_elapsed,
+        "sample cache merge timings: video_io=%.1fs mask_materialize=%.1fs "
+        "metric_fallback=%.1fs postprocess=%.1fs manifest_write=%.1fs "
+        "skipped_overlap=%s skipped_duplicate=%s fallback_phash=%s",
+        video_io_elapsed,
         mask_materialize_elapsed,
         metric_fallback_elapsed,
         postprocess_elapsed,
-        manifest_build_elapsed,
         manifest_write_elapsed,
         skipped_overlap_frames,
-        duplicate_frame_count,
+        skipped_duplicate_frames,
         fallback_phash_count,
-        concat_mode,
-        frame_count_probe,
-        len(frames),
     )
     log.info(
         "chunked sample cache merged: chunks=%s samples=%s output=%s elapsed=%.1fs",
@@ -1132,6 +817,7 @@ def _merge_chunk_caches(
         time.perf_counter() - merge_started_at,
     )
     return manifest
+
 
 def create_sample_cache_chunked(
     input_path: str,

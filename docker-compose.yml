@@ -40,6 +40,18 @@ services:
       YOLO_CONFIG_DIR: /tmp/Ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
 
+      # Step 0 sample cache chunk 병렬화
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS: "12"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC: "300"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC: "30"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS: "6"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS: "12"
+
+      #STEP 1 worker 설정
+      GRAPHLEC_REGION_WORKERS: "12"
+      GRAPHLEC_REGION_CHUNK_SAMPLES: "2000"
+      GRAPHLEC_REGION_CUARD_SAMPLE: "1"
+
     volumes:
       - ./storage:/app/storage
       - ./input:/app/input
