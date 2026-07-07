@@ -141,12 +141,18 @@ def _phash_distance(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
 
 
-def _sample_motion_metrics(cache_dir: str | Path, cfg: RegionClassifierConfig) -> dict[int, dict]:
+def _sample_motion_metrics(
+    cache_dir: str | Path,
+    cfg: RegionClassifierConfig,
+    total_samples: int | None = None,
+) -> dict[int, dict]:
     metrics: dict[int, dict] = {}
     prev_decision = None
     prev_mask = None
+    processed = 0
     for frame_info, frame in iter_sample_cache(cache_dir):
         sample_index = int(frame_info["sample_index"])
+        processed += 1
         decision = _decision_frame(frame, cfg)
         mask = _decision_mask(load_person_mask(cache_dir, frame_info), cfg)
         if prev_decision is None:
@@ -171,6 +177,18 @@ def _sample_motion_metrics(cache_dir: str | Path, cfg: RegionClassifierConfig) -
             }
         prev_decision = decision
         prev_mask = mask
+        if processed == 1 or processed % 1000 == 0 or (total_samples is not None and processed == total_samples):
+            timestamp = float(frame_info.get("timestamp_sec", 0.0) or 0.0)
+            if total_samples:
+                log.info(
+                    "region motion metrics: processed=%s/%s %.1f%% ts=%.1fs",
+                    processed,
+                    total_samples,
+                    (processed / total_samples) * 100.0,
+                    timestamp,
+                )
+            else:
+                log.info("region motion metrics: processed=%s ts=%.1fs", processed, timestamp)
     return metrics
 
 
@@ -437,18 +455,35 @@ def classify_regions(
     output_dir: str,
     cfg: RegionClassifierConfig | None = None,
 ) -> dict:
+    import time
+
     cfg = cfg or RegionClassifierConfig()
+    t0 = time.perf_counter()
     manifest = load_sample_cache(cache_dir)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("segment_*.jpg"):
         stale.unlink(missing_ok=True)
 
-    motion_metrics = _sample_motion_metrics(cache_dir, cfg)
+    frame_count = len(manifest.get("frames", []))
+    log.info("region classification start: samples=%s window_sec=%.1f", frame_count, cfg.window_sec)
+
+    motion_t0 = time.perf_counter()
+    motion_metrics = _sample_motion_metrics(cache_dir, cfg, total_samples=frame_count)
+    log.info("region classification motion metrics done: elapsed=%.1fs", time.perf_counter() - motion_t0)
+
+    windows_t0 = time.perf_counter()
     windows = _window_records(manifest, motion_metrics, cfg)
+    log.info("region classification windows done: windows=%s elapsed=%.1fs", len(windows), time.perf_counter() - windows_t0)
+
+    merge_t0 = time.perf_counter()
     groups = _merge_short_groups(_merge_windows(windows), cfg)
     segments = [_flatten_segment(seg, idx) for idx, seg in enumerate(groups, start=1)]
+    log.info("region classification merge done: groups=%s segments=%s elapsed=%.1fs", len(groups), len(segments), time.perf_counter() - merge_t0)
+
+    preview_t0 = time.perf_counter()
     _save_segment_previews(cache_dir, out_dir, segments)
+    log.info("region classification previews done: elapsed=%.1fs", time.perf_counter() - preview_t0)
 
     summary: dict[str, dict] = {}
     for seg in segments:
@@ -470,7 +505,7 @@ def classify_regions(
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    log.info("region classification done: segments=%s output=%s", len(segments), out_path)
+    log.info("region classification done: segments=%s output=%s elapsed=%.1fs", len(segments), out_path, time.perf_counter() - t0)
     for region_type, info in sorted(summary.items()):
         log.info("  %-8s count=%s duration=%.1fs", region_type, info["count"], info["duration_sec"])
     return result

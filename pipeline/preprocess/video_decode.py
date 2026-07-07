@@ -252,43 +252,65 @@ def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | No
     return "opencv", None
 
 
-def _iter_frames_opencv(
-    input_path: str,
-    fps: float,
-    sample_every: int,
-    sample_fps: float | None = None,
-):
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {input_path}")
-    try:
-        frame_no = 0
-        next_sample_ts = 0.0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_no += 1
-            timestamp = frame_no / fps
-            if sample_fps is not None and sample_fps > 0:
-                if timestamp + 1e-9 < next_sample_ts:
-                    continue
-                yield frame_no, timestamp, frame
-                next_sample_ts += 1.0 / sample_fps
-                continue
-            if frame_no % sample_every != 0:
-                continue
-            yield frame_no, timestamp, frame
-    finally:
-        cap.release()
-
-
 def _resize_frame_if_needed(frame: np.ndarray, output_width: int | None, output_height: int | None) -> np.ndarray:
     if not output_width or not output_height:
         return frame
     if frame.shape[1] == int(output_width) and frame.shape[0] == int(output_height):
         return frame
     return cv2.resize(frame, (int(output_width), int(output_height)), interpolation=cv2.INTER_AREA)
+
+
+def _normalize_range(
+    fps: float,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> tuple[float, float | None, int]:
+    start = max(0.0, float(start_sec or 0.0))
+    end = None if end_sec is None else max(start, float(end_sec))
+    start_frame_offset = max(0, int(round(start * fps)))
+    return start, end, start_frame_offset
+
+
+def _iter_frames_opencv(
+    input_path: str,
+    fps: float,
+    sample_every: int,
+    sample_fps: float | None = None,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+):
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open video: {input_path}")
+    start, end, start_frame_offset = _normalize_range(fps, start_sec, end_sec)
+    if start > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_offset)
+    try:
+        frame_no = start_frame_offset
+        next_sample_ts = start
+        if sample_fps is not None and sample_fps > 0:
+            step = 1.0 / float(sample_fps)
+            # Align the first sample to the requested range start.
+            next_sample_ts = start
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_no += 1
+            timestamp = frame_no / fps
+            if end is not None and timestamp > end + 1e-9:
+                break
+            if sample_fps is not None and sample_fps > 0:
+                if timestamp + 1e-9 < next_sample_ts:
+                    continue
+                yield frame_no, timestamp, frame
+                next_sample_ts += step
+                continue
+            if frame_no % sample_every != 0:
+                continue
+            yield frame_no, timestamp, frame
+    finally:
+        cap.release()
 
 
 def _iter_frames_ffmpeg(
@@ -301,33 +323,40 @@ def _iter_frames_ffmpeg(
     output_width: int | None = None,
     output_height: int | None = None,
     sample_fps: float | None = None,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
 ):
     target_width = int(output_width or width)
     target_height = int(output_height or height)
+    start, end, start_frame_offset = _normalize_range(fps, start_sec, end_sec)
+    duration = None if end is None else max(0.0, end - start)
+
     filters: list[str] = []
     if hwaccel == "cuda" and (target_width != width or target_height != height):
         filters.append(f"scale_cuda={target_width}:{target_height}")
     elif target_width != width or target_height != height:
         filters.append(f"scale={target_width}:{target_height}")
 
+    select_expr = None
     if sample_fps is not None and sample_fps > 0:
-        filters.append(f"fps={sample_fps:.6f}")
-        frame_no = 1
-        frame_step = max(1, int(round(fps / sample_fps)))
-        select_expr = None
+        filters.append(f"fps={float(sample_fps):.6f}")
+        frame_step = max(1, int(round(fps / float(sample_fps))))
+        frame_no = start_frame_offset + 1
     elif sample_every <= 1:
-        frame_no = 1
         frame_step = 1
-        select_expr = None
+        frame_no = start_frame_offset + 1
     else:
-        select_expr = f"select='not(mod(n+1\\,{sample_every}))'"
-        frame_no = sample_every
+        # FFmpeg select n is chunk-relative, so add the original frame offset
+        # to keep the same global sampling pattern across chunk boundaries.
+        select_expr = f"select='not(mod(n+{start_frame_offset + 1}\\,{sample_every}))'"
+        frame_no = start_frame_offset + 1
+        while frame_no % sample_every != 0:
+            frame_no += 1
         frame_step = sample_every
 
     if hwaccel == "cuda":
-        # CUDA frames cannot be downloaded directly as bgr24 on many ffmpeg builds.
-        # Keep the successful chain:
-        # scale_cuda -> hwdownload -> format=nv12 -> format=bgr24 -> select
+        # CUDA frames cannot be downloaded directly as bgr24 on many FFmpeg builds.
+        # Keep the tested chain: scale_cuda -> hwdownload -> format=nv12 -> format=bgr24.
         filters.append("hwdownload")
         filters.append("format=nv12")
         filters.append("format=bgr24")
@@ -337,20 +366,18 @@ def _iter_frames_ffmpeg(
         if select_expr:
             filters.append(select_expr)
         filters.append("format=bgr24")
-    select_filter = ",".join(filters)
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-hwaccel",
-        hwaccel,
-    ]
+
+    select_filter = ",".join(filters) if filters else "format=bgr24"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if start > 0:
+        cmd.extend(["-ss", f"{start:.6f}"])
+    cmd.extend(["-hwaccel", hwaccel])
     if hwaccel == "cuda":
         cmd.extend(["-hwaccel_output_format", "cuda"])
+    cmd.extend(["-i", input_path])
+    if duration is not None:
+        cmd.extend(["-t", f"{duration:.6f}"])
     cmd.extend([
-        "-i",
-        input_path,
         "-vf",
         select_filter,
         "-vsync",
@@ -361,23 +388,29 @@ def _iter_frames_ffmpeg(
         "bgr24",
         "pipe:1",
     ])
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=10 ** 8,
-    )
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10 ** 8)
     frame_size = target_width * target_height * 3
+    out_idx = 0
     try:
         while True:
-            raw = proc.stdout.read(frame_size)
+            raw = proc.stdout.read(frame_size) if proc.stdout else b""
             if not raw:
                 break
             if len(raw) != frame_size:
                 raise RuntimeError("ffmpeg rawvideo output truncated")
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((target_height, target_width, 3)).copy()
-            yield frame_no, frame_no / fps, frame
-            frame_no += frame_step
+            if sample_fps is not None and sample_fps > 0:
+                timestamp = start + (out_idx / float(sample_fps))
+                current_frame_no = max(1, int(round(timestamp * fps)))
+            else:
+                current_frame_no = frame_no
+                timestamp = current_frame_no / fps
+                frame_no += frame_step
+            out_idx += 1
+            if end is not None and timestamp > end + 1e-9:
+                break
+            yield current_frame_no, timestamp, frame
     finally:
         if proc.stdout:
             proc.stdout.close()
@@ -420,6 +453,8 @@ def iter_video_frames(
     output_width: int | None = None,
     output_height: int | None = None,
     sample_fps: float | None = None,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
 ) -> tuple[object, str]:
     sample_every = max(1, int(sample_every))
     resolved_backend, hwaccel = resolve_decode_backend(decode_backend)
@@ -436,6 +471,8 @@ def iter_video_frames(
                     output_width=output_width,
                     output_height=output_height,
                     sample_fps=sample_fps,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
                 ),
                 lambda: (
                     (frame_no, timestamp, _resize_frame_if_needed(frame, output_width, output_height))
@@ -444,6 +481,8 @@ def iter_video_frames(
                         fps,
                         sample_every,
                         sample_fps=sample_fps,
+                        start_sec=start_sec,
+                        end_sec=end_sec,
                     )
                 ),
                 hwaccel,
@@ -458,6 +497,8 @@ def iter_video_frames(
                 fps,
                 sample_every,
                 sample_fps=sample_fps,
+                start_sec=start_sec,
+                end_sec=end_sec,
             )
         ),
         "opencv",
@@ -507,12 +548,7 @@ def _read_frame_by_timestamp_ffmpeg(
     )
     frame_size = width * height * 3
     try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            timeout=30,
-        )
+        proc = subprocess.run(cmd, check=False, capture_output=True, timeout=30)
     except Exception:
         return None
     if proc.returncode != 0 or len(proc.stdout) < frame_size:

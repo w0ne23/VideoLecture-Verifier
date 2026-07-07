@@ -1,25 +1,24 @@
 """
 Build a lightweight sampled-frame cache from an input video.
 
-The cache is the shared coordinate system for later passes:
-  1. practice/video/slide region classification
-  2. scene/base detection
-  3. annotation detection
-
-It stores resized sampled frames plus a manifest that maps every sample back to
-the original frame number.
-
-Usage:
-    python -m pipeline.sample_cache --input lecture.mp4 --output sample_cache/
+This replacement keeps the existing single-pass behavior and adds chunked cache
+creation for long lecture videos. The chunked path creates temporary per-range
+sample caches in parallel, then merges them back into the exact same final cache
+shape used by the downstream staged pipeline.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
-from dataclasses import asdict, dataclass
+import math
 import os
+import shutil
+import tempfile
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -135,14 +134,6 @@ def _person_detections_from_frames(model, frames: list[np.ndarray], conf: float)
     return [_detections_from_result(result, height, width) for result in results]
 
 
-def _person_detections_from_frame(model, frame: np.ndarray, conf: float) -> list[dict]:
-    if model is None:
-        return []
-    height, width = frame.shape[:2]
-    result = model(frame, classes=[0], conf=conf, verbose=False)[0]
-    return _detections_from_result(result, height, width)
-
-
 def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -181,7 +172,6 @@ def _moving_person_mask(
 ) -> np.ndarray | None:
     if next_frame is None or not detections or not next_detections:
         return None
-
     height, width = frame.shape[:2]
     mask = np.zeros((height, width), dtype=np.uint8)
     for det in detections:
@@ -198,17 +188,12 @@ def _moving_person_mask(
         x2, y2 = min(width, x2 + pad), min(height, y2 + pad)
         if x2 > x1 and y2 > y1:
             mask[y1:y2, x1:x2] = 1
-
     if not bool(mask.any()):
         return None
     return (mask > 0).astype(np.uint8)
 
 
-def _person_presence_mask(
-    frame: np.ndarray,
-    detections: list[dict],
-    dilate_px: int,
-) -> np.ndarray | None:
+def _person_presence_mask(frame: np.ndarray, detections: list[dict], dilate_px: int) -> np.ndarray | None:
     if not detections:
         return None
     height, width = frame.shape[:2]
@@ -241,7 +226,6 @@ def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
     ]
     if not mask_positions:
         return 0
-
     filled = 0
     for idx, frame in enumerate(frames):
         if frame.get("person_mask_filename"):
@@ -262,25 +246,15 @@ def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
             filled += 1
     return filled
 
-def create_sample_cache(
-    input_path: str,
-    output_dir: str,
-    cfg: SampleCacheConfig | None = None,
-) -> dict:
-    cfg = cfg or SampleCacheConfig()
-    cfg.sample_every = max(1, int(cfg.sample_every))
-    cfg.sample_fps = max(0.1, float(cfg.sample_fps))
-    cfg.resize_width = max(160, int(cfg.resize_width))
 
-    video_meta = read_video_metadata(input_path)
-    output_path = Path(output_dir)
+def _prepare_output_dirs(output_path: Path, cfg: SampleCacheConfig) -> tuple[Path, Path, Path, Path, Path]:
     output_path.mkdir(parents=True, exist_ok=True)
-
     video_path = output_path / VIDEO_FILENAME
     manifest_path = output_path / MANIFEST_FILENAME
     masks_path = output_path / MASKS_DIRNAME
     presence_masks_path = output_path / PRESENCE_MASKS_DIRNAME
     mask_previews_path = output_path / "person_mask_previews"
+
     video_path.unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
     if masks_path.exists():
@@ -296,10 +270,30 @@ def create_sample_cache(
             stale.unlink(missing_ok=True)
     if cfg.save_person_mask_previews:
         mask_previews_path.mkdir(parents=True, exist_ok=True)
+    return video_path, manifest_path, masks_path, presence_masks_path, mask_previews_path
+
+
+def _create_sample_cache_impl(
+    input_path: str,
+    output_dir: str,
+    cfg: SampleCacheConfig | None = None,
+    *,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+    chunk_index: int | None = None,
+    core_start_sec: float | None = None,
+    core_end_sec: float | None = None,
+) -> dict:
+    cfg = cfg or SampleCacheConfig()
+    cfg.sample_every = max(1, int(cfg.sample_every))
+    cfg.sample_fps = max(0.1, float(cfg.sample_fps))
+    cfg.resize_width = max(160, int(cfg.resize_width))
+    video_meta = read_video_metadata(input_path)
+    output_path = Path(output_dir)
+    video_path, manifest_path, _, _, mask_previews_path = _prepare_output_dirs(output_path, cfg)
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
     sampled_fps = float(cfg.sample_fps)
-
     writer = cv2.VideoWriter(
         str(video_path),
         cv2.VideoWriter_fourcc(*"MJPG"),
@@ -319,6 +313,7 @@ def create_sample_cache(
     preview_count = 0
     pending_sample = None
     batch_size = max(1, int(cfg.person_mask_batch_size))
+    total_frame_count = max(1, int(video_meta.get("frame_count") or 1))
 
     def finalize_sample(sample: dict, next_frame: np.ndarray | None, next_detections: list[dict]) -> None:
         nonlocal preview_count
@@ -359,9 +354,11 @@ def create_sample_cache(
                     )
         frames.append(frame_record)
 
+    range_label = "full" if start_sec is None and end_sec is None else f"{start_sec:.2f}s~{end_sec:.2f}s"
     log.info(
-        "sample cache start: input=%s fps=%.2f frames=%s sample_fps=%s size=%sx%s",
+        "sample cache start: input=%s range=%s fps=%.2f frames=%s sample_fps=%s size=%sx%s",
         input_path,
+        range_label,
         video_meta["fps"],
         video_meta["frame_count"],
         cfg.sample_fps,
@@ -379,6 +376,8 @@ def create_sample_cache(
         output_width=cfg.resize_width,
         output_height=cached_height,
         sample_fps=cfg.sample_fps,
+        start_sec=start_sec,
+        end_sec=end_sec,
     )
     log.info("sample cache decode backend: %s", active_backend)
 
@@ -401,11 +400,7 @@ def create_sample_cache(
             decision = to_decision_frame(small)
             phash_int = compute_phash_int(decision)
             prev_mse = compute_mse(prev_decision, decision) if prev_decision is not None else None
-            prev_hash_dist = (
-                phash_distance_int(prev_phash, phash_int)
-                if prev_phash is not None
-                else None
-            )
+            prev_hash_dist = phash_distance_int(prev_phash, phash_int) if prev_phash is not None else None
 
             writer.write(small)
             frame_record = {
@@ -425,12 +420,11 @@ def create_sample_cache(
                 "detections": detections,
                 "record": frame_record,
             }
-
             prev_decision = decision
             prev_phash = phash_int
 
             if sample_index % progress_interval == 0:
-                pct = (sample["frame_no"] / video_meta["frame_count"] * 100.0) if video_meta["frame_count"] > 0 else 0.0
+                pct = (sample["frame_no"] / total_frame_count * 100.0) if total_frame_count > 0 else 0.0
                 log.info("sample cache progress: samples=%s frame=%s %.1f%%", sample_index, sample["frame_no"], pct)
 
     try:
@@ -483,6 +477,13 @@ def create_sample_cache(
             "height": cached_height,
             "sample_count": sample_index,
         },
+        "range": {
+            "chunk_index": chunk_index,
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "core_start_sec": core_start_sec,
+            "core_end_sec": core_end_sec,
+        },
         "frames": frames,
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -490,6 +491,325 @@ def create_sample_cache(
 
     log.info("sample cache done: samples=%s output=%s", sample_index, output_path)
     return manifest
+
+
+def create_sample_cache(input_path: str, output_dir: str, cfg: SampleCacheConfig | None = None) -> dict:
+    return _create_sample_cache_impl(input_path, output_dir, cfg)
+
+
+def create_sample_cache_range(
+    input_path: str,
+    output_dir: str,
+    cfg: SampleCacheConfig | None,
+    start_sec: float,
+    end_sec: float,
+    *,
+    chunk_index: int | None = None,
+    core_start_sec: float | None = None,
+    core_end_sec: float | None = None,
+) -> dict:
+    return _create_sample_cache_impl(
+        input_path,
+        output_dir,
+        cfg,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        chunk_index=chunk_index,
+        core_start_sec=core_start_sec,
+        core_end_sec=core_end_sec,
+    )
+
+
+def _chunk_specs(duration: float, chunk_sec: float, overlap_sec: float) -> list[dict]:
+    if duration <= chunk_sec:
+        return []
+    chunk_sec = max(30.0, float(chunk_sec))
+    overlap_sec = max(0.0, min(float(overlap_sec), chunk_sec / 4.0))
+    chunk_count = max(1, math.ceil(duration / chunk_sec))
+    specs: list[dict] = []
+    for idx in range(chunk_count):
+        core_start = idx * chunk_sec
+        core_end = min(duration, (idx + 1) * chunk_sec)
+        start = 0.0 if idx == 0 else max(0.0, core_start - overlap_sec)
+        end = duration if idx == chunk_count - 1 else min(duration, core_end + overlap_sec)
+        specs.append({
+            "chunk_index": idx,
+            "start_sec": start,
+            "end_sec": end,
+            "core_start_sec": core_start,
+            "core_end_sec": core_end,
+            "is_last": idx == chunk_count - 1,
+        })
+    return specs
+
+
+def _create_chunk_worker(input_path: str, chunk_dir: str, cfg: SampleCacheConfig, spec: dict) -> str:
+    create_sample_cache_range(
+        input_path,
+        chunk_dir,
+        cfg,
+        float(spec["start_sec"]),
+        float(spec["end_sec"]),
+        chunk_index=int(spec["chunk_index"]),
+        core_start_sec=float(spec["core_start_sec"]),
+        core_end_sec=float(spec["core_end_sec"]),
+    )
+    return str(Path(chunk_dir) / MANIFEST_FILENAME)
+
+
+def _copy_optional_mask(
+    src_cache_dir: Path,
+    dst_cache_dir: Path,
+    src_filename: str | None,
+    dst_rel_filename: str,
+) -> str | None:
+    if not src_filename:
+        return None
+    src = src_cache_dir / src_filename
+    if not src.exists():
+        return None
+    dst = dst_cache_dir / dst_rel_filename
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst_rel_filename
+
+
+def _merge_chunk_caches(
+    input_path: str,
+    output_dir: str,
+    cfg: SampleCacheConfig,
+    manifest_paths: list[Path],
+    specs: list[dict],
+) -> dict:
+    video_meta = read_video_metadata(input_path)
+    output_path = Path(output_dir)
+    video_path, merged_manifest_path, _, _, _ = _prepare_output_dirs(output_path, cfg)
+
+    cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
+    sampled_fps = float(cfg.sample_fps)
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        sampled_fps,
+        (cfg.resize_width, cached_height),
+    )
+    if not writer.isOpened():
+        raise RuntimeError(f"Cannot open merged sample cache writer: {video_path}")
+
+    frames: list[dict] = []
+    seen_frame_nos: set[int] = set()
+    sample_index = 0
+    prev_decision = None
+    prev_phash = None
+
+    try:
+        for chunk_manifest_path, spec in zip(manifest_paths, specs):
+            payload = json.loads(chunk_manifest_path.read_text(encoding="utf-8"))
+            chunk_dir = chunk_manifest_path.parent
+            cap = cv2.VideoCapture(str(chunk_dir / payload["video_filename"]))
+            if not cap.isOpened():
+                raise FileNotFoundError(f"Cannot open chunk sampled video: {chunk_dir / payload['video_filename']}")
+            try:
+                core_start = float(spec["core_start_sec"])
+                core_end = float(spec["core_end_sec"])
+                is_last = bool(spec.get("is_last"))
+                for item in payload.get("frames", []):
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        raise RuntimeError(f"Chunk sampled video ended early: {chunk_dir / payload['video_filename']}")
+                    timestamp = float(item["timestamp_sec"])
+                    if timestamp < core_start - 1e-6:
+                        continue
+                    if is_last:
+                        if timestamp > core_end + 1e-6:
+                            continue
+                    elif timestamp >= core_end - 1e-6:
+                        continue
+                    frame_no = int(item["frame_no"])
+                    if frame_no in seen_frame_nos:
+                        continue
+                    seen_frame_nos.add(frame_no)
+
+                    sample_index += 1
+                    writer.write(frame)
+                    decision = to_decision_frame(frame)
+                    phash_int = compute_phash_int(decision)
+                    prev_mse = compute_mse(prev_decision, decision) if prev_decision is not None else None
+                    prev_hash_dist = phash_distance_int(prev_phash, phash_int) if prev_phash is not None else None
+
+                    frame_record = {
+                        "sample_index": sample_index,
+                        "frame_no": frame_no,
+                        "timestamp_sec": round(timestamp, 6),
+                        "phash_int": phash_int,
+                        "prev_mse": round(prev_mse, 6) if prev_mse is not None else None,
+                        "prev_hash_dist": prev_hash_dist,
+                    }
+                    presence_dst = _copy_optional_mask(
+                        chunk_dir,
+                        output_path,
+                        item.get("person_presence_mask_filename"),
+                        f"{PRESENCE_MASKS_DIRNAME}/person_presence_mask_{sample_index:06d}.npy",
+                    )
+                    if presence_dst:
+                        frame_record["person_presence_mask_filename"] = presence_dst
+                        if item.get("person_presence_ratio") is not None:
+                            frame_record["person_presence_ratio"] = item.get("person_presence_ratio")
+                    person_dst = _copy_optional_mask(
+                        chunk_dir,
+                        output_path,
+                        item.get("person_mask_filename"),
+                        f"{MASKS_DIRNAME}/person_mask_{sample_index:06d}.npy",
+                    )
+                    if person_dst:
+                        frame_record["person_mask_filename"] = person_dst
+                        if item.get("person_mask_inherited"):
+                            frame_record["person_mask_inherited"] = True
+                            frame_record["person_mask_inherited_distance"] = item.get("person_mask_inherited_distance")
+                    frames.append(frame_record)
+                    prev_decision = decision
+                    prev_phash = phash_int
+            finally:
+                cap.release()
+    finally:
+        writer.release()
+
+    frames.sort(key=lambda x: (float(x["timestamp_sec"]), int(x["frame_no"])))
+    # Re-number once more after sorting, because chunk workers can complete out of order.
+    # Also rename references are already unique and ordered by the earlier write pass, so leave files as-is.
+    for idx, frame in enumerate(frames, start=1):
+        frame["sample_index"] = idx
+
+    mask_fill_gap_samples = max(0, int(round(float(cfg.person_mask_fill_gap_sec) * sampled_fps)))
+    inherited_masks = _fill_short_person_mask_gaps(frames, max_gap=mask_fill_gap_samples)
+
+    person_masks_payload = {
+        "enabled": bool(cfg.person_masks),
+        "dirname": MASKS_DIRNAME,
+        "presence_dirname": PRESENCE_MASKS_DIRNAME,
+        "model": cfg.person_mask_model if cfg.person_masks else None,
+        "coordinate_space": "sample_cache_frame",
+        "mode": "moving_person_only",
+        "static_diff_threshold": cfg.person_mask_static_diff_threshold,
+        "static_changed_ratio_threshold": cfg.person_mask_static_changed_ratio_threshold,
+        "match_iou_threshold": cfg.person_mask_match_iou_threshold,
+        "fill_gap_sec": cfg.person_mask_fill_gap_sec,
+        "fill_gap_samples": mask_fill_gap_samples,
+        "inherited_count": inherited_masks,
+        "preview_dirname": None,
+        "preview_count": 0,
+    }
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "input_path": input_path,
+        "video_filename": VIDEO_FILENAME,
+        "config": asdict(cfg),
+        "person_masks": person_masks_payload,
+        "source": video_meta,
+        "cache": {
+            "sampled_fps": sampled_fps,
+            "width": cfg.resize_width,
+            "height": cached_height,
+            "sample_count": len(frames),
+            "chunked": True,
+            "chunk_count": len(specs),
+        },
+        "chunks": specs,
+        "frames": frames,
+    }
+    with open(merged_manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    log.info("chunked sample cache merged: chunks=%s samples=%s output=%s", len(specs), len(frames), output_path)
+    return manifest
+
+
+def create_sample_cache_chunked(
+    input_path: str,
+    output_dir: str,
+    cfg: SampleCacheConfig | None = None,
+    *,
+    chunk_sec: float | None = None,
+    overlap_sec: float | None = None,
+    workers: int | None = None,
+) -> dict:
+    cfg = copy.deepcopy(cfg or SampleCacheConfig())
+    cfg.sample_every = max(1, int(cfg.sample_every))
+    cfg.sample_fps = max(0.1, float(cfg.sample_fps))
+    cfg.resize_width = max(160, int(cfg.resize_width))
+    chunk_sec = float(chunk_sec if chunk_sec is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300"))
+    overlap_sec = float(overlap_sec if overlap_sec is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30"))
+    requested_workers = int(workers if workers is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2"))
+
+    video_meta = read_video_metadata(input_path)
+    duration = float(video_meta.get("duration_sec") or 0.0)
+    if duration <= 0.0 and video_meta.get("frame_count") and video_meta.get("fps"):
+        duration = float(video_meta["frame_count"]) / float(video_meta["fps"])
+
+    specs = _chunk_specs(duration, chunk_sec, overlap_sec)
+    if not specs:
+        log.info("sample cache chunking skipped: duration=%.1fs <= chunk_sec=%.1fs", duration, chunk_sec)
+        return create_sample_cache(input_path, output_dir, cfg)
+
+    workers = max(1, min(requested_workers, len(specs)))
+    log.info(
+        "sample cache chunked start: duration=%.1fs chunk_sec=%.1fs overlap=%.1fs workers=%s chunks=%s",
+        duration,
+        chunk_sec,
+        overlap_sec,
+        workers,
+        len(specs),
+    )
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="verilec_sample_cache_chunks_", dir=str(output_path.parent)) as tmp_root:
+        tmp_root_path = Path(tmp_root)
+        manifest_by_index: dict[int, Path] = {}
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            future_map = {}
+            for spec in specs:
+                chunk_dir = tmp_root_path / f"chunk_{int(spec['chunk_index']):03d}"
+                chunk_dir.mkdir(parents=True, exist_ok=True)
+                log.info(
+                    "  [sample chunk start %s/%s] range=%.1fs~%.1fs core=%.1fs~%.1fs",
+                    int(spec["chunk_index"]) + 1,
+                    len(specs),
+                    spec["start_sec"],
+                    spec["end_sec"],
+                    spec["core_start_sec"],
+                    spec["core_end_sec"],
+                )
+                future = executor.submit(_create_chunk_worker, input_path, str(chunk_dir), cfg, spec)
+                future_map[future] = spec
+
+            pending = set(future_map.keys())
+            completed = 0
+            while pending:
+                done, pending = wait(pending, timeout=10, return_when=FIRST_COMPLETED)
+                if not done:
+                    log.info("  [sample chunk waiting] completed=%s/%s running=%s", completed, len(specs), len(pending))
+                    continue
+                for future in done:
+                    spec = future_map[future]
+                    manifest_path = Path(future.result())
+                    manifest_by_index[int(spec["chunk_index"])] = manifest_path
+                    completed += 1
+                    try:
+                        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        log.info(
+                            "  [sample chunk done %s/%s | idx=%s] samples=%s backend=%s",
+                            completed,
+                            len(specs),
+                            int(spec["chunk_index"]) + 1,
+                            payload.get("cache", {}).get("sample_count"),
+                            payload.get("cache", {}).get("decode_backend") or payload.get("decode_backend"),
+                        )
+                    except Exception:
+                        log.info("  [sample chunk done %s/%s | idx=%s]", completed, len(specs), int(spec["chunk_index"]) + 1)
+
+        ordered_manifests = [manifest_by_index[idx] for idx in sorted(manifest_by_index)]
+        ordered_specs = [specs[idx] for idx in sorted(manifest_by_index)]
+        return _merge_chunk_caches(input_path, output_dir, cfg, ordered_manifests, ordered_specs)
 
 
 def load_sample_cache(cache_dir: str | Path) -> dict:
@@ -504,11 +824,9 @@ def iter_sample_cache(cache_dir: str | Path) -> Iterator[tuple[dict, np.ndarray]
     cache_path = Path(cache_dir)
     manifest = load_sample_cache(cache_path)
     video_path = cache_path / manifest["video_filename"]
-
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
-
     try:
         for frame_info in manifest.get("frames", []):
             ret, frame = cap.read()
@@ -541,6 +859,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--person-mask-fill-gap-sec", type=float, default=SampleCacheConfig.person_mask_fill_gap_sec)
     parser.add_argument("--save-person-mask-previews", action="store_true", help="Save a few masked sample preview JPGs for debugging")
     parser.add_argument("--person-mask-preview-limit", type=int, default=SampleCacheConfig.person_mask_preview_limit)
+    parser.add_argument("--chunked", action="store_true", help="Build sample cache by 5-minute chunks and merge it back")
+    parser.add_argument("--chunk-sec", type=float, default=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300")))
+    parser.add_argument("--chunk-overlap-sec", type=float, default=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")))
+    parser.add_argument("--chunk-workers", type=int, default=int(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2")))
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -549,7 +871,6 @@ def main():
     args = parse_args()
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-
     cfg = SampleCacheConfig(
         sample_every=args.sample_every,
         sample_fps=args.sample_fps,
@@ -566,7 +887,17 @@ def main():
         save_person_mask_previews=args.save_person_mask_previews,
         person_mask_preview_limit=args.person_mask_preview_limit,
     )
-    create_sample_cache(args.input, args.output, cfg)
+    if args.chunked:
+        create_sample_cache_chunked(
+            args.input,
+            args.output,
+            cfg,
+            chunk_sec=args.chunk_sec,
+            overlap_sec=args.chunk_overlap_sec,
+            workers=args.chunk_workers,
+        )
+    else:
+        create_sample_cache(args.input, args.output, cfg)
 
 
 if __name__ == "__main__":

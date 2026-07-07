@@ -267,6 +267,17 @@ def grayscale_hist_correlation(frame_a: np.ndarray, frame_b: np.ndarray) -> floa
     return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
 
 
+def grayscale_histogram(frame: np.ndarray) -> np.ndarray:
+    gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
+    cv2.normalize(hist, hist)
+    return hist
+
+
+def histogram_correlation(hist_a: np.ndarray, hist_b: np.ndarray) -> float:
+    return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
+
+
 def content_region(frame: np.ndarray, cfg: Config) -> np.ndarray:
     """반복 템플릿/하단 footer 영향을 줄이고 실제 장표 본문 중심으로 비교한다."""
     h, w = frame.shape[:2]
@@ -310,7 +321,38 @@ def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | 
         "dhash": compute_dhash_hires(full),
         "content_phash": compute_phash_hires(content),
         "content_dhash": compute_dhash_hires(content),
+        "histogram": grayscale_histogram(full),
+        "content_histogram": grayscale_histogram(content),
     }
+
+
+def duplicate_pair_prefilter(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
+    metrics = {
+        "phash": int(rep_a["phash"] - rep_b["phash"]),
+        "dhash": int(rep_a["dhash"] - rep_b["dhash"]),
+        "content_phash": int(rep_a["content_phash"] - rep_b["content_phash"]),
+        "content_dhash": int(rep_a["content_dhash"] - rep_b["content_dhash"]),
+        "hist": float(histogram_correlation(rep_a["histogram"], rep_b["histogram"])),
+        "content_hist": float(histogram_correlation(rep_a["content_histogram"], rep_b["content_histogram"])),
+    }
+
+    relaxed_full_hash = max(int(cfg.DUPLICATE_HASH_THRESHOLD) * 2, 48)
+    relaxed_full_dhash = max(int(cfg.DUPLICATE_DHASH_THRESHOLD) * 2, 56)
+    relaxed_content_hash = max(int(cfg.DUPLICATE_CONTENT_HASH_THRESHOLD) * 3, 54)
+    relaxed_content_dhash = max(int(cfg.DUPLICATE_CONTENT_DHASH_THRESHOLD) * 2, 48)
+    relaxed_full_hist = min(float(cfg.DUPLICATE_FULL_HIST_MIN) - 0.20, 0.80)
+    relaxed_content_hist = min(float(cfg.DUPLICATE_CONTENT_HIST_MIN) - 0.18, 0.82)
+
+    maybe_duplicate = (
+        metrics["phash"] <= relaxed_full_hash
+        or metrics["dhash"] <= relaxed_full_dhash
+        or metrics["content_phash"] <= relaxed_content_hash
+        or metrics["content_dhash"] <= relaxed_content_dhash
+        or metrics["hist"] >= relaxed_full_hist
+        or metrics["content_hist"] >= relaxed_content_hist
+    )
+    metrics["prefilter_pass"] = bool(maybe_duplicate)
+    return bool(maybe_duplicate), metrics
 
 
 def _agenda_white_components(content: np.ndarray, ignore_mask: np.ndarray | None = None) -> tuple[np.ndarray, int]:
@@ -1850,17 +1892,19 @@ def _extract_slides_staged(
     debug: bool = False,
     decode_backend: str | None = None,
 ) -> list[dict]:
+    import time
+
     try:
         from .annotation_from_cache import detect_annotations
         from .materialize_from_cache import materialize_frames
-        from .sample_cache import SampleCacheConfig, create_sample_cache
+        from .sample_cache import SampleCacheConfig, create_sample_cache_chunked
         from .scene_transition_from_cache import run_cache_probe
         from .scene_transition_probe import ProbeConfig
         from .timeline_region_classifier import classify_regions
     except ImportError:  # pragma: no cover - direct script execution fallback
         from annotation_from_cache import detect_annotations
         from materialize_from_cache import materialize_frames
-        from sample_cache import SampleCacheConfig, create_sample_cache
+        from sample_cache import SampleCacheConfig, create_sample_cache_chunked
         from scene_transition_from_cache import run_cache_probe
         from scene_transition_probe import ProbeConfig
         from timeline_region_classifier import classify_regions
@@ -1876,32 +1920,47 @@ def _extract_slides_staged(
     for path in (cache_dir, regions_dir, scenes_dir, annotations_dir, review_dir):
         path.mkdir(parents=True, exist_ok=True)
 
+    def _elapsed(t0: float) -> float:
+        return time.perf_counter() - t0
+
     log.info("슬라이드 추출 staged pipeline 실행")
     log.info("  Step 0: sample cache 생성")
-    create_sample_cache(
+    step_t0 = time.perf_counter()
+    create_sample_cache_chunked(
         input_path,
         str(cache_dir),
         cfg=SampleCacheConfig(decode_backend=decode_backend or Config.DECODE_BACKEND),
+        chunk_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300")),
+        overlap_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")),
+        workers=int(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2")),
     )
+    log.info("  Step 0 done: sample cache 생성 elapsed=%.1fs", _elapsed(step_t0))
 
     log.info("  Step 1: timeline region 분류")
+    step_t0 = time.perf_counter()
     region_payload = classify_regions(str(cache_dir), str(regions_dir))
+    log.info("  Step 1 done: timeline region 분류 elapsed=%.1fs", _elapsed(step_t0))
     regions_path = regions_dir / "timeline_segments.json"
 
     log.info("  Step 2: slide region scene/base 추출")
+    step_t0 = time.perf_counter()
     run_cache_probe(
         str(cache_dir),
         str(scenes_dir),
         ProbeConfig(),
         regions_path=str(regions_path),
     )
+    log.info("  Step 2 done: slide region scene/base 추출 elapsed=%.1fs", _elapsed(step_t0))
     scenes_path = scenes_dir / "scene_transitions.json"
 
     log.info("  Step 3: scene 내부 annotation frame 추출")
+    step_t0 = time.perf_counter()
     detect_annotations(str(cache_dir), str(scenes_path), str(annotations_dir))
+    log.info("  Step 3 done: scene 내부 annotation frame 추출 elapsed=%.1fs", _elapsed(step_t0))
     annotations_path = annotations_dir / "scene_annotations.json"
 
     log.info("  Step 4A: LocalVLM review용 임시 frame materialize")
+    step_t0 = time.perf_counter()
     materialize_frames(
         input_path,
         str(scenes_path),
@@ -1910,39 +1969,76 @@ def _extract_slides_staged(
         regions_path=str(regions_path),
         decode_backend=decode_backend or Config.DECODE_BACKEND,
     )
+    log.info("  Step 4A done: LocalVLM review용 임시 frame materialize elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     review_metadata_path = review_dir / "metadata.json"
     with open(review_metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
+    log.info("  Step 4A-1 done: review metadata load elapsed=%.1fs", _elapsed(step_t0))
 
     cfg = Config()
+    step_t0 = time.perf_counter()
     metadata = mark_clean_final_frames(metadata)
+    log.info("  Step 4A-2 done: mark_clean_final_frames elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = mark_visual_duplicates(metadata, review_dir, cfg)
+    log.info("  Step 4A-3 done: mark_visual_duplicates elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     add_transition_review_candidates(review_dir, scenes_path, metadata)
+    log.info("  Step 4A-4 done: add_transition_review_candidates elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = maybe_run_local_vlm_review(metadata, review_dir)
+    log.info("  Step 4A-5 done: maybe_run_local_vlm_review elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = remap_metadata_for_final_materialize(metadata)
+    log.info("  Step 4A-6 done: remap_metadata_for_final_materialize elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     fps, total_frames, _, _ = _video_metadata(input_path)
     duration = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
+    log.info("  Step 4A-7 done: video metadata reload elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = refresh_scene_time_ranges(metadata, duration)
     metadata = mark_clean_final_frames(metadata)
     metadata = finalize_scene_slide_metadata(metadata)
+    log.info("  Step 4A-8 done: metadata finalize elapsed=%.1fs", _elapsed(step_t0))
 
     log.info("  Step 4B: VLM 판정 반영 후 최종 frame materialize")
+    step_t0 = time.perf_counter()
     _materialize_metadata_frames(input_path, out_path, metadata)
-    copy_local_vlm_review_artifacts(review_dir, out_path)
-    log_scene_slide_summary(metadata)
+    log.info("  Step 4B-1 done: final frame materialize elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
+    copy_local_vlm_review_artifacts(review_dir, out_path)
+    log.info("  Step 4B-2 done: copy_local_vlm_review_artifacts elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
+    log_scene_slide_summary(metadata)
+    log.info("  Step 4B-3 done: log_scene_slide_summary elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata_path = out_path / "metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-4 done: metadata.json write elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     scene_slide_map_path = out_path / "scene_slide_map.json"
     with open(scene_slide_map_path, "w", encoding="utf-8") as f:
         json.dump(build_scene_slide_map(metadata), f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-5 done: scene_slide_map.json write elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     canonical_slide_annotations_path = out_path / "canonical_slide_annotations.json"
     with open(canonical_slide_annotations_path, "w", encoding="utf-8") as f:
         json.dump(build_canonical_slide_annotations(metadata), f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-6 done: canonical_slide_annotations.json write elapsed=%.1fs", _elapsed(step_t0))
 
     video_count = sum(1 for item in metadata if item.get("scene_type") == "video" and item.get("capture_type") == "base")
     scene_count = len({m["scene_index"] for m in metadata if m.get("scene_index") is not None})
@@ -2876,6 +2972,8 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     )
     log.info(f"  {'-'*30}  {'-'*4} {'-'*4} {'-'*4} {'-'*5} {'-'*6} {'-'*5}  {'-'*12}")
 
+    pair_count = 0
+    prefilter_skipped = 0
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
             la, lb  = labels[i], labels[j]
@@ -2884,6 +2982,22 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
 
             # 같은 슬라이드 내 base↔annot 쌍은 건너뜀
             if idx_a == idx_b:
+                continue
+
+            pair_count += 1
+            should_compare, prefilter_metrics = duplicate_pair_prefilter(
+                representatives[la],
+                representatives[lb],
+                cfg,
+            )
+            if not should_compare:
+                prefilter_skipped += 1
+                log.info(
+                    f"  {la:<14} ↔ {lb:<14}  "
+                    f"{prefilter_metrics['phash']:>4} {prefilter_metrics['dhash']:>4} "
+                    f"{prefilter_metrics['content_phash']:>4} "
+                    f"{'-':>5} {'-':>6} {prefilter_metrics['hist']:>5.3f}  [cheap-skip]"
+                )
                 continue
 
             is_dup, metrics = duplicate_pair_decision(
@@ -2920,6 +3034,12 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 })
 
     log.info("──────────────────────────────────────────────────────────────\n")
+    log.info(
+        "  duplicate prefilter: compared=%s skipped=%s total=%s",
+        pair_count - prefilter_skipped,
+        prefilter_skipped,
+        pair_count,
+    )
 
     base_representatives: dict[int, dict] = {}
     for idx, fname in base_pool.items():
