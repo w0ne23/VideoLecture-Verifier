@@ -70,9 +70,8 @@ def pipeline_process(
     os.chdir(pipeline_root)
 
     try:
-        video_path = Path(input_path)
-        if not video_path.is_absolute():
-            video_path = pipeline_root / input_path
+        from app.services.storage_service import resolve_storage_path
+        video_path = resolve_storage_path(input_path)
 
         output_dir = LOCAL_STORAGE_DIR / 'results' / lecture_id
         slides_dir = output_dir / 'slides'

@@ -20,7 +20,7 @@ from app.models import (
     ProcessingJob,
     normalize_job_type,
 )
-from app.services.storage_service import lecture_output_dir, make_file_url
+from app.services.storage_service import lecture_output_dir, make_file_url, resolve_storage_path
 
 
 def normalize_domain_value(value: str | None) -> str:
@@ -103,7 +103,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
         'description': lecture.description or '',
         'video_path': lecture.video_path,
         'video_url': make_file_url(lecture.video_path),
-        'output_dir': lecture.output_dir,
+        'output_dir': str(resolve_storage_path(lecture.output_dir) or ''),
         'stem': stem,
         'is_verified': bool(lecture.is_verified),
         'created_at': lecture.created_at.isoformat() if lecture.created_at else None,
@@ -180,10 +180,12 @@ async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return False
-    if lecture.video_path:
-        shutil.rmtree(Path(lecture.video_path).parent, ignore_errors=True)
-    if lecture.output_dir:
-        shutil.rmtree(Path(lecture.output_dir), ignore_errors=True)
+    video_path = resolve_storage_path(lecture.video_path)
+    if video_path is not None:
+        shutil.rmtree(video_path.parent, ignore_errors=True)
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if output_dir is not None:
+        shutil.rmtree(output_dir, ignore_errors=True)
     await db.delete(lecture)
     await db.commit()
     return True

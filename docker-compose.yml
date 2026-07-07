@@ -24,7 +24,8 @@ services:
     volumes:
       - ./storage:/app/storage
     ports:
-      - "8000:8000"
+      # graphLec 백엔드가 호스트 8000을 쓰고 있어 8020으로 노출
+      - "8020:8000"
     depends_on:
       - db
 
