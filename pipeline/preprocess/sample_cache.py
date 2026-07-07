@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 from dataclasses import asdict, dataclass
+import os
 from pathlib import Path
 from typing import Iterator
 
@@ -29,8 +30,10 @@ from PIL import Image
 
 try:
     from .person_masks import MASKS_DIRNAME, PRESENCE_MASKS_DIRNAME
+    from .video_decode import iter_video_frames, read_video_metadata
 except ImportError:  # pragma: no cover - allows direct script execution
     from person_masks import MASKS_DIRNAME, PRESENCE_MASKS_DIRNAME
+    from video_decode import iter_video_frames, read_video_metadata
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -47,6 +50,8 @@ class SampleCacheConfig:
     sample_every: int = 2
     resize_width: int = 768
     jpeg_quality: int = 95
+    decode_backend: str = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
+    person_mask_batch_size: int = 32
     person_masks: bool = True
     person_mask_model: str = "yolov8n-seg.pt"
     person_mask_conf: float = 0.25
@@ -101,16 +106,11 @@ def _load_person_model(model_name: str):
         return None
 
 
-def _person_detections_from_frame(model, frame: np.ndarray, conf: float) -> list[dict]:
-    if model is None:
+def _detections_from_result(result, height: int, width: int) -> list[dict]:
+    if result.masks is None:
         return []
-    height, width = frame.shape[:2]
-    results = model(frame, classes=[0], conf=conf, verbose=False)[0]
-    if results.masks is None:
-        return []
-
     detections: list[dict] = []
-    for box, polygon in zip(results.boxes, results.masks.xy):
+    for box, polygon in zip(result.boxes, result.masks.xy):
         if len(polygon) < 3:
             continue
         mask = np.zeros((height, width), dtype=np.uint8)
@@ -124,6 +124,22 @@ def _person_detections_from_frame(model, frame: np.ndarray, conf: float) -> list
             "mask": mask,
         })
     return detections
+
+
+def _person_detections_from_frames(model, frames: list[np.ndarray], conf: float) -> list[list[dict]]:
+    if model is None or not frames:
+        return [[] for _ in frames]
+    height, width = frames[0].shape[:2]
+    results = model(frames, classes=[0], conf=conf, verbose=False, stream=False)
+    return [_detections_from_result(result, height, width) for result in results]
+
+
+def _person_detections_from_frame(model, frame: np.ndarray, conf: float) -> list[dict]:
+    if model is None:
+        return []
+    height, width = frame.shape[:2]
+    result = model(frame, classes=[0], conf=conf, verbose=False)[0]
+    return _detections_from_result(result, height, width)
 
 
 def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
@@ -245,32 +261,6 @@ def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
             filled += 1
     return filled
 
-
-def read_video_metadata(input_path: str) -> dict:
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {input_path}")
-
-    try:
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    finally:
-        cap.release()
-
-    if fps <= 0 or width <= 0 or height <= 0:
-        raise RuntimeError(f"Cannot read video metadata: {input_path}")
-
-    return {
-        "fps": fps,
-        "frame_count": frame_count,
-        "width": width,
-        "height": height,
-        "duration_sec": frame_count / fps if frame_count > 0 else 0.0,
-    }
-
-
 def create_sample_cache(
     input_path: str,
     output_dir: str,
@@ -317,21 +307,16 @@ def create_sample_cache(
     if not writer.isOpened():
         raise RuntimeError(f"Cannot open sample cache writer: {video_path}")
 
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        writer.release()
-        raise FileNotFoundError(f"Cannot open video: {input_path}")
-
     frames: list[dict] = []
     prev_decision = None
     prev_phash = None
-    frame_no = 0
     sample_index = 0
     progress_interval = 2000
     person_model = _load_person_model(cfg.person_mask_model) if cfg.person_masks else None
     masks_enabled = person_model is not None
     preview_count = 0
     pending_sample = None
+    batch_size = max(1, int(cfg.person_mask_batch_size))
 
     def finalize_sample(sample: dict, next_frame: np.ndarray | None, next_detections: list[dict]) -> None:
         nonlocal preview_count
@@ -382,20 +367,34 @@ def create_sample_cache(
         cached_height,
     )
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_no += 1
-            if frame_no % cfg.sample_every != 0:
-                continue
+    frame_iter, active_backend = iter_video_frames(
+        input_path,
+        fps=float(video_meta["fps"]),
+        width=int(video_meta["width"]),
+        height=int(video_meta["height"]),
+        sample_every=cfg.sample_every,
+        decode_backend=cfg.decode_backend,
+        output_width=cfg.resize_width,
+        output_height=cached_height,
+    )
+    log.info("sample cache decode backend: %s", active_backend)
 
+    def flush_batch(batch_samples: list[dict]) -> None:
+        nonlocal sample_index, pending_sample, prev_decision, prev_phash
+        if not batch_samples:
+            return
+        if masks_enabled:
+            detections_batch = _person_detections_from_frames(
+                person_model,
+                [sample["frame"] for sample in batch_samples],
+                conf=max(0.0, float(cfg.person_mask_conf)),
+            )
+        else:
+            detections_batch = [[] for _ in batch_samples]
+
+        for sample, detections in zip(batch_samples, detections_batch):
             sample_index += 1
-            small = resize_frame(frame, cfg.resize_width)
-            if small.shape[1] != cfg.resize_width or small.shape[0] != cached_height:
-                small = cv2.resize(small, (cfg.resize_width, cached_height), interpolation=cv2.INTER_AREA)
-
+            small = sample["frame"]
             decision = to_decision_frame(small)
             phash_int = compute_phash_int(decision)
             prev_mse = compute_mse(prev_decision, decision) if prev_decision is not None else None
@@ -404,17 +403,12 @@ def create_sample_cache(
                 if prev_phash is not None
                 else None
             )
-            detections = (
-                _person_detections_from_frame(person_model, small, conf=max(0.0, float(cfg.person_mask_conf)))
-                if masks_enabled
-                else []
-            )
 
             writer.write(small)
             frame_record = {
                 "sample_index": sample_index,
-                "frame_no": frame_no,
-                "timestamp_sec": round(frame_no / video_meta["fps"], 6),
+                "frame_no": int(sample["frame_no"]),
+                "timestamp_sec": round(float(sample["timestamp_sec"]), 6),
                 "phash_int": phash_int,
                 "prev_mse": round(prev_mse, 6) if prev_mse is not None else None,
                 "prev_hash_dist": prev_hash_dist,
@@ -433,10 +427,23 @@ def create_sample_cache(
             prev_phash = phash_int
 
             if sample_index % progress_interval == 0:
-                pct = (frame_no / video_meta["frame_count"] * 100.0) if video_meta["frame_count"] > 0 else 0.0
-                log.info("sample cache progress: samples=%s frame=%s %.1f%%", sample_index, frame_no, pct)
+                pct = (sample["frame_no"] / video_meta["frame_count"] * 100.0) if video_meta["frame_count"] > 0 else 0.0
+                log.info("sample cache progress: samples=%s frame=%s %.1f%%", sample_index, sample["frame_no"], pct)
+
+    try:
+        pending_batch: list[dict] = []
+        for frame_no, timestamp_sec, frame in frame_iter:
+            pending_batch.append({
+                "frame_no": int(frame_no),
+                "timestamp_sec": float(timestamp_sec),
+                "frame": frame,
+            })
+            if len(pending_batch) >= batch_size:
+                flush_batch(pending_batch)
+                pending_batch = []
+        if pending_batch:
+            flush_batch(pending_batch)
     finally:
-        cap.release()
         writer.release()
 
     if pending_sample is not None:
@@ -515,6 +522,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Output cache directory")
     parser.add_argument("--sample-every", type=int, default=SampleCacheConfig.sample_every)
     parser.add_argument("--resize-width", type=int, default=SampleCacheConfig.resize_width)
+    parser.add_argument(
+        "--decode-backend",
+        choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
+        default=SampleCacheConfig.decode_backend,
+    )
+    parser.add_argument("--person-mask-batch-size", type=int, default=SampleCacheConfig.person_mask_batch_size)
     parser.add_argument("--no-person-masks", action="store_true", help="Disable YOLO person mask generation")
     parser.add_argument("--person-mask-model", default=SampleCacheConfig.person_mask_model)
     parser.add_argument("--person-mask-dilate-px", type=int, default=SampleCacheConfig.person_mask_dilate_px)
@@ -536,6 +549,8 @@ def main():
     cfg = SampleCacheConfig(
         sample_every=args.sample_every,
         resize_width=args.resize_width,
+        decode_backend=args.decode_backend,
+        person_mask_batch_size=args.person_mask_batch_size,
         person_masks=not args.no_person_masks,
         person_mask_model=args.person_mask_model,
         person_mask_dilate_px=args.person_mask_dilate_px,

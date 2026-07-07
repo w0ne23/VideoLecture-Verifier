@@ -1848,18 +1848,19 @@ def _extract_slides_staged(
     input_path: str,
     output_dir: str,
     debug: bool = False,
+    decode_backend: str | None = None,
 ) -> list[dict]:
     try:
         from .annotation_from_cache import detect_annotations
         from .materialize_from_cache import materialize_frames
-        from .sample_cache import create_sample_cache
+        from .sample_cache import SampleCacheConfig, create_sample_cache
         from .scene_transition_from_cache import run_cache_probe
         from .scene_transition_probe import ProbeConfig
         from .timeline_region_classifier import classify_regions
     except ImportError:  # pragma: no cover - direct script execution fallback
         from annotation_from_cache import detect_annotations
         from materialize_from_cache import materialize_frames
-        from sample_cache import create_sample_cache
+        from sample_cache import SampleCacheConfig, create_sample_cache
         from scene_transition_from_cache import run_cache_probe
         from scene_transition_probe import ProbeConfig
         from timeline_region_classifier import classify_regions
@@ -1877,7 +1878,11 @@ def _extract_slides_staged(
 
     log.info("슬라이드 추출 staged pipeline 실행")
     log.info("  Step 0: sample cache 생성")
-    create_sample_cache(input_path, str(cache_dir))
+    create_sample_cache(
+        input_path,
+        str(cache_dir),
+        cfg=SampleCacheConfig(decode_backend=decode_backend or Config.DECODE_BACKEND),
+    )
 
     log.info("  Step 1: timeline region 분류")
     region_payload = classify_regions(str(cache_dir), str(regions_dir))
@@ -1903,6 +1908,7 @@ def _extract_slides_staged(
         str(annotations_path),
         str(review_dir),
         regions_path=str(regions_path),
+        decode_backend=decode_backend or Config.DECODE_BACKEND,
     )
 
     review_metadata_path = review_dir / "metadata.json"
@@ -1963,10 +1969,10 @@ def extract_slides(
 ):
     if use_staged:
         if decode_backend:
-            log.info("staged slide_extractor에서는 decode_backend=%s 설정을 사용하지 않습니다.", decode_backend)
+            log.info("staged slide_extractor decode_backend=%s", decode_backend)
         if extract_workers is not None:
             log.info("staged slide_extractor에서는 extract_workers=%s 설정을 사용하지 않습니다.", extract_workers)
-        return _extract_slides_staged(input_path, output_dir, debug=debug)
+        return _extract_slides_staged(input_path, output_dir, debug=debug, decode_backend=decode_backend)
 
     return _extract_slides_legacy(
         input_path=input_path,

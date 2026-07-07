@@ -27,11 +27,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import subprocess
-import tempfile
+import os
 from pathlib import Path
 
 import cv2
+
+try:
+    from .video_decode import iter_video_frames, read_frame_at_timestamp, read_video_metadata
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from video_decode import iter_video_frames, read_frame_at_timestamp, read_video_metadata
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -40,6 +44,7 @@ log = logging.getLogger(__name__)
 
 METADATA_FILENAME = "metadata.json"
 MATERIALIZED_FILENAME = "materialized_frames.json"
+DEFAULT_DECODE_BACKEND = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
 
 
 def _load_json(path: str | Path) -> dict:
@@ -272,42 +277,16 @@ def _save_frame(frame, output_path: Path) -> None:
         raise RuntimeError(f"Failed to write image: {output_path}")
 
 
-def _read_frame_by_timestamp_ffmpeg(input_path: str, timestamp_sec: float):
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{max(0.0, timestamp_sec):.6f}",
-                "-i",
-                input_path,
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                "-y",
-                str(tmp_path),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size <= 0:
-            return None
-        return cv2.imread(str(tmp_path), cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def _materialize_sequential(input_path: str, output_dir: Path, metadata: list[dict]) -> set[int]:
+def _materialize_sequential(
+    input_path: str,
+    output_dir: Path,
+    metadata: list[dict],
+    *,
+    fps: float,
+    width: int,
+    height: int,
+    decode_backend: str,
+) -> set[int]:
     targets_by_frame: dict[int, list[dict]] = {}
     for item in metadata:
         frame_no = int(item["frame_no"])
@@ -315,34 +294,39 @@ def _materialize_sequential(input_path: str, output_dir: Path, metadata: list[di
             raise ValueError(f"Invalid frame_no in metadata: {item}")
         targets_by_frame.setdefault(frame_no, []).append(item)
 
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {input_path}")
-
     saved: set[int] = set()
     wanted = set(targets_by_frame)
-    frame_no = 0
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_no += 1
-            targets = targets_by_frame.get(frame_no)
-            if not targets:
-                continue
-            for item in targets:
-                _save_frame(frame, output_dir / item["filename"])
-            saved.add(frame_no)
-            if saved == wanted:
-                break
-    finally:
-        cap.release()
-
+    frame_iter, active_backend = iter_video_frames(
+        input_path,
+        fps=fps,
+        width=width,
+        height=height,
+        sample_every=1,
+        decode_backend=decode_backend,
+    )
+    log.info("materialize decode backend: %s", active_backend)
+    for frame_no, _, frame in frame_iter:
+        targets = targets_by_frame.get(int(frame_no))
+        if not targets:
+            continue
+        for item in targets:
+            _save_frame(frame, output_dir / item["filename"])
+        saved.add(int(frame_no))
+        if saved == wanted:
+            break
     return saved
 
 
-def _materialize_missing_with_timestamp(input_path: str, output_dir: Path, metadata: list[dict], saved: set[int]) -> set[int]:
+def _materialize_missing_with_timestamp(
+    input_path: str,
+    output_dir: Path,
+    metadata: list[dict],
+    saved: set[int],
+    *,
+    width: int,
+    height: int,
+    decode_backend: str,
+) -> set[int]:
     targets_by_frame: dict[int, list[dict]] = {}
     for item in metadata:
         targets_by_frame.setdefault(int(item["frame_no"]), []).append(item)
@@ -353,7 +337,13 @@ def _materialize_missing_with_timestamp(input_path: str, output_dir: Path, metad
         timestamp = min(float(item["timestamp_sec"]) for item in targets)
         frame = None
         for offset in (0.0, -0.05, 0.05, -0.2, 0.2, -0.5, 0.5):
-            frame = _read_frame_by_timestamp_ffmpeg(input_path, timestamp + offset)
+            frame = read_frame_at_timestamp(
+                input_path,
+                timestamp + offset,
+                width=width,
+                height=height,
+                decode_backend=decode_backend,
+            )
             if frame is not None:
                 if offset:
                     log.warning("frame_no=%s recovered by timestamp %.3fs", frame_no, timestamp + offset)
@@ -372,17 +362,12 @@ def materialize_frames(
     annotations_path: str,
     output_dir: str,
     regions_path: str | None = None,
+    decode_backend: str = DEFAULT_DECODE_BACKEND,
 ) -> dict:
     scene_payload = _load_json(scenes_path)
     annotation_payload = _load_json(annotations_path)
-
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {input_path}")
-    try:
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or scene_payload.get("source", {}).get("fps") or 0.0)
-    finally:
-        cap.release()
+    video_meta = read_video_metadata(input_path)
+    fps = float(video_meta.get("fps") or scene_payload.get("source", {}).get("fps") or 0.0)
     if fps <= 0:
         raise RuntimeError(f"Cannot read FPS from video: {input_path}")
 
@@ -403,8 +388,24 @@ def materialize_frames(
         output_dir,
     )
 
-    saved = _materialize_sequential(input_path, out_dir, metadata)
-    recovered = _materialize_missing_with_timestamp(input_path, out_dir, metadata, saved)
+    saved = _materialize_sequential(
+        input_path,
+        out_dir,
+        metadata,
+        fps=fps,
+        width=int(video_meta["width"]),
+        height=int(video_meta["height"]),
+        decode_backend=decode_backend,
+    )
+    recovered = _materialize_missing_with_timestamp(
+        input_path,
+        out_dir,
+        metadata,
+        saved,
+        width=int(video_meta["width"]),
+        height=int(video_meta["height"]),
+        decode_backend=decode_backend,
+    )
     all_saved = saved | recovered
     missing = sorted({int(item["frame_no"]) for item in metadata} - all_saved)
     if missing:
@@ -422,6 +423,7 @@ def materialize_frames(
         "regions_path": str(regions_path) if regions_path else None,
         "output_dir": str(output_dir),
         "fps": fps,
+        "decode_backend": decode_backend,
         "record_count": len(metadata),
         "target_frame_count": target_frame_count,
         "sequential_saved_frame_count": len(saved),
@@ -447,6 +449,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotations", required=True, help="scene_annotations.json from Step 3")
     parser.add_argument("--regions", help="timeline_segments.json from Step 1; video segments are materialized as scenes")
     parser.add_argument("--output", "-o", required=True, help="Output slides directory")
+    parser.add_argument(
+        "--decode-backend",
+        choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
+        default=DEFAULT_DECODE_BACKEND,
+    )
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -455,7 +462,14 @@ def main() -> None:
     args = parse_args()
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-    materialize_frames(args.input, args.scenes, args.annotations, args.output, regions_path=args.regions)
+    materialize_frames(
+        args.input,
+        args.scenes,
+        args.annotations,
+        args.output,
+        regions_path=args.regions,
+        decode_backend=args.decode_backend,
+    )
 
 
 if __name__ == "__main__":
