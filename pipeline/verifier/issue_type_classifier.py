@@ -21,12 +21,14 @@ DEFAULT_MODELS = (
     "claude",
     "grok",
 )
+# LLM이 확률을 내는 3유형. downstream import 호환을 위해 ISSUE_TYPES 이름 유지.
 ISSUE_TYPES = (
     "temporal_error",
     "scope_overclaim",
     "factual_error",
-    "confusing_explanation",
 )
+AMBIGUOUS_ISSUE_TYPE = "ambiguous_issue"
+ALL_ISSUE_TYPES = ISSUE_TYPES + (AMBIGUOUS_ISSUE_TYPE,)
 DEFAULT_LIST_KEYS = ("issues",)
 DEFAULT_MODEL_WEIGHTS = {
     "gpt": 0.4,
@@ -43,7 +45,7 @@ ISSUE_TYPE_LABELS = {
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
     "factual_error": "사실 오류",
-    "confusing_explanation": "혼동 가능 설명",
+    AMBIGUOUS_ISSUE_TYPE: "분류 불명확",
 }
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
@@ -164,18 +166,17 @@ def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
 
 def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
     rows = [_issue_brief(item) for item in items]
-    return f"""당신은 강의 verifier가 선별한 issue 후보를 4가지 유형으로 재분류하는 심사자입니다.
+    return f"""당신은 강의 verifier가 선별한 issue 후보를 3가지 유형으로 재분류하는 심사자입니다.
 
 기준일: {current_date}
 
-각 입력 issue에 대해 아래 네 유형에 해당할 가능성을 확률 분포로 평가하세요.
-확률은 네 유형 전체 합이 1.0이 되도록 작성하세요.
+각 입력 issue에 대해 아래 세 유형에 해당할 가능성을 확률 분포로 평가하세요.
+확률은 세 유형 전체 합이 1.0이 되도록 작성하세요.
 애매한 경우에는 가장 그럴듯한 한 유형에만 몰지 말고, 가능한 유형들에 확률을 나누어 주세요.
 
 분류:
 - factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
 - temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 부족하거나, 더 이상 맞지 않는 정보인 경우.
-- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
 - scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
 
 판단 기준:
@@ -186,15 +187,15 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 중요:
 - 단순히 날짜나 시점 표현이 들어갔다고 temporal_error가 아니다. 제시된 시점에서도 틀린 정의/원리/관계/메커니즘 오류는 factual_error로 본다.
 - factual_error와 temporal_error가 모두 가능하면, 그 정보가 과거에는 맞았거나 당시에는 합리적이었지만 현재 기준으로 낡은 경우 temporal_error에 더 높은 확률을 주세요. 제시된 시점이나 과거 기준에서도 틀린 명제라면 factual_error에 더 높은 확률을 주세요.
-- 단순히 더 자세한 설명이 가능하다는 이유만으로 confusing_explanation을 선택하지 마세요.
 - "항상", "모든", "오직", "유일한" 같은 단어가 있다는 이유만으로 scope_overclaim로 올리지 마세요.
 - factual_error와 scope_overclaim이 모두 가능하면, 제한 표현이나 범위 단정만 완화하면 대체로 맞는 문장이 되는 경우 scope_overclaim에 더 높은 확률을 주세요. 명제의 핵심 내용 자체가 틀리면 factual_error에 더 높은 확률을 주세요.
+- factual_error와 scope_overclaim이 모두 가능하면, 일반화의 오류가 더 강하다면 scope_overclaim에 더 높은 확률을 주세요.
 - temporal_error와 scope_overclaim이 모두 가능하면, 현재 기술 생태계 변화로 인해 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
 
 
 응답은 JSON만 출력하세요.
 모든 입력 id에 대해 classifications 항목을 하나씩 포함하세요.
-각 probabilities 객체는 네 키를 모두 포함해야 하며, 값은 0.0 이상 1.0 이하 숫자여야 합니다.
+각 probabilities 객체는 세 키를 모두 포함해야 하며, 값은 0.0 이상 1.0 이하 숫자여야 합니다.
 probabilities의 합은 1.0이 되도록 하세요.
 confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도입니다.
 
@@ -206,7 +207,6 @@ confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도�
       "probabilities": {{
         "factual_error": 0.0,
         "temporal_error": 0.0,
-        "confusing_explanation": 0.0,
         "scope_overclaim": 0.0
       }},
       "reason": "한두 문장 근거",
@@ -243,7 +243,8 @@ def _normalize_issue_type(value: Any) -> str | None:
 def _issue_type_label(issue_type: str | None) -> str:
     if not issue_type:
         return "분류 실패"
-    return ISSUE_TYPE_LABELS.get(_normalize_issue_type(issue_type) or "", str(issue_type))
+    normalized = str(issue_type or "").strip().lower()
+    return ISSUE_TYPE_LABELS.get(normalized, str(issue_type))
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -831,6 +832,10 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 if retry_wait:
                     time.sleep(retry_wait)
                 continue
+            if ok_count < len(rows):
+                raise ValueError(
+                    f"probability vectors parsed {ok_count}/{len(rows)} after {attempts} attempts"
+                )
             break
         except Exception as exc:
             last_exc = exc
@@ -1004,16 +1009,86 @@ def _choose_final_type(
     )
 
 
+def _model_top_types(verdicts: list[dict[str, Any]]) -> list[str]:
+    tops: list[str] = []
+    for verdict in verdicts:
+        if verdict.get("status") != "ok":
+            continue
+        top = str(verdict.get("top_issue_type") or "").strip()
+        if top in ISSUE_TYPES:
+            tops.append(top)
+    return tops
+
+
+def _all_models_disagree(verdicts: list[dict[str, Any]], *, expected_model_count: int) -> bool:
+    tops = _model_top_types(verdicts)
+    return len(tops) >= expected_model_count and len(set(tops)) == expected_model_count
+
+
+def _apply_ambiguous_routing(
+    *,
+    provisional_type: str | None,
+    low_margin: bool,
+    verdicts: list[dict[str, Any]],
+    expected_model_count: int,
+) -> tuple[str | None, list[str]]:
+    reasons: list[str] = []
+    if low_margin:
+        reasons.append("low_margin")
+    if _all_models_disagree(verdicts, expected_model_count=expected_model_count):
+        reasons.append("model_disagreement")
+    if reasons and provisional_type:
+        return AMBIGUOUS_ISSUE_TYPE, reasons
+    return provisional_type, reasons
+
+
+def _validate_classification_completeness(
+    *,
+    models: list[str],
+    model_results: dict[str, dict[str, Any]],
+    refs: list[dict[str, Any]],
+    verdicts_by_id: dict[str, list[dict[str, Any]]],
+) -> None:
+    failed_models = [model for model, row in model_results.items() if row.get("status") == "failed"]
+    if failed_models:
+        errors = [
+            f"{model}: {model_results[model].get('error', 'failed')}"
+            for model in failed_models
+        ]
+        raise RuntimeError("issue type classifier model failure: " + "; ".join(errors))
+
+    expected = len(models)
+    for ref in refs:
+        issue_id = ref["id"]
+        verdicts = verdicts_by_id.get(issue_id, [])
+        if len(verdicts) < expected:
+            raise RuntimeError(
+                f"issue type classifier incomplete classifications for {issue_id}: "
+                f"{len(verdicts)}/{expected} model verdicts"
+            )
+        bad_models = [
+            str(verdict.get("model") or "?")
+            for verdict in verdicts
+            if verdict.get("status") != "ok"
+        ]
+        if bad_models:
+            raise RuntimeError(
+                f"issue type classifier parse failure for {issue_id}: "
+                f"non-ok models={bad_models}"
+            )
+
+
 def _classification_record(
     ref: dict[str, Any],
     verdicts: list[dict[str, Any]],
     *,
     model_weights: dict[str, float],
     low_margin_threshold: float,
+    expected_model_count: int,
 ) -> dict[str, Any]:
     issue = ref["issue"]
     (
-        final_type,
+        provisional_type,
         ensemble_confidence,
         weighted_scores,
         used_model_weights,
@@ -1021,6 +1096,12 @@ def _classification_record(
         low_margin,
         margin,
     ) = _choose_final_type(verdicts, model_weights, low_margin_threshold)
+    final_type, routing_reasons = _apply_ambiguous_routing(
+        provisional_type=provisional_type,
+        low_margin=low_margin,
+        verdicts=verdicts,
+        expected_model_count=expected_model_count,
+    )
     return {
         "id": ref["id"],
         "list_key": ref["list_key"],
@@ -1042,15 +1123,17 @@ def _classification_record(
         "weighted_scores": weighted_scores,
         "model_weights": used_model_weights,
         "missing_model_weight": missing_model_weight,
-        "low_margin": bool(final_type and low_margin),
+        "low_margin": bool(provisional_type and low_margin),
         "margin": margin,
+        "routing_reasons": routing_reasons,
+        "routed_to_ambiguous": final_type == AMBIGUOUS_ISSUE_TYPE,
         "model_count": len(verdicts),
         "model_classifications": verdicts,
     }
 
 
 def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
-    by_type = {issue_type: [] for issue_type in ISSUE_TYPES}
+    by_type = {issue_type: [] for issue_type in ALL_ISSUE_TYPES}
     unclassified = []
     for record in records:
         issue_type = record.get("final_issue_type")
@@ -1060,6 +1143,8 @@ def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
             "claim_id": record.get("claim_id"),
             "issue": record.get("issue"),
             "ensemble_confidence": record.get("ensemble_confidence"),
+            "routing_reasons": record.get("routing_reasons", []),
+            "routed_to_ambiguous": bool(record.get("routed_to_ambiguous")),
             "low_margin": record.get("low_margin", False),
             "margin": record.get("margin", 0.0),
         }
@@ -1068,6 +1153,71 @@ def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
         elif not issue_type:
             unclassified.append(target)
     return {"by_type": by_type, "unclassified": unclassified}
+
+
+def _format_probability_vector(probabilities: dict[str, Any] | None) -> str:
+    if not isinstance(probabilities, dict):
+        return "-"
+    parts = []
+    for issue_type in ISSUE_TYPES:
+        value = float(probabilities.get(issue_type, 0.0) or 0.0)
+        short = {
+            "temporal_error": "temporal",
+            "scope_overclaim": "scope",
+            "factual_error": "factual",
+        }[issue_type]
+        parts.append(f"{short}={value:.2f}")
+    return ", ".join(parts)
+
+
+def _print_classification_score_report(records: list[dict[str, Any]]) -> None:
+    if not records:
+        print("점수 리포트: 분류 결과 없음")
+        return
+    print("\n=== issue별 모델 점수 ===")
+    for record in records:
+        issue_id = record.get("issue_id") or record.get("id") or "?"
+        issue_text = str(record.get("issue") or record.get("resolved_claim") or "").strip()
+        if len(issue_text) > 72:
+            issue_text = issue_text[:69] + "..."
+        final_type = record.get("final_issue_type_label") or record.get("final_issue_type") or "?"
+        ensemble = float(record.get("ensemble_confidence", 0.0) or 0.0)
+        margin = float(record.get("margin", 0.0) or 0.0)
+        flags = []
+        if record.get("routed_to_ambiguous"):
+            flags.append("ambiguous")
+        if record.get("low_margin"):
+            flags.append("low_margin")
+        if record.get("routing_reasons"):
+            flags.append("reasons=" + ",".join(record.get("routing_reasons") or []))
+        flag_text = f" [{', '.join(flags)}]" if flags else ""
+        print(f"\n{issue_id} → {final_type} (ensemble={ensemble:.2f}, margin={margin:.2f}){flag_text}")
+        if issue_text:
+            print(f"  issue: {issue_text}")
+        for verdict in record.get("model_classifications") or []:
+            if not isinstance(verdict, dict):
+                continue
+            model = str(verdict.get("model") or "?")
+            top_type = verdict.get("top_issue_type_label") or verdict.get("top_issue_type") or "?"
+            top_prob = float(verdict.get("top_probability", 0.0) or 0.0)
+            confidence = float(verdict.get("confidence", 0.0) or 0.0)
+            probs = _format_probability_vector(verdict.get("probabilities"))
+            reason = str(verdict.get("reason") or "").strip()
+            if len(reason) > 96:
+                reason = reason[:93] + "..."
+            print(
+                f"  - {model:6s}: {probs} → {top_type} ({top_prob:.2f}), "
+                f"confidence={confidence:.2f}"
+            )
+            if reason:
+                print(f"           {reason}")
+        weighted = record.get("weighted_scores") or {}
+        if weighted:
+            weighted_text = ", ".join(
+                f"{key.split('_')[0]}={float(weighted.get(key, 0.0) or 0.0):.2f}"
+                for key in ISSUE_TYPES
+            )
+            print(f"  weighted: {weighted_text}")
 
 
 def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
@@ -1080,6 +1230,8 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "final_issue_type_label": record.get("final_issue_type_label", ""),
         "weighted_scores": record.get("weighted_scores", {}),
         "ensemble_confidence": record.get("ensemble_confidence", 0.0),
+        "routing_reasons": record.get("routing_reasons", []),
+        "routed_to_ambiguous": bool(record.get("routed_to_ambiguous")),
         "low_margin": bool(record.get("low_margin")),
         "margin": record.get("margin", 0.0),
         "location": {
@@ -1095,7 +1247,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_next_stage_input(result: dict[str, Any], *, classification_path: str | Path) -> dict[str, Any]:
-    issues_by_type = {issue_type: [] for issue_type in ISSUE_TYPES}
+    issues_by_type = {issue_type: [] for issue_type in ALL_ISSUE_TYPES}
     unclassified = []
     for record in result.get("classifications", []) or []:
         item = _next_stage_item(record)
@@ -1105,6 +1257,7 @@ def build_next_stage_input(result: dict[str, Any], *, classification_path: str |
         else:
             unclassified.append(item)
 
+    summary = result.get("summary") or {}
     return {
         "schema_version": "classified_issue_input.v1",
         "source_classification_path": str(classification_path),
@@ -1112,9 +1265,11 @@ def build_next_stage_input(result: dict[str, Any], *, classification_path: str |
         "generated_at": _now_iso(),
         "categories": result.get("categories", {}),
         "summary": {
-            "input_issue_count": (result.get("summary") or {}).get("input_issue_count", 0),
-            "breakdown_by_type": (result.get("summary") or {}).get("breakdown_by_type", {}),
-            "low_margin_count": (result.get("summary") or {}).get("low_margin_count", 0),
+            "input_issue_count": summary.get("input_issue_count", 0),
+            "breakdown_by_type": summary.get("breakdown_by_type", {}),
+            "low_margin_count": summary.get("low_margin_count", 0),
+            "ambiguous_count": summary.get("ambiguous_count", 0),
+            "routing_reason_breakdown": summary.get("routing_reason_breakdown", {}),
             "unclassified_count": len(unclassified),
         },
         "issues_by_type": issues_by_type,
@@ -1277,12 +1432,20 @@ def classify_issues(
     for result in model_results.values():
         for row in result.get("classifications", []) or []:
             verdicts_by_id[str(row.get("id", ""))].append(row)
+    if not dry_run:
+        _validate_classification_completeness(
+            models=models,
+            model_results=model_results,
+            refs=refs,
+            verdicts_by_id=verdicts_by_id,
+        )
     records = [
         _classification_record(
             ref,
             verdicts_by_id.get(ref["id"], []),
             model_weights=model_weights,
             low_margin_threshold=resolved_low_margin_threshold,
+            expected_model_count=len(models),
         )
         for ref in refs
     ]
@@ -1291,6 +1454,13 @@ def classify_issues(
     failed_models = [model for model, row in model_results.items() if row.get("status") == "failed"]
     model_type_breakdown = _model_breakdown(model_results)
     low_margin_count = sum(1 for record in records if record.get("low_margin"))
+    ambiguous_count = sum(1 for record in records if record.get("final_issue_type") == AMBIGUOUS_ISSUE_TYPE)
+    routed_to_ambiguous_count = sum(1 for record in records if record.get("routed_to_ambiguous"))
+    routing_reason_breakdown = Counter(
+        reason
+        for record in records
+        for reason in (record.get("routing_reasons") or [])
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1306,7 +1476,7 @@ def classify_issues(
         "dry_run": dry_run,
         "categories": {
             issue_type: _issue_type_label(issue_type)
-            for issue_type in ISSUE_TYPES
+            for issue_type in ALL_ISSUE_TYPES
         },
         "summary": {
             "input_issue_count": len(refs),
@@ -1315,6 +1485,9 @@ def classify_issues(
             "failed_models": failed_models,
             "breakdown_by_type": dict(type_counts),
             "low_margin_count": low_margin_count,
+            "ambiguous_count": ambiguous_count,
+            "routed_to_ambiguous_count": routed_to_ambiguous_count,
+            "routing_reason_breakdown": dict(routing_reason_breakdown),
             "model_breakdown_by_type": model_type_breakdown,
         },
         "model_results": model_results,
@@ -1339,7 +1512,7 @@ def _default_next_input_path(output_path: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Classify issue-judge selected issues into 4 issue types with a weighted LLM ensemble.",
+        description="Classify issue-judge selected issues into 3 issue types with ambiguous routing.",
     )
     parser.add_argument("input_json", help="verifier issue judge JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
@@ -1397,6 +1570,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not write the slim next-stage input JSON",
     )
+    parser.add_argument(
+        "--print-scores",
+        action="store_true",
+        help="분류 완료 후 issue별 모델 확률/앙상블 점수를 stdout에 출력",
+    )
+    parser.add_argument(
+        "--scores-only",
+        action="store_true",
+        help="기존 *_issue_types.json을 읽어 점수 리포트만 출력 (LLM 호출 없음)",
+    )
     return parser
 
 
@@ -1409,6 +1592,12 @@ def main(argv: list[str] | None = None) -> int:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("입력 JSON 최상위 객체는 dict여야 합니다.")
+
+    if args.scores_only:
+        if payload.get("stage") != "issue_type_classifier":
+            raise ValueError("--scores-only 입력은 issue_type_classifier 출력 JSON(*_issue_types.json)이어야 합니다.")
+        _print_classification_score_report(payload.get("classifications", []) or [])
+        return 0
 
     models = _split_csv(args.models)
     if len(models) != 3:
@@ -1429,7 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         dry_run=args.dry_run,
         model_weights_spec=args.model_weights,
-        low_margin_threshold=resolve_low_margin_threshold(args.low_margin_threshold),
+        low_margin_threshold=args.low_margin_threshold,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1453,6 +1642,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"실패 모델: {', '.join(summary['failed_models'])}")
     print(f"유형별 분포: {json.dumps(summary['breakdown_by_type'], ensure_ascii=False)}")
     print(f"low_margin: {summary.get('low_margin_count', 0)}건")
+    print(f"ambiguous: {summary.get('ambiguous_count', 0)}건")
+    if summary.get("routing_reason_breakdown"):
+        print(f"ambiguous 사유: {json.dumps(summary['routing_reason_breakdown'], ensure_ascii=False)}")
     print("모델별 판정 갯수:")
     for model, breakdown in (summary.get("model_breakdown_by_type") or {}).items():
         counts = breakdown.get("breakdown_by_type", {})
@@ -1460,6 +1652,8 @@ def main(argv: list[str] | None = None) -> int:
             f"  - {model} ({breakdown.get('status')} / {breakdown.get('resolved_model')}): "
             f"{json.dumps(counts, ensure_ascii=False)}"
         )
+    if args.print_scores:
+        _print_classification_score_report(result.get("classifications", []) or [])
     return 0 if not summary["failed_model_count"] else 2
 
 

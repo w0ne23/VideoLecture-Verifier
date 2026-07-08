@@ -35,7 +35,6 @@ DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 5
 CATEGORY_MODEL_WEIGHT_OVERRIDES = {
     "scope_overclaim": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
-    "confusing_explanation": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
 }
 JUDGMENTS = {
     "valid_issue",
@@ -47,7 +46,6 @@ JUDGMENTS = {
 CATEGORY_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
-    "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "과도한 일반화",
 }
 
@@ -60,10 +58,6 @@ CATEGORY_DESCRIPTIONS = {
     "temporal_error": (
         "과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 "
         "더 이상 맞지 않거나 현재 학습자에게 outdated 정보로 전달될 수 있는 resolved_claim입니다."
-    ),
-    "confusing_explanation": (
-        "명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 "
-        "학생이 다른 의미로 해석하거나 잘못된 오개념을 만들 위험이 있는 resolved_claim입니다."
     ),
     "scope_overclaim": (
         "조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 resolved_claim입니다. "
@@ -111,22 +105,6 @@ CATEGORY_SCORE_GUIDES = {
         "context_resolution": (
             "문맥상 과거 시점, 역사적 상황, 당시 기준의 설명으로 명확히 제한되어 있으면 높게 주세요. "
             "현재 사실처럼 제시되고 보완 설명이 없으면 낮게 주세요."
-        ),
-    },
-    "confusing_explanation": {
-        "is_valid_issue": (
-            "비유, 예시, 생략, 모호한 지시어, 압축된 표현 때문에 학생이 resolved_claim을 다른 의미로 "
-            "해석하거나 잘못된 mental model을 만들 가능성을 평가하세요. 단순히 더 친절한 "
-            "설명이 가능하다는 이유만으로 높게 주지 마세요."
-            "일반적으로 맞는 표현이며, 일반적으로 맞는 설명이면 낮은 점수를 주세요."
-        ),
-        "category_severity": (
-            "그 오해가 핵심 개념, 절차, 원인-결과, 구성 요소의 역할 이해를 크게 왜곡할수록 "
-            "높게 주세요. 잠깐 헷갈릴 수 있으나 뒤 학습에 거의 영향을 주지 않는 표현은 낮게 주세요."
-        ),
-        "context_resolution": (
-            "앞뒤 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요. 같은 슬라이드나 인접 context에서 "
-            "정확한 의미가 충분히 설명되면 높게 주고, 모호한 표현만 남아 있으면 낮게 주세요."
         ),
     },
     "scope_overclaim": {

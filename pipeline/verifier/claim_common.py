@@ -729,7 +729,6 @@ VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
-    "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "과도한 일반화",
 }
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
