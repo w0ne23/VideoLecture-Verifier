@@ -55,6 +55,8 @@ TOKEN_USAGE_FIELDS = (
     "total_tokens",
 )
 
+DEFAULT_LOW_MARGIN_THRESHOLD = 0.10
+
 
 def _is_grok_model(model: str) -> bool:
     try:
@@ -295,6 +297,21 @@ def _env_first(*names: str, default: str = "") -> str:
         if value:
             return value
     return default
+
+
+def resolve_low_margin_threshold(override: float | None = None) -> float:
+    """1위·2위 유형 점수 차이가 이 값 미만이면 low_margin으로 표시한다."""
+    if override is not None:
+        return max(0.0, float(override))
+    raw = _env_first(
+        "ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD",
+        "VERIFIER_ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD",
+        default=str(DEFAULT_LOW_MARGIN_THRESHOLD),
+    )
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_LOW_MARGIN_THRESHOLD
 
 
 def _env_float(name: str, default: float, *, min_value: float = 1.0) -> float:
@@ -1027,7 +1044,6 @@ def _classification_record(
         "missing_model_weight": missing_model_weight,
         "low_margin": bool(final_type and low_margin),
         "margin": margin,
-        "low_margin_threshold": low_margin_threshold,
         "model_count": len(verdicts),
         "model_classifications": verdicts,
     }
@@ -1143,9 +1159,10 @@ def classify_issues(
     limit: int | None = None,
     dry_run: bool = False,
     model_weights_spec: str | None = None,
-    low_margin_threshold: float = 0.10,
+    low_margin_threshold: float | None = None,
 ) -> dict[str, Any]:
     _load_env()
+    resolved_low_margin_threshold = resolve_low_margin_threshold(low_margin_threshold)
     refs = collect_issues(payload, list_keys)
     if limit is not None:
         refs = refs[: max(0, limit)]
@@ -1265,7 +1282,7 @@ def classify_issues(
             ref,
             verdicts_by_id.get(ref["id"], []),
             model_weights=model_weights,
-            low_margin_threshold=low_margin_threshold,
+            low_margin_threshold=resolved_low_margin_threshold,
         )
         for ref in refs
     ]
@@ -1285,7 +1302,7 @@ def classify_issues(
         "issue_list_keys": list_keys,
         "models": models,
         "model_weights": model_weights,
-        "low_margin_threshold": low_margin_threshold,
+        "low_margin_threshold": resolved_low_margin_threshold,
         "dry_run": dry_run,
         "categories": {
             issue_type: _issue_type_label(issue_type)
@@ -1362,8 +1379,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--low-margin-threshold",
         type=float,
-        default=float(os.getenv("ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD", "0.10")),
-        help="mark low_margin when top score minus second score is below this value",
+        default=None,
+        help=(
+            "mark low_margin when top score minus second score is below this value "
+            f"(default: {DEFAULT_LOW_MARGIN_THRESHOLD}, env: ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD)"
+        ),
     )
     parser.add_argument("--limit", type=int, default=None, help="optional issue count limit for quick tests")
     parser.add_argument("--dry-run", action="store_true", help="validate input/output shape without calling LLMs")
@@ -1409,7 +1429,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         dry_run=args.dry_run,
         model_weights_spec=args.model_weights,
-        low_margin_threshold=max(0.0, args.low_margin_threshold),
+        low_margin_threshold=resolve_low_margin_threshold(args.low_margin_threshold),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
