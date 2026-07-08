@@ -32,7 +32,6 @@ def _issue_judge_batch_max_workers() -> int:
 def _claim_id(claim: dict) -> str:
     return str(
         claim.get("claim_id")
-        or claim.get("claim_fingerprint")
         or claim.get("context_id")
         or ""
     ).strip()
@@ -102,11 +101,16 @@ def _build_issue_candidate_prompt(
             f"{i}. claim_id: {claim_id}",
             f"   context_id: {context_id}",
             f"   claim_type: {c.get('claim_type', '?')}",
+            f"   resolution_status: {c.get('resolution_status', '?')}",
             f"   resolved_claim: {resolved or claim_text}",
             f"   claim_text: {claim_text}",
         ]
-        if c.get("context_ids"):
-            lines.append(f"   context_ids: {', '.join(str(x) for x in c.get('context_ids') or [])}")
+        if c.get("antecedent_context_ids"):
+            lines.append(
+                f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
+            )
+        if c.get("context_note"):
+            lines.append(f"   context_note: {c.get('context_note')}")
         claim_lines.append("\n".join(lines))
 
     return f"""당신은 강의 claim 목록에서 1차 issue 후보만 선별하는 판정자입니다.

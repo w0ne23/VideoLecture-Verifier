@@ -738,8 +738,6 @@ def _write_issue_judge_merged_output(
 
 
 def _claim_key(payload: dict) -> str:
-    if payload.get("claim_fingerprint"):
-        return str(payload.get("claim_fingerprint"))
     if payload.get("claim_id"):
         return str(payload.get("claim_id"))
     cid = str(payload.get("context_id", "") or "")
