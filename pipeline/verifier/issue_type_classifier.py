@@ -1220,6 +1220,21 @@ def _print_classification_score_report(records: list[dict[str, Any]]) -> None:
             print(f"  weighted: {weighted_text}")
 
 
+def _compact_model_classifications(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict):
+            continue
+        compact.append(
+            {
+                "model": verdict.get("model", ""),
+                "top_issue_type": verdict.get("top_issue_type", ""),
+                "top_probability": verdict.get("top_probability", 0.0),
+            }
+        )
+    return compact
+
+
 def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "issue_id": record.get("issue_id", ""),
@@ -1234,6 +1249,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "routed_to_ambiguous": bool(record.get("routed_to_ambiguous")),
         "low_margin": bool(record.get("low_margin")),
         "margin": record.get("margin", 0.0),
+        "model_classifications": _compact_model_classifications(record.get("model_classifications") or []),
         "location": {
             "slide_number": record.get("slide_number"),
             "start_time": record.get("start_time"),
