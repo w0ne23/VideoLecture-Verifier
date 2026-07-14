@@ -13,12 +13,15 @@ from sqlalchemy.pool import NullPool
 
 def _db_reachable() -> bool:
     from app.config import DATABASE_URL
+    from app.models import Base
 
     async def ping():
         engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
         try:
-            async with engine.connect():
-                pass
+            async with engine.begin() as conn:
+                # CI/로컬의 새 postgres 컨테이너는 스키마가 비어 있을 수 있으므로,
+                # 이 테스트가 필요로 하는 테이블을 여기서 보장해준다.
+                await conn.run_sync(Base.metadata.create_all)
         finally:
             await engine.dispose()
 
