@@ -21,7 +21,9 @@ services:
       retries: 10
 
   backend:
-    shm_size: "${VERILEC_SHM_SIZE:-64g}"
+    # 2 GiB works with Docker Desktop and small machines.  Large Linux hosts
+    # can raise this through VERILEC_SHM_SIZE or the GPU override.
+    shm_size: "${VERILEC_SHM_SIZE:-2g}"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -35,9 +37,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://user:pass@db/verilec
       LOCAL_STORAGE_DIR: /app/storage
       PIPELINE_ROOT: /app
+      # Portable default: CPU RapidOCR. The NVIDIA override switches this to
+      # Nemotron OCR v2 without changing the pipeline's HTTP OCR contract.
       GRAPHLEC_SLIDE_OCR_PROVIDER: http
-      GRAPHLEC_SLIDE_OCR_BASE_URL: http://ocr:8000
-      GRAPHLEC_SLIDE_OCR_LANG: multilingual
+      GRAPHLEC_SLIDE_OCR_BASE_URL: http://rapid-ocr:8000
+      GRAPHLEC_SLIDE_OCR_LANG: korean
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
       # LocalVLM / OpenAI
@@ -57,12 +61,9 @@ services:
       # P2A base slide t1/t1_structure OpenAI requests
       GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "15"
 
-      # GPU 1번만 컨테이너에 노출
-      NVIDIA_VISIBLE_DEVICES: "1"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
-
-      # VeriLec / GraphLec GPU decode 설정
-      GRAPHLEC_SLIDE_DECODE_BACKEND: ffmpeg-cuda
+      # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
+      # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
+      GRAPHLEC_SLIDE_DECODE_BACKEND: auto
       GRAPHLEC_GPU_ONLY: "0"
       # Step 4 duplicate/build comparison crop: remove 5% from each edge.
       GRAPHLEC_CONTENT_CROP_LEFT: "0.05"
@@ -80,7 +81,9 @@ services:
       GRAPHLEC_SAMPLE_CACHE_RESIZE_WIDTH: "768"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASKS: "1"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MODEL: "/app/models/yolo26n.pt"
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE: "/app/storage/models/yolo26n-fp16.engine"
+      # Empty prevents a TensorRT engine copied from a Linux host from being
+      # selected on a CPU-only machine; Ultralytics loads the .pt model.
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE: ""
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_BATCH_SIZE: "32"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE_BATCH_SIZE: "32"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_CONF: "0.70"
@@ -92,40 +95,43 @@ services:
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC: "0"
       # Keep only two 1.4GB TensorRT execution contexts resident. Other
       # decode chunks queue their person batches until a slot is available.
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXTS: "2"
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_SERIALIZE: "0"
       GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC: "20"
       GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_MIN_HITS: "1"
       GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_CONF: "0.45"
       GRAPHLEC_SCENE_BASE_DELAY_SEC: "2.0"
       GRAPHLEC_SCENE_BASE_MAX_PENDING_SEC: "5.0"
+      # Remove slides that appear for at most three seconds. The remaining
+      # timeline is compacted before OCR/VLM so an A -> transient -> A return
+      # is evaluated as one continuous slide.
+      GRAPHLEC_MIN_SLIDE_DURATION_SEC: "3.0"
       GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_WIDTH: "384"
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_WORKERS: "4"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_WORKERS: "1"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_SEC: "480"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_OVERLAP_SEC: "5"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_QUANTILE: "0.95"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_RECENTER_PX: "120"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_MAX_GAP_SEC: "2"
-      GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS: "12"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS: "4"
       GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC: "240"
       GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC: "5"
-      GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS: "8"
-      GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS: "12"
+      GRAPHLEC_SAMPLE_CACHE_STREAM_COPY_CORE: "1"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS: "4"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS: "4"
 
       # Step 1 timeline region 병렬화
-      GRAPHLEC_REGION_WORKERS: "12"
+      GRAPHLEC_REGION_WORKERS: "4"
       GRAPHLEC_REGION_CHUNK_SAMPLES: "2000"
       GRAPHLEC_REGION_GUARD_SAMPLES: "1"
 
       # Step 2 scene/base probe 병렬화
-      GRAPHLEC_SCENE_PROBE_WORKERS: "12"
+      GRAPHLEC_SCENE_PROBE_WORKERS: "4"
       GRAPHLEC_SCENE_PROBE_CHUNK_SAMPLES: "2000"
       GRAPHLEC_SCENE_PROBE_GUARD_SAMPLES: "100"
       GRAPHLEC_SCENE_PROBE_KEEP_PARTS: "0"
 
       # Step 4 duplicates 병렬화
       GRAPHLEC_DUPLICATE_PARALLEL: "1"
-      GRAPHLEC_DUPLICATE_WORKERS: "100"
+      GRAPHLEC_DUPLICATE_WORKERS: "4"
       GRAPHLEC_DUPLICATE_LOG_PAIRS: "0"
 
     volumes:
@@ -138,14 +144,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
 
   ocr:
     profiles:
@@ -162,42 +160,35 @@ services:
       GRAPHLEC_SLIDE_OCR_LANG: multilingual
       GRAPHLEC_SLIDE_OCR_MODEL_DIR: ""
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.92"
-      NVIDIA_VISIBLE_DEVICES: "1"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
     volumes:
       - ./storage:/app/storage
     ports:
       - "8010:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
 
-
-
+  rapid-ocr:
+    profiles:
+      - rapidocr
+    build:
+      context: .
+      dockerfile: rapid_ocr_service/Dockerfile
+    environment:
+      LOCAL_STORAGE_DIR: /app/storage
+      RAPIDOCR_HOME: /models
+    volumes:
+      - ./storage:/app/storage
+      - rapid_ocr_models:/models
+    ports:
+      - "8011:8000"
   ollama:
     profiles:
       - vlm
     image: ollama/ollama:latest
     container_name: verilec-ollama
-    environment:
-      NVIDIA_VISIBLE_DEVICES: "1"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     volumes:
       - ollama:/root/.ollama
     ports:
       - "11434:11434"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
-
 volumes:
   ollama:
   postgres_data:
+  rapid_ocr_models:

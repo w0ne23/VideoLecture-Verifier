@@ -85,24 +85,98 @@ def _system_memory_bytes() -> int | None:
     return pages * page_size if pages > 0 and page_size > 0 else None
 
 
-def _sample_cache_temp_root(output_path: Path) -> tuple[Path, str]:
+def _available_memory_bytes() -> int | None:
+    """Return the conservative memory budget visible to this container."""
+    candidates: list[int] = []
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                candidates.append(int(line.split()[1]) * 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # Docker Desktop and Kubernetes usually expose a cgroup v2 memory limit.
+    # Prefer its remaining budget over host-wide /proc memory information.
+    for root in (Path("/sys/fs/cgroup"), Path("/sys/fs/cgroup/memory")):
+        try:
+            limit_raw = (root / "memory.max").read_text(encoding="utf-8").strip()
+            current_raw = (root / "memory.current").read_text(encoding="utf-8").strip()
+            if limit_raw != "max":
+                remaining = int(limit_raw) - int(current_raw)
+                if remaining > 0:
+                    candidates.append(remaining)
+                break
+        except (OSError, ValueError):
+            continue
+    return min(candidates) if candidates else _system_memory_bytes()
+
+
+def _estimate_sample_cache_bytes(
+    video_meta: dict,
+    duration_sec: float,
+    sample_fps: float,
+    *,
+    resize_width: int,
+) -> int:
+    """Conservative MJPEG cache estimate used only for resource admission."""
+    source_width = max(1, int(video_meta.get("width") or 1))
+    source_height = max(1, int(video_meta.get("height") or 1))
+    width = max(1, int(resize_width))
+    height = max(1, int(source_height * (width / source_width)))
+    samples = max(1, int(math.ceil(max(0.0, duration_sec) * max(0.1, sample_fps))))
+    # 35% of raw BGR size is deliberately conservative for lecture imagery.
+    bytes_per_frame = max(96 * 1024, int(width * height * 3 * 0.35))
+    return samples * bytes_per_frame
+
+
+def _require_free_space(path: Path, required_bytes: int, *, purpose: str) -> int:
+    free_bytes = shutil.disk_usage(path).free
+    if free_bytes < required_bytes:
+        raise RuntimeError(
+            f"insufficient {purpose} space at {path}: "
+            f"free={free_bytes / 1024**3:.1f}GiB required={required_bytes / 1024**3:.1f}GiB"
+        )
+    return free_bytes
+
+
+def _sample_cache_temp_root(
+    output_path: Path,
+    *,
+    estimated_cache_bytes: int,
+) -> tuple[Path, str, int]:
     mode = os.getenv("GRAPHLEC_SAMPLE_CACHE_STORAGE_MODE", "auto").strip().lower()
     if mode not in {"auto", "ram", "disk"}:
         mode = "auto"
-    if mode == "disk":
-        return output_path.parent, "disk"
 
-    total_memory = _system_memory_bytes()
+    # Chunk files coexist with the merged cache during Step 0. Reserve enough
+    # room for both plus manifests instead of discovering ENOSPC mid-merge.
+    disk_required = max(2 * 1024**3, int(estimated_cache_bytes * 2.25 + 512 * 1024**2))
+    output_root = output_path.parent
+    output_root.mkdir(parents=True, exist_ok=True)
+    disk_free = _require_free_space(output_root, disk_required, purpose="sample-cache disk")
+    if mode == "disk":
+        return output_root, "disk", disk_free
+
+    total_memory = _available_memory_bytes()
     ram_threshold = 16 * 1024**3
     ram_root = Path(os.getenv("GRAPHLEC_SAMPLE_CACHE_RAM_DIR", "/dev/shm"))
     if mode == "ram" or (mode == "auto" and total_memory is not None and total_memory > ram_threshold):
         try:
             ram_root.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(ram_root).free >= 2 * 1024**3:
-                return ram_root, "ram"
+            ram_required = max(2 * 1024**3, int(estimated_cache_bytes * 1.15 + 512 * 1024**2))
+            ram_free = shutil.disk_usage(ram_root).free
+            if ram_free >= ram_required:
+                return ram_root, "ram", ram_free
+            if mode == "ram":
+                raise RuntimeError(
+                    f"insufficient sample-cache RAM space at {ram_root}: "
+                    f"free={ram_free / 1024**3:.1f}GiB required={ram_required / 1024**3:.1f}GiB"
+                )
         except OSError:
-            pass
-    return output_path.parent, "disk"
+            if mode == "ram":
+                raise
+    return output_root, "disk", disk_free
 
 
 @dataclass
@@ -207,6 +281,15 @@ def _load_person_model(model_name: str):
     except Exception as exc:
         log.warning("failed to load person mask model %s; person masks disabled: %s", model_name, exc)
         return None
+
+
+def _existing_person_mask_engine(path_value: str | Path | None) -> Path | None:
+    """Return a configured TensorRT engine, never treating an empty value as '.'."""
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_file() else None
 
 
 def _detections_from_result(result, height: int, width: int) -> list[dict]:
@@ -475,7 +558,8 @@ def _run_person_presence_gate(
         output_height,
     )
 
-    model_source = cfg.person_mask_engine if Path(cfg.person_mask_engine).exists() else cfg.person_mask_model
+    engine_path = _existing_person_mask_engine(cfg.person_mask_engine)
+    model_source = str(engine_path) if engine_path else cfg.person_mask_model
     model_owned = model is None
     if model_owned:
         model = _load_person_model(model_source)
@@ -796,8 +880,9 @@ def _create_sample_cache_impl(
     sample_index = 0
     progress_interval = 2000
     person_model_source = cfg.person_mask_model
-    if cfg.person_masks and Path(cfg.person_mask_engine).exists():
-        person_model_source = cfg.person_mask_engine
+    engine_path = _existing_person_mask_engine(cfg.person_mask_engine)
+    if cfg.person_masks and engine_path:
+        person_model_source = str(engine_path)
     person_model = None
     masks_enabled = bool(cfg.person_masks)
     async_person_model = None
@@ -999,6 +1084,17 @@ def _create_sample_cache_impl(
                 pct = (sample["frame_no"] / total_frame_count * 100.0) if total_frame_count > 0 else 0.0
                 log.info("sample cache progress: samples=%s frame=%s %.1f%%", sample_index, sample["frame_no"], pct)
 
+    def process_oldest_detection_batch() -> None:
+        ready_samples, ready_indices, ready_future = detection_queue.pop(0)
+        ready_detections = [[] for _ in ready_samples]
+        for index, detections in zip(ready_indices, ready_future.result()):
+            ready_detections[index] = detections
+        process_batch(ready_samples, ready_detections)
+
+    def drain_detection_queue() -> None:
+        while detection_queue:
+            process_oldest_detection_batch()
+
     def flush_batch(batch_samples: list[dict]) -> None:
         nonlocal person_gate_next_timestamp, person_gate_active, person_model_warmed
         if not batch_samples:
@@ -1042,6 +1138,10 @@ def _create_sample_cache_impl(
         else:
             active_indices = list(range(len(batch_samples)))
         if not active_indices:
+            # A preceding active-range batch may still be running on the GPU.
+            # Flush it before recording this later inactive batch; otherwise
+            # frames near an active-range boundary are written out of order.
+            drain_detection_queue()
             process_batch(batch_samples, [[] for _ in batch_samples])
             return
 
@@ -1073,11 +1173,7 @@ def _create_sample_cache_impl(
         )
         detection_queue.append((batch_samples, active_indices, future))
         if len(detection_queue) >= max_inflight_batches:
-            ready_samples, ready_indices, ready_future = detection_queue.pop(0)
-            ready_detections = [[] for _ in ready_samples]
-            for index, detections in zip(ready_indices, ready_future.result()):
-                ready_detections[index] = detections
-            process_batch(ready_samples, ready_detections)
+            process_oldest_detection_batch()
 
     try:
         pending_batch: list[dict] = []
@@ -1092,12 +1188,7 @@ def _create_sample_cache_impl(
                 pending_batch = []
         if pending_batch:
             flush_batch(pending_batch)
-        while detection_queue:
-            ready_samples, ready_indices, ready_future = detection_queue.pop(0)
-            ready_detections = [[] for _ in ready_samples]
-            for index, detections in zip(ready_indices, ready_future.result()):
-                ready_detections[index] = detections
-            process_batch(ready_samples, ready_detections)
+        drain_detection_queue()
     finally:
         if detection_executor is not None:
             detection_executor.shutdown(wait=True, cancel_futures=False)
@@ -1109,6 +1200,20 @@ def _create_sample_cache_impl(
 
     mask_fill_gap_samples = max(0, int(round(float(cfg.person_mask_fill_gap_sec) * sampled_fps)))
     inherited_masks = _fill_short_person_mask_gaps(frames, max_gap=mask_fill_gap_samples)
+
+    for previous, current in zip(frames, frames[1:]):
+        if (
+            float(current["timestamp_sec"]),
+            int(current["frame_no"]),
+        ) < (
+            float(previous["timestamp_sec"]),
+            int(previous["frame_no"]),
+        ):
+            raise RuntimeError(
+                "sample cache chunk frame order violation: "
+                f"previous={previous.get('frame_no')}@{previous.get('timestamp_sec')} "
+                f"current={current.get('frame_no')}@{current.get('timestamp_sec')}"
+            )
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -1238,6 +1343,13 @@ def _person_mask_task_specs(frames: list[dict], task_sec: float, overlap_sec: fl
 
 def _ensure_person_mask_engine(cfg: SampleCacheConfig) -> Path:
     """Build the one shared TensorRT detector engine before worker processes start."""
+    source_path = Path(cfg.person_mask_model)
+    configured_engine = str(cfg.person_mask_engine or "").strip()
+    if not configured_engine:
+        # CPU-only deployments intentionally have no TensorRT engine.  Return
+        # the portable .pt detector so the caller can continue with YOLO CPU.
+        log.info("person mask TensorRT disabled; using portable model: %s", source_path)
+        return source_path
     try:
         import tensorrt  # noqa: F401
         from ultralytics import YOLO
@@ -1246,10 +1358,9 @@ def _ensure_person_mask_engine(cfg: SampleCacheConfig) -> Path:
             "TensorRT person mask mode requires the tensorrt-cu12 and ultralytics packages"
         ) from exc
 
-    source_path = Path(cfg.person_mask_model)
     if not source_path.exists():
         raise FileNotFoundError(f"person detector model not found: {source_path}")
-    engine_path = Path(cfg.person_mask_engine)
+    engine_path = Path(configured_engine)
     if engine_path.exists() and engine_path.stat().st_size > 0:
         log.info("person mask TensorRT engine reuse: %s", engine_path)
         return engine_path
@@ -1602,9 +1713,12 @@ def materialize_fixed_person_masks(cache_dir: str | Path, cfg: SampleCacheConfig
         return {"enabled": True, "tasks": 0, "workers": 0, "epochs": 0}
 
     cached_boxes_available = all("person_boxes" in frame for frame in frames)
-    engine_path = Path(cfg.person_mask_engine) if cached_boxes_available else _ensure_person_mask_engine(cfg)
+    engine_path = _existing_person_mask_engine(cfg.person_mask_engine)
+    model_path = engine_path or Path(cfg.person_mask_model)
+    if not cached_boxes_available:
+        model_path = _ensure_person_mask_engine(cfg)
     cfg = copy.deepcopy(cfg)
-    cfg.person_mask_engine = str(engine_path)
+    cfg.person_mask_engine = str(model_path)
     specs = _person_mask_task_specs(
         frames,
         cfg.person_mask_task_sec,
@@ -1617,7 +1731,7 @@ def materialize_fixed_person_masks(cache_dir: str | Path, cfg: SampleCacheConfig
         cfg.person_mask_task_sec,
         cfg.person_mask_task_overlap_sec,
         workers,
-        engine_path,
+        model_path,
         cached_boxes_available,
     )
 
@@ -1745,6 +1859,101 @@ def _copy_optional_mask(
     return dst_rel_filename
 
 
+def _verify_stream_copied_part(
+    part_path: Path,
+    selected_frames: list[dict],
+) -> tuple[bool, str]:
+    """Cheaply verify packet-trimmed MJPEG before accepting the fast path."""
+    expected_count = len(selected_frames)
+    if expected_count <= 0:
+        return False, "empty_selection"
+
+    cap = cv2.VideoCapture(str(part_path))
+    if not cap.isOpened():
+        return False, "open_failed"
+    try:
+        reported_count = int(round(float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)))
+        if reported_count != expected_count:
+            return False, f"frame_count={reported_count},expected={expected_count}"
+
+        max_hash_distance = max(
+            0,
+            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")),
+        )
+        verify_stride = max(
+            1,
+            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")),
+        )
+        probe_indices = list(range(0, expected_count, verify_stride))
+        if probe_indices[-1] != expected_count - 1:
+            probe_indices.append(expected_count - 1)
+        for probe_index in probe_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, probe_index)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return False, f"decode_failed_at={probe_index}"
+            expected_hash = selected_frames[probe_index].get("phash_int")
+            if expected_hash is None:
+                return False, f"missing_phash_at={probe_index}"
+            actual_hash = compute_phash_int(to_decision_frame(frame))
+            distance = phash_distance_int(int(expected_hash), actual_hash)
+            if distance > max_hash_distance:
+                return False, (
+                    f"phash_distance={distance},max={max_hash_distance},index={probe_index}"
+                )
+    finally:
+        cap.release()
+    return True, "ok"
+
+
+def _stream_copy_core_part(
+    chunk_video_path: Path,
+    part_path: Path,
+    *,
+    first_frame_index: int,
+    frame_count: int,
+    sampled_fps: float,
+) -> tuple[bool, str]:
+    """Trim an all-keyframe MJPEG cache at packet level without transcoding."""
+    if shutil.which("ffmpeg") is None:
+        return False, "ffmpeg_unavailable"
+    if frame_count <= 0 or sampled_fps <= 0:
+        return False, "invalid_range"
+
+    offset_sec = max(0.0, float(first_frame_index) / float(sampled_fps))
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{offset_sec:.9f}",
+        "-i",
+        str(chunk_video_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-frames:v",
+        str(int(frame_count)),
+        "-c:v",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        str(part_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return False, f"exec_failed={exc}"
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "unknown_error").strip()
+        return False, f"ffmpeg_exit={result.returncode}:{error[-300:]}"
+    if not part_path.exists() or part_path.stat().st_size <= 0:
+        return False, "empty_output"
+    return True, "ok"
+
+
 def _write_merge_part_worker(
     chunk_manifest_path: str,
     spec: dict,
@@ -1754,12 +1963,11 @@ def _write_merge_part_worker(
     resize_width: int,
     cached_height: int,
 ) -> dict:
-    """Write one merge part AVI from one chunk cache.
+    """Create one overlap-trimmed part from one chunk cache.
 
-    The worker reads the temporary chunk sampled_frames.avi and writes only the
-    non-overlap core samples into part_XXX.avi. It also returns the selected
-    manifest frame items in exactly the same order as frames written to the part
-    file. Final sample_index re-numbering happens in the parent merge process.
+    MJPEG is all-keyframe, so the normal path trims packets with FFmpeg stream
+    copy. The legacy OpenCV decode/re-encode path remains as an automatic
+    fallback when frame-count or pHash verification fails.
     """
 
     import time
@@ -1773,6 +1981,62 @@ def _write_merge_part_worker(
 
     payload = json.loads(chunk_manifest.read_text(encoding="utf-8"))
     chunk_video_path = chunk_dir / payload["video_filename"]
+
+    core_start = float(spec["core_start_sec"])
+    core_end = float(spec["core_end_sec"])
+    is_last = bool(spec.get("is_last"))
+
+    def in_core(item: dict) -> bool:
+        timestamp = float(item["timestamp_sec"])
+        if timestamp < core_start - 1e-6:
+            return False
+        if is_last:
+            return timestamp <= core_end + 1e-6
+        return timestamp < core_end - 1e-6
+
+    all_frames = list(payload.get("frames", []))
+    selected_indices = [index for index, item in enumerate(all_frames) if in_core(item)]
+    selected_frames = [dict(all_frames[index]) for index in selected_indices]
+    skipped_overlap = len(all_frames) - len(selected_frames)
+    for selected in selected_frames:
+        selected["frame_no"] = int(selected["frame_no"])
+        selected["timestamp_sec"] = round(float(selected["timestamp_sec"]), 6)
+
+    stream_copy_enabled = _env_bool("GRAPHLEC_SAMPLE_CACHE_STREAM_COPY_CORE", True)
+    if stream_copy_enabled and selected_indices and all(
+        item.get("phash_int") is not None for item in selected_frames
+    ):
+        copied, copy_reason = _stream_copy_core_part(
+            chunk_video_path,
+            part,
+            first_frame_index=selected_indices[0],
+            frame_count=len(selected_frames),
+            sampled_fps=sampled_fps,
+        )
+        if copied:
+            verified, verify_reason = _verify_stream_copied_part(part, selected_frames)
+            if verified:
+                return {
+                    "chunk_index": int(spec["chunk_index"]),
+                    "chunk_dir": str(chunk_dir),
+                    "part_path": str(part),
+                    "part_mode": "ffmpeg-stream-copy",
+                    "selected_count": len(selected_frames),
+                    "skipped_overlap": skipped_overlap,
+                    "fallback_phash_count": 0,
+                    "video_read_elapsed": 0.0,
+                    "video_write_elapsed": 0.0,
+                    "metric_fallback_elapsed": 0.0,
+                    "elapsed": time.perf_counter() - started_at,
+                    "frames": selected_frames,
+                }
+            copy_reason = f"verify_failed:{verify_reason}"
+        part.unlink(missing_ok=True)
+        log.warning(
+            "sample merge stream-copy fallback: chunk=%s reason=%s",
+            int(spec["chunk_index"]),
+            copy_reason,
+        )
 
     cap = cv2.VideoCapture(str(chunk_video_path))
     if not cap.isOpened():
@@ -1788,7 +2052,7 @@ def _write_merge_part_worker(
         cap.release()
         raise RuntimeError(f"Cannot open merge part writer: {part}")
 
-    selected_frames: list[dict] = []
+    selected_frames = []
     skipped_overlap = 0
     fallback_phash_count = 0
     video_read_elapsed = 0.0
@@ -1796,11 +2060,7 @@ def _write_merge_part_worker(
     metric_fallback_elapsed = 0.0
 
     try:
-        core_start = float(spec["core_start_sec"])
-        core_end = float(spec["core_end_sec"])
-        is_last = bool(spec.get("is_last"))
-
-        for item in payload.get("frames", []):
+        for item in all_frames:
             read_t0 = time.perf_counter()
             ret, frame = cap.read()
             video_read_elapsed += time.perf_counter() - read_t0
@@ -1844,6 +2104,7 @@ def _write_merge_part_worker(
         "chunk_index": int(spec["chunk_index"]),
         "chunk_dir": str(chunk_dir),
         "part_path": str(part),
+        "part_mode": "opencv-reencode",
         "selected_count": len(selected_frames),
         "skipped_overlap": skipped_overlap,
         "fallback_phash_count": fallback_phash_count,
@@ -2022,12 +2283,13 @@ def _merge_chunk_caches(
             part_by_index[chunk_index] = result
             completed += 1
             log.info(
-                "  [sample merge part done %s/%s | idx=%s] selected=%s skipped_overlap=%s elapsed=%.1fs",
+                "  [sample merge part done %s/%s | idx=%s] selected=%s skipped_overlap=%s mode=%s elapsed=%.1fs",
                 completed,
                 len(specs),
                 chunk_index + 1,
                 int(result["selected_count"]),
                 int(result["skipped_overlap"]),
+                str(result.get("part_mode") or "unknown"),
                 float(result["elapsed"]),
             )
 
@@ -2187,10 +2449,22 @@ def _merge_chunk_caches(
     mask_materialize_elapsed = time.perf_counter() - mask_copy_started_at
 
     post_started_at = time.perf_counter()
-    # The frames are already ordered by part order, but keep an explicit stable
-    # sort to preserve the previous merge behavior and guard against future
-    # changes in chunk scheduling.
-    frames.sort(key=lambda x: (float(x["timestamp_sec"]), int(x["frame_no"])))
+    # Segment-local frame indices are assigned before this point. Reordering
+    # only the manifest would detach those indices from their video frames, so
+    # reject an ordering bug instead of hiding it with a timestamp sort.
+    for previous, current in zip(frames, frames[1:]):
+        if (
+            float(current["timestamp_sec"]),
+            int(current["frame_no"]),
+        ) < (
+            float(previous["timestamp_sec"]),
+            int(previous["frame_no"]),
+        ):
+            raise RuntimeError(
+                "sample cache merged frame order violation: "
+                f"previous={previous.get('frame_no')}@{previous.get('timestamp_sec')} "
+                f"current={current.get('frame_no')}@{current.get('timestamp_sec')}"
+            )
     for idx, frame in enumerate(frames, start=1):
         frame["sample_index"] = idx
 
@@ -2317,6 +2591,42 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
     checked = 0
     mismatches: list[dict] = []
     segmented = is_segmented_sample_cache(manifest)
+    if segmented:
+        previous_segment = None
+        previous_local_index = None
+        for frame_info in frames:
+            segment = frame_info.get("cache_segment_filename")
+            local_index = frame_info.get("cache_segment_frame_index")
+            if segment is None or local_index is None:
+                mismatches.append({
+                    "reason": "missing_segment_mapping",
+                    "sample_index": int(frame_info.get("sample_index", 0) or 0),
+                })
+                break
+            local_index = int(local_index)
+            expected_local_index = (
+                int(previous_local_index) + 1 if segment == previous_segment else 0
+            )
+            if local_index != expected_local_index:
+                mismatches.append({
+                    "reason": "non_contiguous_segment_mapping",
+                    "sample_index": int(frame_info.get("sample_index", 0) or 0),
+                    "segment": str(segment),
+                    "local_index": local_index,
+                    "expected_local_index": expected_local_index,
+                })
+                break
+            previous_segment = segment
+            previous_local_index = local_index
+        if mismatches:
+            return {
+                "enabled": True,
+                "ok": False,
+                "checked": 0,
+                "stride": stride,
+                "max_hash_distance": max_hash_distance,
+                "mismatches": mismatches,
+            }
     verify_started_at = time.perf_counter()
     log.info(
         "sample cache alignment verify start: targets=%s samples=%s mode=%s",
@@ -2394,6 +2704,25 @@ def create_sample_cache_chunked(
         return create_sample_cache(input_path, output_dir, cfg)
 
     workers = max(1, min(requested_workers, len(specs)))
+    available_memory = _available_memory_bytes()
+    if available_memory is not None:
+        reserve_bytes = int(float(os.getenv("GRAPHLEC_SAMPLE_CACHE_WORKER_MEMORY_RESERVE_GB", "1.5")) * 1024**3)
+        default_worker_mb = 2560 if cfg.person_masks else 1024
+        worker_bytes = max(
+            256 * 1024**2,
+            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_WORKER_MEMORY_MB", str(default_worker_mb))) * 1024**2,
+        )
+        memory_workers = max(1, int(max(0, available_memory - reserve_bytes) // worker_bytes))
+        if workers > memory_workers:
+            log.info(
+                "sample cache worker cap: requested=%s capped=%s available_memory_gb=%.1f reserve_gb=%.1f per_worker_mb=%s",
+                workers,
+                memory_workers,
+                available_memory / 1024**3,
+                reserve_bytes / 1024**3,
+                worker_bytes // 1024**2,
+            )
+            workers = memory_workers
     log.info(
         "sample cache chunked start: duration=%.1fs chunk_sec=%.1fs overlap=%.1fs workers=%s chunks=%s",
         duration,
@@ -2405,19 +2734,31 @@ def create_sample_cache_chunked(
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    temp_root, storage_mode = _sample_cache_temp_root(output_path)
+    estimated_cache_bytes = _estimate_sample_cache_bytes(
+        video_meta,
+        duration,
+        cfg.sample_fps,
+        resize_width=cfg.resize_width,
+    )
+    temp_root, storage_mode, temp_free_bytes = _sample_cache_temp_root(
+        output_path,
+        estimated_cache_bytes=estimated_cache_bytes,
+    )
     log.info(
-        "sample cache temporary storage: mode=%s root=%s total_memory_gb=%.1f",
+        "sample cache temporary storage: mode=%s root=%s estimated_cache_gb=%.1f free_gb=%.1f available_memory_gb=%.1f",
         storage_mode,
         temp_root,
-        ((_system_memory_bytes() or 0) / 1024**3),
+        estimated_cache_bytes / 1024**3,
+        temp_free_bytes / 1024**3,
+        ((available_memory or 0) / 1024**3),
     )
 
     # Run all seek-based gate checks in the parent with one YOLO instance.
     # This prevents every chunk worker from allocating its own TensorRT context
     # merely to discover that its chunk has no person-mask work.
     if cfg.person_masks:
-        gate_model_source = cfg.person_mask_engine if Path(cfg.person_mask_engine).exists() else cfg.person_mask_model
+        engine_path = _existing_person_mask_engine(cfg.person_mask_engine)
+        gate_model_source = str(engine_path) if engine_path else cfg.person_mask_model
         log.info(
             "person presence gate global start: chunks=%s model=%s one_model=true",
             len(specs),

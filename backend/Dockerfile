@@ -2,7 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+# CPU wheels are the portable default: Linux desktops, Docker Desktop on
+# macOS, and CUDA-less servers can all build this image.  NVIDIA deployments
+# override this at build time from docker-compose.gpu.yml.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

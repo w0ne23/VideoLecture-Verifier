@@ -145,7 +145,7 @@ class Config:
     SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("GRAPHLEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
     SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("GRAPHLEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
     SCENE_PENDING_MAX_SEC        = float(os.getenv("GRAPHLEC_SCENE_PENDING_MAX_SEC", "2.0"))
-    MIN_SLIDE_DURATION_SEC       = float(os.getenv("GRAPHLEC_MIN_SLIDE_DURATION_SEC", "4.0"))
+    MIN_SLIDE_DURATION_SEC       = float(os.getenv("GRAPHLEC_MIN_SLIDE_DURATION_SEC", "3.0"))
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
@@ -2071,6 +2071,13 @@ def _extract_slides_staged(
     log.info("  Step 4A-1b done: missed-cut annotation reparent elapsed=%.1fs", _elapsed(step_t0))
 
     step_t0 = time.perf_counter()
+    # Remove transient scenes before building OCR/VLM candidates.  Otherwise a
+    # short middle slide is dropped only after its two neighbours have already
+    # been judged as separate, so the newly-adjacent pair is never reviewed.
+    metadata = drop_short_lived_slide_scenes(metadata, cfg)
+    log.info("  Step 4A-1c done: drop_short_lived_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = mark_clean_final_frames(metadata)
     log.info("  Step 4A-2 done: mark_clean_final_frames elapsed=%.1fs", _elapsed(step_t0))
 
@@ -2082,6 +2089,16 @@ def _extract_slides_staged(
     add_transition_review_candidates(review_dir, scenes_path, metadata)
     log.info("  Step 4A-4 done: add_transition_review_candidates elapsed=%.1fs", _elapsed(step_t0))
 
+    # local_vlm._prepare_review_candidates regenerates chronological build
+    # candidates from review_slides/metadata.json.  The file originally written
+    # by materialization still has pre-reparent/pre-short-filter scene IDs, so
+    # regenerating from it shifts candidate IDs away from their image files.
+    # Persist the current compacted timeline before LocalVLM reads it.
+    step_t0 = time.perf_counter()
+    with open(review_metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    log.info("  Step 4A-4b done: LocalVLM review metadata sync elapsed=%.1fs", _elapsed(step_t0))
+
     step_t0 = time.perf_counter()
     metadata = maybe_run_local_vlm_review(metadata, review_dir)
     log.info("  Step 4A-5 done: maybe_run_local_vlm_review elapsed=%.1fs", _elapsed(step_t0))
@@ -2089,10 +2106,6 @@ def _extract_slides_staged(
     step_t0 = time.perf_counter()
     metadata = collapse_contiguous_same_slide_scenes(metadata, review_dir=review_dir)
     log.info("  Step 4A-6 done: collapse_contiguous_same_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
-
-    step_t0 = time.perf_counter()
-    metadata = drop_short_lived_slide_scenes(metadata, cfg)
-    log.info("  Step 4A-6b done: drop_short_lived_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
 
     step_t0 = time.perf_counter()
     metadata = remap_metadata_for_final_materialize(metadata)
@@ -3133,7 +3146,13 @@ def collapse_contiguous_same_slide_scenes(
 
 
 def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dict]:
-    """Remove transient slide scenes that do not persist long enough to present."""
+    """Remove transient slides and make the newly adjacent scenes contiguous.
+
+    A short A -> B -> A interruption must become A -> A *before* OCR/VLM
+    candidate generation.  Keeping the original IDs after removing B leaves
+    A(scene_008) and A(scene_010) numerically non-adjacent, which incorrectly
+    bypasses chronological merge/collapse handling.
+    """
     from collections import defaultdict
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
@@ -3172,10 +3191,42 @@ def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dic
         threshold,
         ", ".join(f"scene_{scene_index:03d}({duration:.2f}s)" for scene_index, duration in dropped),
     )
-    return [
+    survivors = [
         item for item in metadata
         if int(item.get("scene_index", -1) or -1) not in dropped_indices
     ]
+
+    surviving_indices = sorted({
+        int(item.get("scene_index", 0) or 0)
+        for item in survivors
+        if int(item.get("scene_index", 0) or 0) > 0
+    })
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(surviving_indices, start=1)}
+    if all(old_idx == new_idx for old_idx, new_idx in index_map.items()):
+        return survivors
+
+    for raw_item in survivors:
+        item = raw_item
+        try:
+            old_idx = int(item.get("scene_index", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        new_idx = index_map.get(old_idx)
+        if new_idx is None:
+            continue
+        # source_scene_index remains the Step 2 ID. add_transition_review_candidates
+        # uses it to map transition clusters onto this compacted timeline.
+        item.setdefault("source_scene_index", old_idx)
+        item["pre_short_lived_scene_index"] = old_idx
+        item["scene_index"] = new_idx
+        item["scene_number"] = new_idx
+        item["slide_index"] = new_idx
+
+    log.info(
+        "short-lived slide filter: compacted surviving scene IDs after drop: %s",
+        ", ".join(f"{old_idx}->{new_idx}" for old_idx, new_idx in index_map.items() if old_idx != new_idx),
+    )
+    return survivors
 
 
 def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:

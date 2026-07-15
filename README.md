@@ -84,3 +84,19 @@ backend 이미지는 CPU 전용 torch를 사용한다 (~3.5GB). 프론트는 별
 핵심 키: `counts{final_confirmed, needs_review, rejected, slide_errors, …}`,
 `final_confirmed_claims[]`, `needs_review_claims[]`, `verifier_rejected_claims[]`,
 `slide_errors[]`, `models[]`, `verification_date`.
+
+## CPU/GPU Docker 실행
+
+macOS 또는 CUDA 없는 환경에서는 CPU 구성으로 실행합니다.
+
+```bash
+./scripts/verilec_compose.sh build
+./scripts/verilec_compose.sh up -d
+```
+
+NVIDIA Docker 런타임을 사용할 수 있는 Linux에서는 같은 실행 스크립트가 GPU
+구성을 자동 선택합니다. 필요하면 `VERILEC_MODE=cpu` 또는 `VERILEC_MODE=gpu`로
+명시할 수 있습니다.
+
+CPU 구성은 OpenCV 디코딩, YOLO `.pt` 모델, RapidOCR를 사용합니다. GPU 구성은
+CUDA PyTorch, FFmpeg CUDA 디코딩, TensorRT 사람 마스크 및 Nemotron OCR를 사용합니다.
