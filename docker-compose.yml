@@ -40,7 +40,7 @@ services:
       # Portable default: CPU RapidOCR. The NVIDIA override switches this to
       # Nemotron OCR v2 without changing the pipeline's HTTP OCR contract.
       GRAPHLEC_SLIDE_OCR_PROVIDER: http
-      GRAPHLEC_SLIDE_OCR_BASE_URL: http://rapid-ocr:8000
+      GRAPHLEC_SLIDE_OCR_BASE_URL: http://127.0.0.1:8000
       GRAPHLEC_SLIDE_OCR_LANG: korean
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
@@ -75,6 +75,7 @@ services:
       # Ultralytics / matplotlib 경고 방지용
       YOLO_CONFIG_DIR: /tmp/Ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
+      RAPIDOCR_HOME: /models
 
       # Step 0 sample cache chunk 병렬화
       GRAPHLEC_SAMPLE_CACHE_FPS: "5"
@@ -137,6 +138,7 @@ services:
     volumes:
       - ./storage:/app/storage
       - ./input:/app/input
+      - rapid_ocr_models:/models
 
     ports:
       - "8003:8000"
@@ -165,20 +167,6 @@ services:
     ports:
       - "8010:8000"
 
-  rapid-ocr:
-    profiles:
-      - rapidocr
-    build:
-      context: .
-      dockerfile: rapid_ocr_service/Dockerfile
-    environment:
-      LOCAL_STORAGE_DIR: /app/storage
-      RAPIDOCR_HOME: /models
-    volumes:
-      - ./storage:/app/storage
-      - rapid_ocr_models:/models
-    ports:
-      - "8011:8000"
   ollama:
     profiles:
       - vlm

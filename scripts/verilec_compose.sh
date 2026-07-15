@@ -44,8 +44,7 @@ if [ "$mode" = "gpu" ]; then
   compose_args+=(-f docker-compose.gpu.yml --profile ocr)
   printf 'VeriLec mode: GPU (CUDA decode, TensorRT, Nemotron OCR)\n'
 else
-  compose_args+=(--profile rapidocr)
-  printf 'VeriLec mode: CPU (OpenCV decode, CPU YOLO, RapidOCR PP-OCRv5 Korean)\n'
+  printf 'VeriLec mode: CPU (OpenCV decode, CPU YOLO, embedded RapidOCR PP-OCRv5 Korean)\n'
 fi
 
 exec docker compose "${compose_args[@]}" "$@"

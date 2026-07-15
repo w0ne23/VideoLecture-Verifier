@@ -42,7 +42,7 @@ def wait_for_service(base_url: str, timeout: float = 30.0) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("slides_dir", type=Path)
-    parser.add_argument("--base-url", default="http://localhost:8011")
+    parser.add_argument("--base-url", default="http://localhost:8003")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args()
