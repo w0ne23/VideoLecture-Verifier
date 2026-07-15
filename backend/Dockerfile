@@ -6,6 +6,9 @@ WORKDIR /app
 # macOS, and CUDA-less servers can all build this image.  NVIDIA deployments
 # override this at build time from docker-compose.gpu.yml.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+# TensorRT is available only for the NVIDIA image.  Keeping it optional lets
+# the portable CPU image build on Docker Desktop (including Apple Silicon).
+ARG INSTALL_TENSORRT=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -22,6 +25,9 @@ COPY pipeline/requirements.verify.txt ./pipeline/requirements.verify.txt
 RUN pip install --no-cache-dir \
     -r backend/requirements.txt \
     -r pipeline/requirements.verify.txt
+RUN if [ "$INSTALL_TENSORRT" = "1" ]; then \
+      pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com "tensorrt-cu12>=10.0.0"; \
+    fi
 
 RUN mkdir -p /app/models && \
     python -c "from ultralytics import YOLO; import shutil; model=YOLO('yolo26n.pt'); source='yolo26n.pt'; shutil.move(source, '/app/models/yolo26n.pt') if __import__('pathlib').Path(source).exists() else None"
