@@ -26,6 +26,7 @@ Usage:
 """
 
 import cv2
+import copy
 import numpy as np
 import imagehash
 import os
@@ -37,7 +38,7 @@ import tempfile
 from PIL import Image
 from pathlib import Path
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import argparse
 import json
 import logging
@@ -75,18 +76,21 @@ class Config:
     # ── scene base 구조 비교 ─────────────────────────────────────────
     # 반복 PPT 템플릿에서 pHash만으로 놓치는 장면 전환을 보완한다.
     BASE_HASH_THRESHOLD          = 8     # scene_base_phash ↔ current phash 거리 임계
-    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("VERILEC_SCENE_BASE_MSE_THRESHOLD", "350"))
-    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("VERILEC_SCENE_BASE_CHANGED_RATIO", "0.045"))
-    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("VERILEC_SCENE_STRONG_CHANGED_RATIO", "0.10"))
-    CONTENT_CROP_LEFT            = float(os.getenv("VERILEC_CONTENT_CROP_LEFT", "0.12"))
-    CONTENT_CROP_TOP             = float(os.getenv("VERILEC_CONTENT_CROP_TOP", "0.06"))
-    CONTENT_CROP_RIGHT           = float(os.getenv("VERILEC_CONTENT_CROP_RIGHT", "0.94"))
-    CONTENT_CROP_BOTTOM          = float(os.getenv("VERILEC_CONTENT_CROP_BOTTOM", "0.90"))
+    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("GRAPHLEC_SCENE_BASE_MSE_THRESHOLD", "350"))
+    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("GRAPHLEC_SCENE_BASE_CHANGED_RATIO", "0.045"))
+    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("GRAPHLEC_SCENE_STRONG_CHANGED_RATIO", "0.10"))
+    CONTENT_CROP_LEFT            = float(os.getenv("GRAPHLEC_CONTENT_CROP_LEFT", "0.05"))
+    CONTENT_CROP_TOP             = float(os.getenv("GRAPHLEC_CONTENT_CROP_TOP", "0.05"))
+    CONTENT_CROP_RIGHT           = float(os.getenv("GRAPHLEC_CONTENT_CROP_RIGHT", "0.95"))
+    CONTENT_CROP_BOTTOM          = float(os.getenv("GRAPHLEC_CONTENT_CROP_BOTTOM", "0.95"))
+    # Clear-reset detection must ignore presentation toolbars, which commonly
+    # occupy the lower edge while annotations are being erased.
+    CLEAR_RESET_CROP_BOTTOM      = float(os.getenv("GRAPHLEC_CLEAR_RESET_CROP_BOTTOM", "0.90"))
     SAME_SCENE_EDGE_PRESERVE_THRESHOLD = float(
-        os.getenv("VERILEC_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
+        os.getenv("GRAPHLEC_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
     )
     SAME_SCENE_CHANGED_RATIO_MAX = float(
-        os.getenv("VERILEC_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
+        os.getenv("GRAPHLEC_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
     )
 
     # ── 중복 슬라이드 감지 (후처리) ──────────────────────────────────
@@ -95,38 +99,38 @@ class Config:
     #   - 실제 동일 슬라이드 쌍의 dist → 이 값보다 크게
     #   - 실제 다른 슬라이드 쌍의 dist → 이 값보다 작게
     DUPLICATE_HASH_THRESHOLD     = 30    # 초기값, 로그 확인 후 조정 필요
-    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("VERILEC_DUPLICATE_DHASH_THRESHOLD", "34"))
-    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("VERILEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
-    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("VERILEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
+    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("GRAPHLEC_DUPLICATE_DHASH_THRESHOLD", "34"))
+    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
+    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
     DUPLICATE_CONTENT_CHANGED_RATIO_MAX = float(
-        os.getenv("VERILEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
+        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
     )
     DUPLICATE_CONTENT_EDGE_OVERLAP_MIN = float(
-        os.getenv("VERILEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
+        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
     )
-    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("VERILEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
-    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("VERILEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
-    DUPLICATE_FULL_HIST_MIN = float(os.getenv("VERILEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
-    AGENDA_TEXT_GUARD_ENABLED = os.getenv("VERILEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
-    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("VERILEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
-    AGENDA_TEXT_XOR_MAX = float(os.getenv("VERILEC_AGENDA_TEXT_XOR_MAX", "0.045"))
+    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
+    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
+    DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
+    AGENDA_TEXT_GUARD_ENABLED = os.getenv("GRAPHLEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
+    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
+    AGENDA_TEXT_XOR_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_XOR_MAX", "0.045"))
     BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN = float(
-        os.getenv("VERILEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MIN = float(
-        os.getenv("VERILEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MAX = float(
-        os.getenv("VERILEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
     )
     BUILD_CANDIDATE_CONTENT_MSE_MAX = float(
-        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
     )
     BUILD_CANDIDATE_CONTENT_HIST_MIN = float(
-        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
     )
     BUILD_CANDIDATE_CONTENT_HASH_MAX = int(
-        os.getenv("VERILEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
     )
 
     # ── 필기 감지 ────────────────────────────────────────────────────
@@ -137,23 +141,24 @@ class Config:
     # ── 안정화 판단 ──────────────────────────────────────────────────
     STABILITY_WINDOW_SEC         = 0.7
     MIN_ANNOT_DURATION_SEC       = 0.2
-    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("VERILEC_SCENE_CAPTURE_DELAY_SEC", "0.8"))
-    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("VERILEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
-    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("VERILEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
-    SCENE_PENDING_MAX_SEC        = float(os.getenv("VERILEC_SCENE_PENDING_MAX_SEC", "2.0"))
+    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("GRAPHLEC_SCENE_CAPTURE_DELAY_SEC", "0.8"))
+    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("GRAPHLEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
+    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("GRAPHLEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
+    SCENE_PENDING_MAX_SEC        = float(os.getenv("GRAPHLEC_SCENE_PENDING_MAX_SEC", "2.0"))
+    MIN_SLIDE_DURATION_SEC       = float(os.getenv("GRAPHLEC_MIN_SLIDE_DURATION_SEC", "3.0"))
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
     # 전역 판정/annotation 감지는 이 해상도로 수행한다.
     # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많다.
-    DECISION_RESIZE_WIDTH        = int(os.getenv("VERILEC_SLIDE_DECISION_WIDTH", "768"))
+    DECISION_RESIZE_WIDTH        = int(os.getenv("GRAPHLEC_SLIDE_DECISION_WIDTH", "768"))
     RESIZE_WIDTH                 = 960
-    DECODE_BACKEND               = os.getenv("VERILEC_SLIDE_DECODE_BACKEND", "auto")
-    FFMPEG_HWACCEL               = os.getenv("VERILEC_FFMPEG_HWACCEL", "cuda")
+    DECODE_BACKEND               = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
+    FFMPEG_HWACCEL               = os.getenv("GRAPHLEC_FFMPEG_HWACCEL", "cuda")
     # 서버/로컬 공통 정책: 슬라이드 추출은 항상 5분 단위 청크 병렬 처리
     EXTRACT_CHUNK_SEC            = 300.0
     EXTRACT_CHUNK_OVERLAP_SEC    = 3.0
-    EXTRACT_WORKERS              = int(os.getenv("VERILEC_SLIDE_EXTRACT_WORKERS", "0"))
+    EXTRACT_WORKERS              = int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0"))
 
 
 # ──────────────────────────────────────────────
@@ -253,6 +258,23 @@ def symmetric_edge_overlap(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     )
 
 
+def symmetric_edge_overlap_from_masks(
+    edges_a: np.ndarray,
+    dilated_edges_a: np.ndarray,
+    edges_b: np.ndarray,
+    dilated_edges_b: np.ndarray,
+) -> float:
+    """Reuse precomputed edge masks for repeated duplicate comparisons."""
+    count_a = int(edges_a.sum())
+    count_b = int(edges_b.sum())
+    if count_a <= 0 or count_b <= 0:
+        return 0.0
+    return min(
+        float(np.logical_and(edges_a, dilated_edges_b).sum() / count_a),
+        float(np.logical_and(edges_b, dilated_edges_a).sum() / count_b),
+    )
+
+
 def normalized_mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return compute_mse(frame_a, frame_b) / (255.0 * 255.0)
 
@@ -264,6 +286,17 @@ def grayscale_hist_correlation(frame_a: np.ndarray, frame_b: np.ndarray) -> floa
     hist_b = cv2.calcHist([gray_b], [0], None, [64], [0, 256])
     cv2.normalize(hist_a, hist_a)
     cv2.normalize(hist_b, hist_b)
+    return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
+
+
+def grayscale_histogram(frame: np.ndarray) -> np.ndarray:
+    gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
+    cv2.normalize(hist, hist)
+    return hist
+
+
+def histogram_correlation(hist_a: np.ndarray, hist_b: np.ndarray) -> float:
     return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
 
 
@@ -299,18 +332,56 @@ def is_same_scene_content(reference: np.ndarray, frame: np.ndarray, cfg: Config)
 def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | None = None) -> dict:
     full = resize_frame(frame, cfg.RESIZE_WIDTH)
     content = content_region(full, cfg)
+    full_edges = _edge_mask(full)
+    content_edges = _edge_mask(content)
+    edge_kernel = np.ones((5, 5), np.uint8)
     full_mask = resize_mask(mask, full.shape[:2]) if mask is not None else None
     content_mask = content_region(full_mask.astype(np.uint8), cfg).astype(bool) if full_mask is not None else None
     return {
         "frame": full,
         "content": content,
+        "edges": full_edges,
+        "edges_dilated": cv2.dilate(full_edges.astype(np.uint8), edge_kernel, iterations=1).astype(bool),
+        "content_edges": content_edges,
+        "content_edges_dilated": cv2.dilate(content_edges.astype(np.uint8), edge_kernel, iterations=1).astype(bool),
         "mask": full_mask,
         "content_mask": content_mask,
         "phash": compute_phash_hires(full),
         "dhash": compute_dhash_hires(full),
         "content_phash": compute_phash_hires(content),
         "content_dhash": compute_dhash_hires(content),
+        "histogram": grayscale_histogram(full),
+        "content_histogram": grayscale_histogram(content),
     }
+
+
+def duplicate_pair_prefilter(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
+    metrics = {
+        "phash": int(rep_a["phash"] - rep_b["phash"]),
+        "dhash": int(rep_a["dhash"] - rep_b["dhash"]),
+        "content_phash": int(rep_a["content_phash"] - rep_b["content_phash"]),
+        "content_dhash": int(rep_a["content_dhash"] - rep_b["content_dhash"]),
+        "hist": float(histogram_correlation(rep_a["histogram"], rep_b["histogram"])),
+        "content_hist": float(histogram_correlation(rep_a["content_histogram"], rep_b["content_histogram"])),
+    }
+
+    relaxed_full_hash = max(int(cfg.DUPLICATE_HASH_THRESHOLD) * 2, 48)
+    relaxed_full_dhash = max(int(cfg.DUPLICATE_DHASH_THRESHOLD) * 2, 56)
+    relaxed_content_hash = max(int(cfg.DUPLICATE_CONTENT_HASH_THRESHOLD) * 3, 54)
+    relaxed_content_dhash = max(int(cfg.DUPLICATE_CONTENT_DHASH_THRESHOLD) * 2, 48)
+    relaxed_full_hist = min(float(cfg.DUPLICATE_FULL_HIST_MIN) - 0.20, 0.80)
+    relaxed_content_hist = min(float(cfg.DUPLICATE_CONTENT_HIST_MIN) - 0.18, 0.82)
+
+    maybe_duplicate = (
+        metrics["phash"] <= relaxed_full_hash
+        or metrics["dhash"] <= relaxed_full_dhash
+        or metrics["content_phash"] <= relaxed_content_hash
+        or metrics["content_dhash"] <= relaxed_content_dhash
+        or metrics["hist"] >= relaxed_full_hist
+        or metrics["content_hist"] >= relaxed_content_hist
+    )
+    metrics["prefilter_pass"] = bool(maybe_duplicate)
+    return bool(maybe_duplicate), metrics
 
 
 def _agenda_white_components(content: np.ndarray, ignore_mask: np.ndarray | None = None) -> tuple[np.ndarray, int]:
@@ -419,28 +490,63 @@ def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool
         rep_b["content"],
         rep_b.get("content_mask"),
     )
-    phash_a = compute_phash_hires(full_a)
-    phash_b = compute_phash_hires(full_b)
-    dhash_a = compute_dhash_hires(full_a)
-    dhash_b = compute_dhash_hires(full_b)
-    content_phash_a = compute_phash_hires(content_a)
-    content_phash_b = compute_phash_hires(content_b)
-    content_dhash_a = compute_dhash_hires(content_a)
-    content_dhash_b = compute_dhash_hires(content_b)
+    # The feature pass already computed these values for the common case where
+    # no person mask is present. Reuse them instead of hashing both images a
+    # second time during detailed pair evaluation. Masked pairs still need
+    # pair-specific hashes because masked_pair() uses the union of both masks.
+    can_reuse_cached_features = rep_a.get("mask") is None and rep_b.get("mask") is None
+    if can_reuse_cached_features:
+        phash_a = rep_a["phash"]
+        phash_b = rep_b["phash"]
+        dhash_a = rep_a["dhash"]
+        dhash_b = rep_b["dhash"]
+        content_phash_a = rep_a["content_phash"]
+        content_phash_b = rep_b["content_phash"]
+        content_dhash_a = rep_a["content_dhash"]
+        content_dhash_b = rep_b["content_dhash"]
+        full_hist = histogram_correlation(rep_a["histogram"], rep_b["histogram"])
+        content_hist = histogram_correlation(
+            rep_a["content_histogram"], rep_b["content_histogram"]
+        )
+        full_edge = symmetric_edge_overlap_from_masks(
+            rep_a["edges"],
+            rep_a["edges_dilated"],
+            rep_b["edges"],
+            rep_b["edges_dilated"],
+        )
+        content_edge = symmetric_edge_overlap_from_masks(
+            rep_a["content_edges"],
+            rep_a["content_edges_dilated"],
+            rep_b["content_edges"],
+            rep_b["content_edges_dilated"],
+        )
+    else:
+        phash_a = compute_phash_hires(full_a)
+        phash_b = compute_phash_hires(full_b)
+        dhash_a = compute_dhash_hires(full_a)
+        dhash_b = compute_dhash_hires(full_b)
+        content_phash_a = compute_phash_hires(content_a)
+        content_phash_b = compute_phash_hires(content_b)
+        content_dhash_a = compute_dhash_hires(content_a)
+        content_dhash_b = compute_dhash_hires(content_b)
+        full_hist = grayscale_hist_correlation(full_a, full_b)
+        content_hist = grayscale_hist_correlation(content_a, content_b)
+        full_edge = symmetric_edge_overlap(full_a, full_b)
+        content_edge = symmetric_edge_overlap(content_a, content_b)
 
     metrics = {
         "phash": int(phash_a - phash_b),
         "dhash": int(dhash_a - dhash_b),
         "changed": float(count_changed_pixels(full_a, full_b, cfg.ANNOT_DIFF_THRESHOLD)),
-        "edge": float(symmetric_edge_overlap(full_a, full_b)),
+        "edge": float(full_edge),
         "mse": float(normalized_mse(full_a, full_b)),
-        "hist": float(grayscale_hist_correlation(full_a, full_b)),
+        "hist": float(full_hist),
         "content_phash": int(content_phash_a - content_phash_b),
         "content_dhash": int(content_dhash_a - content_dhash_b),
         "content_changed": float(count_changed_pixels(content_a, content_b, cfg.ANNOT_DIFF_THRESHOLD)),
-        "content_edge": float(symmetric_edge_overlap(content_a, content_b)),
+        "content_edge": float(content_edge),
         "content_mse": float(normalized_mse(content_a, content_b)),
-        "content_hist": float(grayscale_hist_correlation(content_a, content_b)),
+        "content_hist": float(content_hist),
         "person_masked": bool(rep_a.get("mask") is not None or rep_b.get("mask") is not None),
     }
 
@@ -1584,7 +1690,7 @@ def _item_source_path(item: dict) -> Path:
 
 
 def _group_representative_path(group: list[dict]) -> Path:
-    annotations = [item for item in group if item.get("capture_type") == "annotation"]
+    annotations = [item for item in group if item.get("capture_type") in {"annotation", "build"}]
     target = annotations[-1] if annotations else group[0]
     return _item_source_path(target)
 
@@ -1649,9 +1755,18 @@ def _copy_merged_groups(merged_groups: list[list[dict]], out_path: Path) -> list
             capture_type = item["capture_type"]
             if capture_type == "base":
                 fname = f"scene_{new_scene_idx:03d}_base.jpg"
+            elif capture_type == "build":
+                build_idx = int(item.get("build_index", annot_idx + 1) or annot_idx + 1)
+                fname = f"scene_{new_scene_idx:03d}_build_{build_idx:02d}.jpg"
             else:
                 annot_idx += 1
-                fname = f"scene_{new_scene_idx:03d}_annot_{annot_idx:02d}.jpg"
+                build_idx = int(item.get("build_index", 0) or 0)
+                build_annot_idx = int(item.get("build_annot_index", annot_idx) or annot_idx)
+                fname = (
+                    f"scene_{new_scene_idx:03d}_build_{build_idx:02d}_annot_{build_annot_idx:02d}.jpg"
+                    if build_idx > 0
+                    else f"scene_{new_scene_idx:03d}_build_00_annot_{build_annot_idx:02d}.jpg"
+                )
             shutil.copy2(_item_source_path(item), out_path / fname)
             metadata.append(
                 _meta(
@@ -1848,19 +1963,22 @@ def _extract_slides_staged(
     input_path: str,
     output_dir: str,
     debug: bool = False,
+    decode_backend: str | None = None,
 ) -> list[dict]:
+    import time
+
     try:
         from .annotation_from_cache import detect_annotations
-        from .materialize_from_cache import materialize_frames
-        from .sample_cache import create_sample_cache
-        from .scene_transition_from_cache import run_cache_probe
+        from .materialize_from_cache import materialize_frames, materialize_frames_from_sample_cache
+        from .sample_cache import SampleCacheConfig, create_sample_cache_chunked
+        from .scene_transition_from_cache import run_cache_probe_parallel
         from .scene_transition_probe import ProbeConfig
         from .timeline_region_classifier import classify_regions
     except ImportError:  # pragma: no cover - direct script execution fallback
         from annotation_from_cache import detect_annotations
-        from materialize_from_cache import materialize_frames
-        from sample_cache import create_sample_cache
-        from scene_transition_from_cache import run_cache_probe
+        from materialize_from_cache import materialize_frames, materialize_frames_from_sample_cache
+        from sample_cache import SampleCacheConfig, create_sample_cache_chunked
+        from scene_transition_from_cache import run_cache_probe_parallel
         from scene_transition_probe import ProbeConfig
         from timeline_region_classifier import classify_regions
 
@@ -1875,68 +1993,166 @@ def _extract_slides_staged(
     for path in (cache_dir, regions_dir, scenes_dir, annotations_dir, review_dir):
         path.mkdir(parents=True, exist_ok=True)
 
+    def _elapsed(t0: float) -> float:
+        return time.perf_counter() - t0
+
     log.info("슬라이드 추출 staged pipeline 실행")
     log.info("  Step 0: sample cache 생성")
-    create_sample_cache(input_path, str(cache_dir))
+    step_t0 = time.perf_counter()
+    sample_cache_cfg = SampleCacheConfig(decode_backend=decode_backend or Config.DECODE_BACKEND)
+    create_sample_cache_chunked(
+        input_path,
+        str(cache_dir),
+        cfg=sample_cache_cfg,
+        chunk_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300")),
+        overlap_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")),
+        workers=int(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2")),
+    )
+    log.info("  Step 0 done: sample cache 생성 elapsed=%.1fs", _elapsed(step_t0))
 
     log.info("  Step 1: timeline region 분류")
+    step_t0 = time.perf_counter()
     region_payload = classify_regions(str(cache_dir), str(regions_dir))
+    log.info("  Step 1 done: timeline region 분류 elapsed=%.1fs", _elapsed(step_t0))
     regions_path = regions_dir / "timeline_segments.json"
 
     log.info("  Step 2: slide region scene/base 추출")
-    run_cache_probe(
+    step_t0 = time.perf_counter()
+    run_cache_probe_parallel(
         str(cache_dir),
         str(scenes_dir),
         ProbeConfig(),
         regions_path=str(regions_path),
     )
+    log.info("  Step 2 done: slide region scene/base 추출 elapsed=%.1fs", _elapsed(step_t0))
     scenes_path = scenes_dir / "scene_transitions.json"
 
     log.info("  Step 3: scene 내부 annotation frame 추출")
+    step_t0 = time.perf_counter()
     detect_annotations(str(cache_dir), str(scenes_path), str(annotations_dir))
+    log.info("  Step 3 done: scene 내부 annotation frame 추출 elapsed=%.1fs", _elapsed(step_t0))
     annotations_path = annotations_dir / "scene_annotations.json"
 
     log.info("  Step 4A: LocalVLM review용 임시 frame materialize")
-    materialize_frames(
-        input_path,
-        str(scenes_path),
-        str(annotations_path),
-        str(review_dir),
-        regions_path=str(regions_path),
-    )
+    step_t0 = time.perf_counter()
+    try:
+        materialize_frames_from_sample_cache(
+            str(cache_dir),
+            str(scenes_path),
+            str(annotations_path),
+            str(review_dir),
+            regions_path=str(regions_path),
+        )
+    except Exception as exc:
+        log.warning(
+            "Step 4A sample-cache materialize failed; falling back to original video materialize: %s",
+            exc,
+            exc_info=True,
+        )
+        materialize_frames(
+            input_path,
+            str(scenes_path),
+            str(annotations_path),
+            str(review_dir),
+            regions_path=str(regions_path),
+            decode_backend=decode_backend or Config.DECODE_BACKEND,
+        )
+    log.info("  Step 4A done: LocalVLM review용 임시 frame materialize elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     review_metadata_path = review_dir / "metadata.json"
     with open(review_metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
+    log.info("  Step 4A-1 done: review metadata load elapsed=%.1fs", _elapsed(step_t0))
 
     cfg = Config()
+    step_t0 = time.perf_counter()
+    metadata = reparent_annotations_to_next_base(metadata, review_dir)
+    log.info("  Step 4A-1b done: missed-cut annotation reparent elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
+    # Remove transient scenes before building OCR/VLM candidates.  Otherwise a
+    # short middle slide is dropped only after its two neighbours have already
+    # been judged as separate, so the newly-adjacent pair is never reviewed.
+    metadata = drop_short_lived_slide_scenes(metadata, cfg)
+    log.info("  Step 4A-1c done: drop_short_lived_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = mark_clean_final_frames(metadata)
+    log.info("  Step 4A-2 done: mark_clean_final_frames elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = mark_visual_duplicates(metadata, review_dir, cfg)
+    log.info("  Step 4A-3 done: mark_visual_duplicates elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     add_transition_review_candidates(review_dir, scenes_path, metadata)
+    log.info("  Step 4A-4 done: add_transition_review_candidates elapsed=%.1fs", _elapsed(step_t0))
+
+    # local_vlm._prepare_review_candidates regenerates chronological build
+    # candidates from review_slides/metadata.json.  The file originally written
+    # by materialization still has pre-reparent/pre-short-filter scene IDs, so
+    # regenerating from it shifts candidate IDs away from their image files.
+    # Persist the current compacted timeline before LocalVLM reads it.
+    step_t0 = time.perf_counter()
+    with open(review_metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    log.info("  Step 4A-4b done: LocalVLM review metadata sync elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = maybe_run_local_vlm_review(metadata, review_dir)
+    log.info("  Step 4A-5 done: maybe_run_local_vlm_review elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
+    metadata = collapse_contiguous_same_slide_scenes(metadata, review_dir=review_dir)
+    log.info("  Step 4A-6 done: collapse_contiguous_same_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = remap_metadata_for_final_materialize(metadata)
+    log.info("  Step 4A-7 done: remap_metadata_for_final_materialize elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     fps, total_frames, _, _ = _video_metadata(input_path)
     duration = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
+    log.info("  Step 4A-8 done: video metadata reload elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata = refresh_scene_time_ranges(metadata, duration)
     metadata = mark_clean_final_frames(metadata)
     metadata = finalize_scene_slide_metadata(metadata)
+    log.info("  Step 4A-9 done: metadata finalize elapsed=%.1fs", _elapsed(step_t0))
 
     log.info("  Step 4B: VLM 판정 반영 후 최종 frame materialize")
+    step_t0 = time.perf_counter()
     _materialize_metadata_frames(input_path, out_path, metadata)
-    copy_local_vlm_review_artifacts(review_dir, out_path)
-    log_scene_slide_summary(metadata)
+    _verify_materialized_metadata_frames(input_path, out_path, metadata)
+    log.info("  Step 4B-1 done: final frame materialize elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
+    copy_local_vlm_review_artifacts(review_dir, out_path)
+    log.info("  Step 4B-2 done: copy_local_vlm_review_artifacts elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
+    log_scene_slide_summary(metadata)
+    log.info("  Step 4B-3 done: log_scene_slide_summary elapsed=%.1fs", _elapsed(step_t0))
+
+    step_t0 = time.perf_counter()
     metadata_path = out_path / "metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-4 done: metadata.json write elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     scene_slide_map_path = out_path / "scene_slide_map.json"
     with open(scene_slide_map_path, "w", encoding="utf-8") as f:
         json.dump(build_scene_slide_map(metadata), f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-5 done: scene_slide_map.json write elapsed=%.1fs", _elapsed(step_t0))
 
+    step_t0 = time.perf_counter()
     canonical_slide_annotations_path = out_path / "canonical_slide_annotations.json"
     with open(canonical_slide_annotations_path, "w", encoding="utf-8") as f:
         json.dump(build_canonical_slide_annotations(metadata), f, ensure_ascii=False, indent=2)
+    log.info("  Step 4B-6 done: canonical_slide_annotations.json write elapsed=%.1fs", _elapsed(step_t0))
 
     video_count = sum(1 for item in metadata if item.get("scene_type") == "video" and item.get("capture_type") == "base")
     scene_count = len({m["scene_index"] for m in metadata if m.get("scene_index") is not None})
@@ -1963,10 +2179,10 @@ def extract_slides(
 ):
     if use_staged:
         if decode_backend:
-            log.info("staged slide_extractor에서는 decode_backend=%s 설정을 사용하지 않습니다.", decode_backend)
+            log.info("staged slide_extractor decode_backend=%s", decode_backend)
         if extract_workers is not None:
             log.info("staged slide_extractor에서는 extract_workers=%s 설정을 사용하지 않습니다.", extract_workers)
-        return _extract_slides_staged(input_path, output_dir, debug=debug)
+        return _extract_slides_staged(input_path, output_dir, debug=debug, decode_backend=decode_backend)
 
     return _extract_slides_legacy(
         input_path=input_path,
@@ -1982,11 +2198,43 @@ def _save(frame: np.ndarray, path: Path):
 
 
 def _read_frame_by_number(cap: cv2.VideoCapture, frame_no: int) -> np.ndarray | None:
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_no - 1))
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        return None
-    return frame
+    target = max(0, int(frame_no) - 1)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+
+    # Compressed-video seeks are keyframe-based. Decode forward until the
+    # requested zero-based frame is actually reached instead of trusting the
+    # first frame returned after cap.set().
+    for _ in range(10000):
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
+        decoded_index = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES))) - 1
+        if decoded_index >= target:
+            return frame
+    return None
+
+
+def _materialize_by_random_seek(
+    input_path: str,
+    out_path: Path,
+    frame_targets: dict[int, list[dict]],
+) -> set[int]:
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return set()
+
+    saved_frame_nos: set[int] = set()
+    try:
+        for frame_no in sorted(frame_targets):
+            frame = _read_frame_by_number(cap, frame_no)
+            if frame is None:
+                continue
+            for item in frame_targets[frame_no]:
+                _save(frame, out_path / item["filename"])
+            saved_frame_nos.add(frame_no)
+    finally:
+        cap.release()
+    return saved_frame_nos
 
 
 def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float) -> np.ndarray | None:
@@ -2102,9 +2350,26 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
         frame_targets.setdefault(frame_no, []).append(item)
 
     cfg = Config()
-    fps, _, frame_width, frame_height = _video_metadata(input_path)
+    fps, total_frames, frame_width, frame_height = _video_metadata(input_path)
 
     saved_frame_nos: set[int] = set()
+    random_seek_enabled = os.getenv("GRAPHLEC_FINAL_MATERIALIZE_RANDOM_SEEK", "1") != "0"
+    sparse_target = total_frames > 0 and len(frame_targets) <= max(500, int(total_frames * 0.02))
+    if random_seek_enabled and sparse_target:
+        saved_frame_nos = _materialize_by_random_seek(input_path, out_path, frame_targets)
+        if len(saved_frame_nos) == len(frame_targets):
+            log.info(
+                "  원본 프레임 materialize: random seek (targets=%s total_frames=%s)",
+                len(frame_targets),
+                total_frames,
+            )
+            return
+        log.warning(
+            "원본 프레임 random seek materialize 일부 실패: saved=%s/%s; sequential decode로 복구합니다.",
+            len(saved_frame_nos),
+            len(frame_targets),
+        )
+
     frame_iter, active_backend = _frame_iterator(
         input_path,
         cfg,
@@ -2114,6 +2379,8 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
         cfg.DECODE_BACKEND,
     )
     for frame_no, _, frame in frame_iter:
+        if int(frame_no) in saved_frame_nos:
+            continue
         targets = frame_targets.get(int(frame_no))
         if not targets:
             continue
@@ -2165,6 +2432,65 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
         cap.release()
 
 
+def _verify_materialized_metadata_frames(input_path: str, out_path: Path, metadata: list[dict]) -> None:
+    """Ensure each final filename contains the frame referenced by metadata.
+
+    Final scene remapping can change filenames without changing frame numbers.
+    A stale or shifted materialize result is otherwise hard to detect because
+    metadata.json still looks internally consistent. Re-read sparse targets,
+    compare their pHash with the saved image, and repair mismatches in place.
+    """
+    if os.getenv("GRAPHLEC_VERIFY_FINAL_MATERIALIZE", "1") == "0":
+        return
+
+    targets: dict[int, list[dict]] = {}
+    for item in metadata:
+        try:
+            frame_no = int(item.get("frame_no", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        filename = item.get("filename")
+        if frame_no > 0 and filename:
+            targets.setdefault(frame_no, []).append(item)
+    if not targets:
+        return
+
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        log.warning("final materialize verification skipped: cannot open input video")
+        return
+
+    checked = 0
+    repaired = 0
+    try:
+        for frame_no, items in sorted(targets.items()):
+            frame = _read_frame_by_number(cap, frame_no)
+            if frame is None:
+                log.warning("final materialize verification missing frame_no=%s", frame_no)
+                continue
+            expected_hash = compute_phash_hires(frame)
+            for item in items:
+                path = out_path / str(item["filename"])
+                saved = cv2.imread(str(path))
+                checked += 1
+                mismatch = saved is None
+                if saved is not None:
+                    mismatch = int(expected_hash - compute_phash_hires(saved)) > 2
+                if mismatch:
+                    _save(frame, path)
+                    repaired += 1
+                    log.warning(
+                        "final materialize frame mismatch repaired: filename=%s frame_no=%s",
+                        item["filename"],
+                        frame_no,
+                    )
+    finally:
+        cap.release()
+    log.info(
+        "final materialize verification: checked=%s repaired=%s",
+        checked,
+        repaired,
+    )
 def _meta(
     fname: str,
     scene_idx: int,
@@ -2193,7 +2519,7 @@ def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
 
     - scene_start_sec : 해당 scene_index의 base 프레임 타임스탬프
     - scene_end_sec   : 다음 scene_index의 시작 시각 (마지막 scene은 영상 길이)
-    오디오 침묵 구간과 교차 분석할 때 이 구간을 기준으로 사용한다.
+    slide_classifier에서 오디오 침묵 구간과 교차할 때 이 구간을 기준으로 사용한다.
     """
     # scene_index → base 타임스탬프 수집
     scene_starts: dict[int, float] = {}
@@ -2238,11 +2564,126 @@ def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
     return metadata
 
 
+def reparent_annotations_to_next_base(
+    metadata: list[dict],
+    review_dir: Path,
+) -> list[dict]:
+    """Move annotations captured after a missed scene cut to the next base.
+
+    Scene probing can occasionally keep a newly displayed slide in the prior
+    scene long enough for its first handwritten frames to be labeled as that
+    scene's annotations.  Compare each annotation with its current and next
+    base; only a large, multi-metric improvement toward the next base is
+    allowed to change ownership.  This prevents a normal handwritten frame
+    from being moved merely because the next slide shares a template.
+    """
+    if os.getenv("GRAPHLEC_REPARENT_MISSED_ANNOTATIONS", "1").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return metadata
+
+    from collections import defaultdict
+
+    by_scene: dict[int, list[dict]] = defaultdict(list)
+    for item in metadata:
+        try:
+            by_scene[int(item.get("scene_index"))].append(item)
+        except (TypeError, ValueError):
+            continue
+
+    scene_bases: dict[int, dict] = {}
+    for scene_idx, items in by_scene.items():
+        base = next(
+            (item for item in items if item.get("capture_type") == "base" and item.get("filename")),
+            None,
+        )
+        if base is not None:
+            scene_bases[scene_idx] = base
+    ordered_scenes = sorted(scene_bases)
+    if len(ordered_scenes) < 2:
+        return metadata
+
+    image_cache: dict[str, np.ndarray | None] = {}
+
+    def load_image(filename: str) -> np.ndarray | None:
+        if filename not in image_cache:
+            image_cache[filename] = cv2.imread(str(review_dir / filename))
+        return image_cache[filename]
+
+    def metrics(left: np.ndarray, right: np.ndarray) -> tuple[float, float, float]:
+        if left.shape[:2] != right.shape[:2]:
+            right = cv2.resize(right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA)
+        return (
+            float(compute_phash_hires(left) - compute_phash_hires(right)),
+            float(normalized_mse(left, right)),
+            float(symmetric_edge_overlap(left, right)),
+        )
+
+    moved = 0
+    for position, scene_idx in enumerate(ordered_scenes[:-1]):
+        next_scene_idx = ordered_scenes[position + 1]
+        current_base = scene_bases[scene_idx]
+        next_base = scene_bases[next_scene_idx]
+        current_filename = str(current_base["filename"])
+        next_filename = str(next_base["filename"])
+        current_image = load_image(current_filename)
+        next_image = load_image(next_filename)
+        if current_image is None or next_image is None:
+            continue
+
+        for item in by_scene.get(scene_idx, []):
+            if item.get("capture_type") not in {"annotation", "annot", "build"}:
+                continue
+            filename = item.get("filename")
+            if not filename:
+                continue
+            annot_image = load_image(str(filename))
+            if annot_image is None:
+                continue
+            current_score = metrics(annot_image, current_image)
+            next_score = metrics(annot_image, next_image)
+            phash_gain = current_score[0] - next_score[0]
+            mse_gain = current_score[1] - next_score[1]
+            edge_gain = next_score[2] - current_score[2]
+            next_is_clearer = (
+                phash_gain >= 20.0
+                and next_score[1] <= 0.035
+                and (
+                    mse_gain >= max(0.015, current_score[1] * 0.35)
+                    or edge_gain >= 0.15
+                )
+            )
+            if not next_is_clearer:
+                continue
+
+            item["annotation_original_scene_index"] = scene_idx
+            item["annotation_reparented_to_scene_index"] = next_scene_idx
+            item["annotation_reparent_reason"] = "next_base_image_match_after_missed_scene_cut"
+            item["annotation_reparent_metrics"] = {
+                "current_base_phash": current_score[0],
+                "next_base_phash": next_score[0],
+                "current_base_normalized_mse": current_score[1],
+                "next_base_normalized_mse": next_score[1],
+                "current_base_edge_overlap": current_score[2],
+                "next_base_edge_overlap": next_score[2],
+            }
+            item["scene_index"] = next_scene_idx
+            item["scene_number"] = next_scene_idx
+            item["slide_index"] = next_scene_idx
+            item["slide_number"] = next_scene_idx
+            item["source"] = "step3_annotation_reparented_to_next_base"
+            moved += 1
+
+    if moved:
+        log.info("annotation scene reparent: moved=%s", moved)
+    return metadata
+
+
 def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dict]:
     """Optionally run LocalVLM review after candidate generation.
 
-    VERILEC_VLM_ENABLED=1 writes llm_review_results.json.
-    VERILEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
+    GRAPHLEC_VLM_ENABLED=1 writes llm_review_results.json.
+    GRAPHLEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
     """
     try:
         from .local_vlm import (
@@ -2301,10 +2742,491 @@ def _filename_for_final_scene(item: dict, scene_index: int) -> str:
     capture_type = item.get("capture_type", "base")
     if scene_type == "video":
         return f"scene_{scene_index:03d}_video.jpg"
+    if capture_type == "build":
+        build_index = int(item.get("build_index", 1) or 1)
+        return f"scene_{scene_index:03d}_build_{build_index:02d}.jpg"
     if capture_type == "annotation":
         annot_index = int(item.get("annot_index", item.get("scene_annot_index", 0)) or 0)
-        return f"scene_{scene_index:03d}_annot_{annot_index:02d}.jpg"
+        build_index = int(item.get("build_index", 0) or 0)
+        build_annot_index = int(item.get("build_annot_index", annot_index) or annot_index)
+        if build_index > 0:
+            return f"scene_{scene_index:03d}_build_{build_index:02d}_annot_{build_annot_index:02d}.jpg"
+        return f"scene_{scene_index:03d}_build_00_annot_{build_annot_index:02d}.jpg"
     return f"scene_{scene_index:03d}_base.jpg"
+
+
+def collapse_contiguous_same_slide_scenes(
+    metadata: list[dict],
+    review_dir: Path | None = None,
+) -> list[dict]:
+    """Collapse adjacent scenes that VLM accepted as the same slide build.
+
+    The first scene in a contiguous same-slide run remains the scene base.
+    Annotation frames from later scenes are moved into that first scene and
+    renumbered, so final filenames become scene_XXX_annot_01..N. A clean base
+    that appears after all handwriting was erased is omitted, preserving the
+    last visible annotation as the final state. Non-adjacent revisits are
+    intentionally left as separate scenes.
+    """
+    if not metadata:
+        return metadata
+
+    scenes = sorted({int(item["scene_index"]) for item in metadata if item.get("scene_index") is not None})
+    if len(scenes) < 2:
+        return metadata
+
+    parent = {idx: idx for idx in scenes}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        if a not in parent or b not in parent or abs(a - b) != 1:
+            return
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    min_confidence = float(os.getenv("GRAPHLEC_VLM_MIN_CONFIDENCE", "0.75"))
+    merge_min_confidence = float(os.getenv("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", "0.85"))
+    approved_pairs: set[tuple[int, int]] = set()
+    approved_build_pairs: set[tuple[int, int]] = set()
+    approved_annotation_pairs: set[tuple[int, int]] = set()
+    veto_pairs: set[tuple[int, int]] = set()
+
+    def _decision_scene_indices(decision: dict) -> list[int]:
+        indices: list[int] = []
+        for value in decision.get("scene_indices") or []:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if idx in parent and idx not in indices:
+                indices.append(idx)
+        return indices
+
+    for item in metadata:
+        for decision in item.get("vlm_review_decisions") or []:
+            if not isinstance(decision, dict):
+                continue
+            scene_indices = _decision_scene_indices(decision)
+            if len(scene_indices) < 2:
+                continue
+            try:
+                confidence = float(decision.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            for i, scene_a in enumerate(scene_indices):
+                for scene_b in scene_indices[i + 1:]:
+                    if abs(scene_a - scene_b) != 1:
+                        continue
+                    pair = tuple(sorted((scene_a, scene_b)))
+                    if decision.get("decision") == "different_slide" and confidence >= min_confidence:
+                        veto_pairs.add(pair)
+                    elif (
+                        decision.get("decision") in {"same_slide_duplicate", "same_slide_build", "same_slide_annotation"}
+                        and confidence >= merge_min_confidence
+                        and decision.get("should_merge_slide_group", True) is not False
+                    ):
+                        approved_pairs.add(pair)
+                        if decision.get("decision") == "same_slide_build":
+                            approved_build_pairs.add(pair)
+                        elif decision.get("decision") == "same_slide_annotation":
+                            approved_annotation_pairs.add(pair)
+
+    for scene_a, scene_b in sorted(approved_pairs - veto_pairs):
+        union(scene_a, scene_b)
+
+    groups: dict[int, list[int]] = {}
+    for idx in scenes:
+        groups.setdefault(find(idx), []).append(idx)
+    groups = {root: sorted(members) for root, members in groups.items() if len(members) > 1}
+    if not groups:
+        return metadata
+
+    representative_by_scene: dict[int, int] = {}
+    build_promoted_scenes: set[int] = set()
+    annotation_promoted_scenes: set[int] = set()
+    for members in groups.values():
+        # Collapse only a continuous run; any accidental non-contiguous members
+        # stay untouched rather than merging separated revisits.
+        ordered = sorted(members)
+        if any(b - a != 1 for a, b in zip(ordered, ordered[1:])):
+            continue
+        rep = ordered[0]
+        for idx in ordered:
+            representative_by_scene[idx] = rep
+        # Only a scene connected to the representative through approved build
+        # edges is promoted to an annotation. Duplicate-only edges still drop
+        # the later base as before.
+        for left, right in zip(ordered, ordered[1:]):
+            pair = (left, right)
+            if pair in approved_build_pairs:
+                build_promoted_scenes.add(right)
+            elif pair in approved_annotation_pairs:
+                annotation_promoted_scenes.add(right)
+
+    if not representative_by_scene:
+        return metadata
+
+    # A presenter can erase all handwriting and briefly return to the clean
+    # slide before moving on. Compare the later base to the group's original
+    # base: it is a reset only when it is substantially closer than the last
+    # visible annotation. Later annotations remain intact.
+    clear_reset_base_scenes: set[int] = set()
+    if review_dir is not None:
+        from collections import defaultdict
+
+        source_items_by_scene: dict[int, list[dict]] = defaultdict(list)
+        for item in metadata:
+            try:
+                source_items_by_scene[int(item["scene_index"])].append(item)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        image_cache: dict[str, np.ndarray | None] = {}
+
+        def review_image(item: dict | None) -> np.ndarray | None:
+            if item is None or not item.get("filename"):
+                return None
+            filename = str(item["filename"])
+            if filename not in image_cache:
+                image_cache[filename] = cv2.imread(str(review_dir / filename))
+            return image_cache[filename]
+
+        def image_distance(left: np.ndarray, right: np.ndarray) -> tuple[int, float]:
+            if left.shape[:2] != right.shape[:2]:
+                right = cv2.resize(right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA)
+            h, w = left.shape[:2]
+            x0 = max(0, min(w - 1, int(w * Config.CONTENT_CROP_LEFT)))
+            y0 = max(0, min(h - 1, int(h * Config.CONTENT_CROP_TOP)))
+            x1 = max(x0 + 1, min(w, int(w * Config.CONTENT_CROP_RIGHT)))
+            y1 = max(y0 + 1, min(h, int(h * Config.CLEAR_RESET_CROP_BOTTOM)))
+            left = left[y0:y1, x0:x1]
+            right = right[y0:y1, x0:x1]
+            return int(compute_phash_hires(left) - compute_phash_hires(right)), float(normalized_mse(left, right))
+
+        for members in groups.values():
+            ordered = sorted(members)
+            if any(b - a != 1 for a, b in zip(ordered, ordered[1:])):
+                continue
+            first_items = sorted(
+                source_items_by_scene.get(ordered[0], []),
+                key=lambda x: (float(x.get("timestamp_sec", 0.0) or 0.0), int(x.get("frame_no", 0) or 0)),
+            )
+            origin_item = next((x for x in first_items if x.get("capture_type") == "base"), None)
+            origin_image = review_image(origin_item)
+            if origin_image is None:
+                continue
+
+            previous_annotation = next(
+                (x for x in reversed(first_items) if x.get("capture_type") in {"annotation", "annot"}),
+                None,
+            )
+            for left, right in zip(ordered, ordered[1:]):
+                right_items = sorted(
+                    source_items_by_scene.get(right, []),
+                    key=lambda x: (float(x.get("timestamp_sec", 0.0) or 0.0), int(x.get("frame_no", 0) or 0)),
+                )
+                right_base = next((x for x in right_items if x.get("capture_type") == "base"), None)
+                # A VLM may call the clean, post-erase frame either an
+                # annotation or a build.  The visual reset test is
+                # independent of that label: never promote a return to an
+                # earlier clean slide state as either capture type.
+                if (left, right) in approved_pairs and previous_annotation is not None and right_base is not None:
+                    previous_image = review_image(previous_annotation)
+                    reset_image = review_image(right_base)
+                    if previous_image is not None and reset_image is not None:
+                        previous_hash, previous_mse = image_distance(previous_image, origin_image)
+                        reset_hash, reset_mse = image_distance(reset_image, origin_image)
+                        if (
+                            previous_hash >= 8
+                            and reset_hash <= 12
+                            and reset_mse <= 0.025
+                            # normalized_mse is typically in the 0.001~0.01
+                            # range for pen strokes.  An absolute 0.012 gap
+                            # therefore never recognized a real erase.  The
+                            # later base must instead be materially closer to
+                            # the clean origin than the preceding annotation.
+                            and previous_mse >= 0.001
+                            and reset_mse <= previous_mse * 0.5
+                        ):
+                            clear_reset_base_scenes.add(right)
+
+                later_annotation = next(
+                    (x for x in reversed(right_items) if x.get("capture_type") in {"annotation", "annot"}),
+                    None,
+                )
+                if later_annotation is not None:
+                    previous_annotation = later_annotation
+
+    collapsed: list[dict] = []
+    dropped_base_count = 0
+    dropped_clear_reset_count = 0
+    changed_scene_count = 0
+    promoted_build_count = 0
+    promoted_annotation_count = 0
+    for raw_item in metadata:
+        item = dict(raw_item)
+        try:
+            old_idx = int(item["scene_index"])
+        except (TypeError, ValueError):
+            collapsed.append(item)
+            continue
+        rep = representative_by_scene.get(old_idx)
+        if rep is None:
+            collapsed.append(item)
+            continue
+        if old_idx != rep and item.get("capture_type") not in {"annotation", "build"}:
+            if old_idx in clear_reset_base_scenes:
+                dropped_base_count += 1
+                dropped_clear_reset_count += 1
+                continue
+            if (old_idx not in build_promoted_scenes and old_idx not in annotation_promoted_scenes) or item.get("scene_type") == "video":
+                dropped_base_count += 1
+                continue
+            item["capture_type_before_build"] = item.get("capture_type", "base")
+            if old_idx in build_promoted_scenes:
+                item["capture_type"] = "build"
+                item["build_decision"] = "same_slide_build"
+                item["source"] = "vlm_same_slide_build"
+                item["build_promoted_to_build"] = True
+                promoted_build_count += 1
+            else:
+                item["capture_type"] = "annotation"
+                item["annotation_decision"] = "same_slide_annotation"
+                item["source"] = "vlm_same_slide_annotation"
+                item["annotation_promoted_to_annotation"] = True
+                promoted_annotation_count += 1
+            item["build_source_scene_index"] = old_idx
+
+        item["pre_collapse_scene_index"] = old_idx
+        if old_idx != rep:
+            changed_scene_count += 1
+        item["scene_index"] = rep
+        item["scene_number"] = rep
+        item["slide_index"] = rep
+        item["slide_number"] = rep
+        for field in (
+            "scene_canonical",
+            "same_slide_canonical",
+            "slide_canonical_index",
+        ):
+            item[field] = rep
+        for field in ("duplicate_of", "scene_group", "same_slide_group", "slide_group"):
+            item[field] = [rep]
+        item["scene_group_size"] = 1
+        item["same_slide_group_size"] = 1
+        item["slide_group_size"] = 1
+        item["same_slide_visit_order"] = 1
+        item["slide_visit_order"] = 1
+        item["same_slide_is_revisit"] = False
+        item["slide_is_revisit"] = False
+        item["same_slide_previous"] = None
+        item["same_slide_next"] = None
+        item["previous_scene_index"] = None
+        item["next_scene_index"] = None
+        collapsed.append(item)
+
+    from collections import defaultdict
+
+    by_scene: dict[int, list[dict]] = defaultdict(list)
+    for item in collapsed:
+        try:
+            by_scene[int(item["scene_index"])].append(item)
+        except (TypeError, ValueError):
+            continue
+
+    for scene_idx, items in by_scene.items():
+        annots = sorted(
+            [x for x in items if x.get("capture_type") == "annotation"],
+            key=lambda x: (
+                float(x.get("timestamp_sec", 0.0) or 0.0),
+                int(x.get("frame_no", 0) or 0),
+                int(x.get("annot_index", 0) or 0),
+            ),
+        )
+        for annot_index, annot in enumerate(annots, start=1):
+            annot["annot_index"] = annot_index
+            annot["scene_annot_index"] = annot_index
+            annot["scene_local_annot_index"] = annot_index
+        build_index = 0
+        build_annot_index = 0
+        for item in sorted(
+            items,
+            key=lambda x: (float(x.get("timestamp_sec", 0.0) or 0.0), int(x.get("frame_no", 0) or 0)),
+        ):
+            if item.get("capture_type") == "base":
+                item["build_index"] = 0
+                item["build_annot_index"] = 0
+                continue
+            if item.get("capture_type") == "build":
+                build_index += 1
+                item["build_index"] = build_index
+                item["build_annot_index"] = 0
+                item["annot_index"] = 0
+                item["scene_annot_index"] = 0
+                item["scene_local_annot_index"] = 0
+                continue
+            if item.get("capture_type") == "annotation":
+                item["build_index"] = build_index
+                build_annot_index = sum(
+                    1
+                    for prior in items
+                    if prior.get("capture_type") == "annotation"
+                    and int(prior.get("build_index", 0) or 0) == build_index
+                    and (
+                        float(prior.get("timestamp_sec", 0.0) or 0.0),
+                        int(prior.get("frame_no", 0) or 0),
+                    ) <= (
+                        float(item.get("timestamp_sec", 0.0) or 0.0),
+                        int(item.get("frame_no", 0) or 0),
+                    )
+                )
+                item["build_annot_index"] = build_annot_index
+        for item in items:
+            if item.get("capture_type") not in {"annotation", "build"}:
+                item["annot_index"] = 0
+                item["scene_annot_index"] = 0
+                item["scene_local_annot_index"] = 0
+            item["scene_annotation_count"] = len(annots)
+            item["scene_build_count"] = sum(1 for x in items if x.get("capture_type") == "build")
+            item["scene_annotation_start_index"] = 1 if annots else 0
+            item["scene_annotation_end_index"] = len(annots)
+
+    # After physically collapsing scenes, relation fields must describe the
+    # materialized scene set, not the provisional VLM grouping. Leaving old
+    # duplicate/same-slide links here lets refresh_slide_group_relations()
+    # reconnect non-contiguous bases after remap.
+    for item in collapsed:
+        try:
+            idx = int(item["scene_index"])
+        except (TypeError, ValueError):
+            continue
+        item["duplicate_of"] = []
+        item["scene_group"] = [idx]
+        item["scene_canonical"] = idx
+        item["scene_group_size"] = 1
+        item["same_slide_group"] = [idx]
+        item["same_slide_canonical"] = idx
+        item["same_slide_group_size"] = 1
+        item["same_slide_visit_order"] = 1
+        item["same_slide_is_revisit"] = False
+        item["same_slide_previous"] = None
+        item["same_slide_next"] = None
+        item["slide_group"] = [idx]
+        item["slide_canonical_index"] = idx
+        item["slide_group_size"] = 1
+        item["slide_visit_order"] = 1
+        item["slide_is_revisit"] = False
+        item["previous_scene_index"] = None
+        item["next_scene_index"] = None
+
+    collapsed.sort(
+        key=lambda x: (
+            int(x.get("scene_index", 0) or 0),
+            float(x.get("timestamp_sec", 0.0) or 0.0),
+            int(x.get("annot_index", 0) or 0),
+            int(x.get("frame_no", 0) or 0),
+        )
+    )
+    log.info(
+        "contiguous same-slide scene collapse: groups=%s moved_annotations=%s promoted_builds=%s promoted_annotations=%s dropped_bases=%s clear_resets=%s",
+        len(set(representative_by_scene.values())),
+        changed_scene_count,
+        promoted_build_count,
+        promoted_annotation_count,
+        dropped_base_count,
+        dropped_clear_reset_count,
+    )
+    return collapsed
+
+
+def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dict]:
+    """Remove transient slides and make the newly adjacent scenes contiguous.
+
+    A short A -> B -> A interruption must become A -> A *before* OCR/VLM
+    candidate generation.  Keeping the original IDs after removing B leaves
+    A(scene_008) and A(scene_010) numerically non-adjacent, which incorrectly
+    bypasses chronological merge/collapse handling.
+    """
+    from collections import defaultdict
+
+    by_scene: dict[int, list[dict]] = defaultdict(list)
+    for item in metadata:
+        try:
+            by_scene[int(item["scene_index"])].append(item)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    threshold = max(0.0, float(cfg.MIN_SLIDE_DURATION_SEC))
+    dropped: list[tuple[int, float]] = []
+    for scene_index, items in by_scene.items():
+        base = next((item for item in items if item.get("capture_type") == "base"), items[0])
+        if base.get("scene_type") == "video":
+            continue
+        starts = [
+            float(item.get("scene_start_sec", item.get("timestamp_sec", 0.0)) or 0.0)
+            for item in items
+        ]
+        ends = [
+            float(item.get("scene_end_sec", item.get("timestamp_sec", 0.0)) or 0.0)
+            for item in items
+        ]
+        duration = max(ends, default=0.0) - min(starts, default=0.0)
+        if duration <= threshold:
+            dropped.append((scene_index, duration))
+
+    if not dropped:
+        log.info("short-lived slide filter: dropped=0 threshold_sec=%.1f", threshold)
+        return metadata
+
+    dropped_indices = {scene_index for scene_index, _ in dropped}
+    log.info(
+        "short-lived slide filter: dropped=%s threshold_sec=%.1f scenes=%s",
+        len(dropped),
+        threshold,
+        ", ".join(f"scene_{scene_index:03d}({duration:.2f}s)" for scene_index, duration in dropped),
+    )
+    survivors = [
+        item for item in metadata
+        if int(item.get("scene_index", -1) or -1) not in dropped_indices
+    ]
+
+    surviving_indices = sorted({
+        int(item.get("scene_index", 0) or 0)
+        for item in survivors
+        if int(item.get("scene_index", 0) or 0) > 0
+    })
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(surviving_indices, start=1)}
+    if all(old_idx == new_idx for old_idx, new_idx in index_map.items()):
+        return survivors
+
+    for raw_item in survivors:
+        item = raw_item
+        try:
+            old_idx = int(item.get("scene_index", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        new_idx = index_map.get(old_idx)
+        if new_idx is None:
+            continue
+        # source_scene_index remains the Step 2 ID. add_transition_review_candidates
+        # uses it to map transition clusters onto this compacted timeline.
+        item.setdefault("source_scene_index", old_idx)
+        item["pre_short_lived_scene_index"] = old_idx
+        item["scene_index"] = new_idx
+        item["scene_number"] = new_idx
+        item["slide_index"] = new_idx
+
+    log.info(
+        "short-lived slide filter: compacted surviving scene IDs after drop: %s",
+        ", ".join(f"{old_idx}->{new_idx}" for old_idx, new_idx in index_map.items() if old_idx != new_idx),
+    )
+    return survivors
 
 
 def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
@@ -2478,7 +3400,16 @@ def remap_metadata_for_final_materialize(metadata: list[dict]) -> list[dict]:
         item["filename"] = _filename_for_final_scene(item, new_idx)
         remapped.append(item)
 
-    remapped.sort(key=lambda x: (int(x["scene_index"]), int(x.get("annot_index", 0) or 0), int(x.get("frame_no", 0) or 0)))
+    remapped.sort(
+        key=lambda x: (
+            int(x["scene_index"]),
+            float(x.get("timestamp_sec", 0.0) or 0.0),
+            {"base": 0, "build": 1, "annotation": 2, "annot": 2}.get(
+                x.get("capture_type"), 3
+            ),
+            int(x.get("frame_no", 0) or 0),
+        )
+    )
     return refresh_slide_group_relations(remapped)
 
 
@@ -2523,7 +3454,12 @@ def refresh_scene_time_ranges(metadata: list[dict], video_duration: float) -> li
 
 def copy_local_vlm_review_artifacts(review_dir: Path, out_path: Path) -> None:
     """Keep LocalVLM debug artifacts next to the final slides output."""
-    for filename in ("llm_review_candidates.json", "llm_review_results.json"):
+    for filename in (
+        "llm_review_candidates.json",
+        "llm_review_results.json",
+        "ocr_prefilter_report.json",
+        "base_boundary_comparisons.json",
+    ):
         src = review_dir / filename
         dst = out_path / filename
         if src.exists():
@@ -2556,8 +3492,6 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     transition_candidates = (
         scenes_payload.get("postprocess", {}).get("review_candidates", [])
     )
-    if not transition_candidates:
-        return
 
     source_to_scene: dict[int, int] = {}
     filename_by_scene: dict[int, str] = {}
@@ -2580,6 +3514,7 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     }
 
     added = 0
+    rapid_cluster_added = 0
     for candidate in transition_candidates:
         source_cluster = [int(x) for x in candidate.get("cluster_scene_indices", [])]
         if len(source_cluster) < 3:
@@ -2628,6 +3563,79 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
             }))
             existing_keys.add(key)
             added += 1
+            rapid_cluster_added += 1
+
+    # A whiteboard/editor frame can last much longer than the rapid-transition
+    # probe window. Detect the general [matching outer slides, unlike middle]
+    # sandwich so LocalVLM can drop only the middle and reconnect the endpoints.
+    timeline_bases = sorted(
+        (
+            item for item in metadata
+            if item.get("capture_type") == "base"
+        ),
+        key=lambda item: (
+            float(item.get("timestamp_sec", 0.0) or 0.0),
+            int(item.get("scene_index", 0) or 0),
+        ),
+    )
+    feature_cache: dict[int, dict] = {}
+
+    def scene_feature(scene_index: int) -> dict | None:
+        cached = feature_cache.get(scene_index)
+        if cached is not None:
+            return cached
+        filename = filename_by_scene.get(scene_index)
+        if not filename:
+            return None
+        image = cv2.imread(str(out_path / filename))
+        if image is None:
+            return None
+        feature = duplicate_frame_features(image, Config())
+        feature_cache[scene_index] = feature
+        return feature
+
+    sandwich_added = 0
+    for left, middle, right in zip(timeline_bases, timeline_bases[1:], timeline_bases[2:]):
+        if any(item.get("scene_type", "slide") != "slide" for item in (left, middle, right)):
+            continue
+        try:
+            scene_indices = [int(item["scene_index"]) for item in (left, middle, right)]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if len(set(scene_indices)) != 3 or any(index not in filename_by_scene for index in scene_indices):
+            continue
+        key = ("transition_noise", tuple(scene_indices), (scene_indices[1],))
+        if key in existing_keys:
+            continue
+        left_feature = scene_feature(scene_indices[0])
+        middle_feature = scene_feature(scene_indices[1])
+        right_feature = scene_feature(scene_indices[2])
+        if left_feature is None or middle_feature is None or right_feature is None:
+            continue
+        outer_match, outer_metrics = duplicate_pair_prefilter(left_feature, right_feature, Config())
+        left_middle_match, _ = duplicate_pair_prefilter(left_feature, middle_feature, Config())
+        middle_right_match, _ = duplicate_pair_prefilter(middle_feature, right_feature, Config())
+        if not outer_match or left_middle_match or middle_right_match:
+            continue
+        candidates.append(limit_vlm_review_candidate_images({
+            "candidate_type": "transition_noise",
+            "source": "outer_match_sandwich_postprocess",
+            "proposed_decision": "needs_vlm_transition_check",
+            "scene_indices": scene_indices,
+            "context_scene_indices": [scene_indices[0], scene_indices[2]],
+            "middle_scene_indices": [scene_indices[1]],
+            "filenames": [filename_by_scene[index] for index in scene_indices],
+            "reason": "outer slides visually match while the middle scene differs",
+            "metrics": {
+                "outer_prefilter": outer_metrics,
+                "outer_visual_match": True,
+                "middle_left_prefilter_match": False,
+                "middle_right_prefilter_match": False,
+            },
+        }))
+        existing_keys.add(key)
+        added += 1
+        sandwich_added += 1
 
     if not added:
         return
@@ -2635,11 +3643,16 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     candidates_payload["candidate_count"] = len(candidates)
     candidates_payload["description"] = (
         str(candidates_payload.get("description", ""))
-        + " transition_noise는 빠른 base cluster의 중간 scene이 전환 중 캡처인지 검증하는 후보이다."
+        + " transition_noise는 빠른 cluster 또는 outer-slide sandwich의 중간 scene이 전환/InkBoard 캡처인지 검증하는 후보이다."
     ).strip()
     with open(candidates_path, "w", encoding="utf-8") as f:
         json.dump(candidates_payload, f, ensure_ascii=False, indent=2)
-    log.info("LocalLLM/VLM transition 후보 병합: %s개 추가", added)
+    log.info(
+        "LocalLLM/VLM transition 후보 병합: total=%s rapid_cluster=%s outer_match_sandwich=%s",
+        added,
+        rapid_cluster_added,
+        sandwich_added,
+    )
 
 
 def limit_vlm_review_candidate_images(candidate: dict) -> dict:
@@ -2711,10 +3724,682 @@ def limit_vlm_review_candidate_images(candidate: dict) -> dict:
     return candidate
 
 
+def _scene_group_boundary_maps(group_of: dict[int, set[int]]) -> tuple[dict[int, int], dict[int, int]]:
+    start_by_scene: dict[int, int] = {}
+    end_by_scene: dict[int, int] = {}
+    for members in group_of.values():
+        ordered = sorted(int(idx) for idx in members)
+        if not ordered:
+            continue
+        start = ordered[0]
+        end = ordered[-1]
+        for idx in ordered:
+            start_by_scene[idx] = start
+            end_by_scene[idx] = end
+    return start_by_scene, end_by_scene
+
+
+def _scene_boundary_filename(scene_index: int, groups: dict[int, list[dict]], *, prefer: str) -> str | None:
+    rows = groups.get(scene_index, [])
+    if prefer == "previous":
+        annots = [
+            row for row in rows
+            if row.get("capture_type") in {"annotation", "build"} and row.get("filename")
+        ]
+        if annots:
+            return str(annots[-1]["filename"])
+        base = next((row for row in rows if row.get("capture_type") == "base" and row.get("filename")), None)
+        if base is not None:
+            return str(base["filename"])
+    else:
+        base = next((row for row in rows if row.get("capture_type") == "base" and row.get("filename")), None)
+        if base is not None:
+            return str(base["filename"])
+        annots = [
+            row for row in rows
+            if row.get("capture_type") in {"annotation", "build"} and row.get("filename")
+        ]
+        if annots:
+            return str(annots[-1]["filename"])
+    return None
+
+
+def _rewrite_candidate_to_block_boundary(
+    candidate: dict,
+    *,
+    start_by_scene: dict[int, int],
+    end_by_scene: dict[int, int],
+    groups: dict[int, list[dict]],
+) -> dict | None:
+    candidate_type = candidate.get("candidate_type")
+    # Adjacent build/boundary candidates must retain their original
+    # chronological pair. Rewriting them through provisional duplicate
+    # groups can skip a base (for example 8 -> 9 becoming 8 -> 10) before
+    # LocalVLM sees it. Only non-adjacent duplicate candidates need boundary
+    # normalization here.
+    if candidate_type != "same_slide_duplicate":
+        return dict(candidate)
+
+    scenes = sorted({
+        int(value)
+        for value in (candidate.get("scene_indices") or [])
+        if value is not None
+    })
+    if len(scenes) < 2:
+        return None
+
+    left_scene = scenes[0]
+    right_scene = scenes[-1]
+    left_boundary = end_by_scene.get(left_scene, left_scene)
+    right_boundary = start_by_scene.get(right_scene, right_scene)
+    if left_boundary >= right_boundary:
+        return None
+
+    left_filename = _scene_boundary_filename(left_boundary, groups, prefer="previous")
+    right_filename = _scene_boundary_filename(right_boundary, groups, prefer="next")
+    if not left_filename or not right_filename:
+        return None
+
+    rewritten = dict(candidate)
+    rewritten["original_scene_indices"] = scenes
+    rewritten["scene_indices"] = [left_boundary, right_boundary]
+    rewritten["labels"] = [f"end{left_boundary:03d}", f"start{right_boundary:03d}"]
+    rewritten["filenames"] = [left_filename, right_filename]
+    return rewritten
+
+
 # ──────────────────────────────────────────────
 # 후처리: 같은 slide(재등장) 그룹 표시
 # ──────────────────────────────────────────────
+def _duplicate_parallel_candidate_score(candidate: dict) -> tuple:
+    metrics = candidate.get("metrics", {})
+    if candidate.get("candidate_type") == "same_slide_duplicate":
+        return (
+            int(metrics.get("content_phash", 9999)),
+            int(metrics.get("phash", 9999)),
+            float(metrics.get("content_changed", 1.0)),
+        )
+    return (
+        -float(metrics.get("prev_edge_preserve", 0.0)),
+        float(metrics.get("content_changed", 1.0)),
+        int(metrics.get("content_phash", 9999)),
+    )
+
+
+def _duplicate_parallel_pair_worker(args: tuple) -> dict:
+    i, j, la, lb, idx_a, idx_b, rep_a, rep_b, cfg = args
+    should_compare, prefilter_metrics = duplicate_pair_prefilter(rep_a, rep_b, cfg)
+    if not should_compare:
+        return {
+            "i": i,
+            "j": j,
+            "la": la,
+            "lb": lb,
+            "idx_a": idx_a,
+            "idx_b": idx_b,
+            "should_compare": False,
+            "prefilter_metrics": prefilter_metrics,
+            "is_duplicate": False,
+            "metrics": prefilter_metrics,
+        }
+
+    is_dup, metrics = duplicate_pair_decision(rep_a, rep_b, cfg)
+    return {
+        "i": i,
+        "j": j,
+        "la": la,
+        "lb": lb,
+        "idx_a": idx_a,
+        "idx_b": idx_b,
+        "should_compare": True,
+        "prefilter_metrics": prefilter_metrics,
+        "is_duplicate": bool(is_dup),
+        "metrics": metrics,
+    }
+
+
 def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
+    # Parallel Step 4A visual duplicate grouping.
+    #
+    # This replaces only the slow all-pairs duplicate comparison with a threaded
+    # implementation. The old implementation is preserved as
+    # mark_visual_duplicates_sequential() and is used automatically on failure.
+
+    if os.getenv("GRAPHLEC_DUPLICATE_PARALLEL", "1") == "0":
+        return mark_visual_duplicates_sequential(metadata, out_path, cfg)
+
+    from collections import defaultdict
+    import time
+
+    started_at = time.perf_counter()
+    requested_workers = max(1, int(os.getenv("GRAPHLEC_DUPLICATE_WORKERS", "100")))
+    try:
+        available_cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available_cpus = os.cpu_count() or 1
+    workers = min(requested_workers, max(1, available_cpus))
+    log_pairs = os.getenv("GRAPHLEC_DUPLICATE_LOG_PAIRS", "0") == "1"
+
+    try:
+        cache_dir = out_path.parent / "sample_cache"
+
+        def _load_metadata_person_mask(item: dict) -> np.ndarray | None:
+            filename = item.get("person_mask_filename")
+            if not filename:
+                return None
+            path = cache_dir / str(filename)
+            if not path.exists():
+                return None
+            try:
+                return np.load(path, allow_pickle=False).astype(bool)
+            except Exception:
+                log.warning("  [중복 감지] person mask 로드 실패: %s", path, exc_info=True)
+                return None
+
+        def _metadata_presence_ratio(item: dict | None) -> float:
+            if not item:
+                return 0.0
+            try:
+                ratio = float(item.get("person_presence_ratio", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                ratio = 0.0
+            if ratio > 0.0:
+                return ratio
+            filename = item.get("person_presence_mask_filename")
+            if not filename:
+                return 0.0
+            path = cache_dir / str(filename)
+            if not path.exists():
+                return 0.0
+            try:
+                mask = np.load(path, allow_pickle=False).astype(bool)
+                return float(np.mean(mask))
+            except Exception:
+                log.warning("  [중복 감지] person presence mask 로드 실패: %s", path, exc_info=True)
+                return 0.0
+
+        groups: dict[int, list] = defaultdict(list)
+        for m in metadata:
+            groups[int(m["scene_index"])].append(m)
+
+        pool: dict[str, tuple[int, str, dict]] = {}
+        base_pool: dict[int, str] = {}
+        base_items: dict[int, dict] = {}
+
+        for idx in sorted(groups.keys()):
+            frames = groups[idx]
+            base_list = [f for f in frames if f.get("capture_type") == "base"]
+            annot_list = [f for f in frames if f.get("capture_type") in {"annotation", "build"}]
+
+            if base_list:
+                pool[f"base{idx}"] = (idx, base_list[0]["filename"], base_list[0])
+                base_pool[idx] = base_list[0]["filename"]
+                base_items[idx] = base_list[0]
+            if annot_list:
+                pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"], annot_list[-1])
+
+        representatives: dict[str, dict] = {}
+        feature_started_at = time.perf_counter()
+        for label, (_, fname, item) in pool.items():
+            img = cv2.imread(str(out_path / fname))
+            if img is not None:
+                representatives[label] = duplicate_frame_features(
+                    img,
+                    cfg,
+                    mask=_load_metadata_person_mask(item),
+                )
+            else:
+                log.warning("  [중복 감지] 이미지 로드 실패: %s", fname)
+        feature_elapsed = time.perf_counter() - feature_started_at
+
+        # Non-adjacent duplicate discovery needs one stable representative per
+        # scene.  Keeping both base and final annotation here turns N scenes
+        # into roughly 2N representatives and therefore about four times as
+        # many all-pairs comparisons.  The annotation endpoint is still used
+        # below for every chronological boundary (last annot/build -> next
+        # base), where it is semantically required.
+        labels = sorted(label for label in representatives if label.startswith("base"))
+        duplicate_map: dict[int, set[int]] = defaultdict(set)
+        auto_confirmed_scene_pairs: set[tuple[int, int]] = set()
+        review_candidates_by_key: dict[tuple[str, int, int], dict] = {}
+
+        def _add_review_candidate(candidate: dict, allow_auto_confirmed: bool = False):
+            scene_a, scene_b = sorted(candidate["scene_indices"])
+            if not allow_auto_confirmed and (scene_a, scene_b) in auto_confirmed_scene_pairs:
+                return
+            key = (candidate["candidate_type"], scene_a, scene_b)
+            previous = review_candidates_by_key.get(key)
+            if previous is None or _duplicate_parallel_candidate_score(candidate) < _duplicate_parallel_candidate_score(previous):
+                review_candidates_by_key[key] = candidate
+
+        def _is_base_label(label: str) -> bool:
+            return label.startswith("base")
+
+        def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
+            if not (_is_base_label(label_a) and _is_base_label(label_b)):
+                return False
+            if metrics.get("reason") not in {"strict", "near-identical"}:
+                return False
+            content_exact = (
+                metrics["content_phash"] <= 8
+                and metrics["content_dhash"] <= 12
+                and metrics["content_changed"] <= 0.02
+                and metrics["content_mse"] <= 0.003
+                and metrics["content_edge"] >= 0.95
+                and metrics["content_hist"] >= 0.998
+                and metrics["hist"] >= 0.995
+            )
+            if content_exact:
+                return True
+            return (
+                metrics["phash"] <= 22
+                and metrics["content_phash"] <= 20
+                and metrics["changed"] <= 0.065
+                and metrics["content_changed"] <= 0.08
+                and metrics["mse"] <= 0.007
+                and metrics["content_mse"] <= 0.009
+                and metrics["edge"] >= 0.87
+                and metrics["content_edge"] >= 0.87
+                and metrics["hist"] >= 0.995
+                and metrics["content_hist"] >= 0.995
+            )
+
+        log.info("\n──────── 슬라이드 간 복합 비교 병렬 실행 (같은 슬라이드 판정용) ────────")
+        log.info(
+            "  thresholds: phash<=%s, content_phash<=%s, content_edge>=%.2f workers=%s requested=%s cpu_limit=%s representatives=base_only(%s)",
+            cfg.DUPLICATE_HASH_THRESHOLD,
+            cfg.DUPLICATE_CONTENT_HASH_THRESHOLD,
+            cfg.DUPLICATE_CONTENT_EDGE_OVERLAP_MIN,
+            workers,
+            requested_workers,
+            available_cpus,
+            len(labels),
+        )
+
+        pair_args: list[tuple] = []
+        for i in range(len(labels)):
+            for j in range(i + 1, len(labels)):
+                la, lb = labels[i], labels[j]
+                idx_a = pool[la][0]
+                idx_b = pool[lb][0]
+                if idx_a == idx_b:
+                    continue
+                pair_args.append((
+                    i,
+                    j,
+                    la,
+                    lb,
+                    idx_a,
+                    idx_b,
+                    representatives[la],
+                    representatives[lb],
+                    cfg,
+                ))
+
+        pair_started_at = time.perf_counter()
+        pair_results: list[dict] = []
+        if workers <= 1 or len(pair_args) <= 1:
+            pair_results = [_duplicate_parallel_pair_worker(args) for args in pair_args]
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(pair_args))) as executor:
+                future_map = {executor.submit(_duplicate_parallel_pair_worker, args): args for args in pair_args}
+                completed = 0
+                total = len(future_map)
+                for future in as_completed(future_map):
+                    pair_results.append(future.result())
+                    completed += 1
+                    if completed % 200 == 0 or completed == total:
+                        log.info("  duplicate pair progress: completed=%s/%s", completed, total)
+        pair_elapsed = time.perf_counter() - pair_started_at
+
+        pair_results.sort(key=lambda r: (int(r["i"]), int(r["j"])))
+
+        pair_count = len(pair_results)
+        prefilter_skipped = 0
+        compared_count = 0
+        duplicate_count = 0
+
+        for result in pair_results:
+            la = result["la"]
+            lb = result["lb"]
+            idx_a = int(result["idx_a"])
+            idx_b = int(result["idx_b"])
+            should_compare = bool(result["should_compare"])
+            metrics = result["metrics"]
+
+            if not should_compare:
+                prefilter_skipped += 1
+                if log_pairs:
+                    pm = result.get("prefilter_metrics", metrics)
+                    log.info(
+                        f"  {la:<14} ↔ {lb:<14}  "
+                        f"{pm['phash']:>4} {pm['dhash']:>4} "
+                        f"{pm['content_phash']:>4} "
+                        f"{'-':>5} {'-':>6} {pm['hist']:>5.3f}  [cheap-skip]"
+                    )
+                continue
+
+            compared_count += 1
+            is_dup = bool(result["is_duplicate"])
+            if is_dup:
+                duplicate_count += 1
+            flag = f"★ 같은 슬라이드({metrics.get('reason', '')})" if is_dup else ""
+
+            if log_pairs:
+                log.info(
+                    f"  {la:<14} ↔ {lb:<14}  "
+                    f"{metrics['phash']:>4} {metrics['dhash']:>4} {metrics['content_phash']:>4} "
+                    f"{metrics['content_changed']:>5.3f} {metrics['content_edge']:>6.3f} "
+                    f"{metrics['hist']:>5.3f}  {flag}"
+                )
+
+            if is_dup and _is_auto_confirmed_duplicate(la, lb, metrics):
+                scene_pair = tuple(sorted((idx_a, idx_b)))
+                auto_confirmed_scene_pairs.add(scene_pair)
+                review_candidates_by_key.pop(("same_slide_duplicate", *scene_pair), None)
+                review_candidates_by_key.pop(("same_slide_build", *scene_pair), None)
+                duplicate_map[idx_a].add(idx_b)
+                duplicate_map[idx_b].add(idx_a)
+            elif is_dup:
+                _add_review_candidate({
+                    "candidate_type": "same_slide_duplicate",
+                    "source": "visual_duplicate_postprocess",
+                    "proposed_decision": "needs_vlm_same_slide_check",
+                    "scene_indices": [idx_a, idx_b],
+                    "labels": [la, lb],
+                    "filenames": [pool[la][1], pool[lb][1]],
+                    "reason": metrics.get("reason", ""),
+                    "metrics": metrics,
+                })
+
+        log.info("──────────────────────────────────────────────────────────────\n")
+        log.info(
+            "  duplicate prefilter: compared=%s skipped=%s total=%s",
+            compared_count,
+            prefilter_skipped,
+            pair_count,
+        )
+
+        base_representatives: dict[int, dict] = {}
+        for idx, _fname in base_pool.items():
+            label = f"base{idx}"
+            if label in representatives:
+                base_representatives[idx] = representatives[label]
+
+        build_started_at = time.perf_counter()
+        build_count = 0
+        boundary_comparisons: list[dict] = []
+        ordered_base_indices = sorted(base_representatives)
+        for pos in range(len(ordered_base_indices) - 1):
+            idx_a = ordered_base_indices[pos]
+            idx_b = ordered_base_indices[pos + 1]
+            if idx_b <= idx_a:
+                continue
+            base_is_build, base_metrics = build_pair_decision(
+                base_representatives[idx_a],
+                base_representatives[idx_b],
+                cfg,
+            )
+            previous_label = f"annot{idx_a}" if f"annot{idx_a}" in representatives else f"base{idx_a}"
+            previous_rep = representatives[previous_label]
+            previous_filename = pool[previous_label][1]
+            boundary_is_build, boundary_metrics = build_pair_decision(
+                previous_rep,
+                base_representatives[idx_b],
+                cfg,
+            )
+            boundary_comparisons.append({
+                "scene_indices": [idx_a, idx_b],
+                "filenames": [previous_filename, base_pool[idx_b]],
+                "base_filenames": [base_pool[idx_a], base_pool[idx_b]],
+                "previous_boundary_label": previous_label,
+                "is_build_candidate": bool(boundary_is_build),
+                "metrics": boundary_metrics,
+                "base_metrics": base_metrics,
+            })
+            # Every adjacent base boundary must remain reviewable.  A visual
+            # duplicate auto-confirmation is not sufficient here: the next
+            # base may be the last state of the same chronological slide, and
+            # OCR/VLM still needs to distinguish annotation/build from a new
+            # slide.  Skipping this pair was the reason boundaries such as
+            # scene 19 -> 20 never reached LocalVLM.
+            if boundary_is_build:
+                build_count += 1
+            review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
+            _add_review_candidate({
+                "candidate_type": "same_slide_build",
+                "source": "adjacent_final_state_boundary_postprocess" if boundary_is_build else "adjacent_final_state_boundary_review",
+                "proposed_decision": "same_slide_build" if boundary_is_build else "needs_vlm_same_slide_check",
+                "scene_indices": [idx_a, idx_b],
+                "labels": [previous_label, f"base{idx_b}"],
+                "filenames": [previous_filename, base_pool[idx_b]],
+                "reason": boundary_metrics["reason"] if boundary_is_build else "adjacent final-state boundary review",
+                "metrics": boundary_metrics,
+            }, allow_auto_confirmed=True)
+        build_elapsed = time.perf_counter() - build_started_at
+
+        provisional_parent = {idx: idx for idx in groups.keys()}
+
+        def provisional_find(x: int) -> int:
+            while provisional_parent[x] != x:
+                provisional_parent[x] = provisional_parent[provisional_parent[x]]
+                x = provisional_parent[x]
+            return x
+
+        def provisional_union(x: int, y: int) -> None:
+            if x not in provisional_parent or y not in provisional_parent:
+                return
+            px, py = provisional_find(x), provisional_find(y)
+            if px != py:
+                provisional_parent[max(px, py)] = min(px, py)
+
+        for idx_a, neighbors in duplicate_map.items():
+            for idx_b in neighbors:
+                provisional_union(idx_a, idx_b)
+
+        provisional_groups: dict[int, set[int]] = defaultdict(set)
+        for idx in groups.keys():
+            provisional_groups[provisional_find(idx)].add(idx)
+
+        # Non-adjacent boundary candidates are no longer generated here.
+        # The pipeline now keeps the chronological chain and only compares
+        # adjacent boundaries, so a merged chain ending at 29 will advance
+        # to 30 rather than emitting 25 -> 31 style jumps.
+        boundary_elapsed = 0.0
+        boundary_count = 0
+
+        start_by_scene, end_by_scene = _scene_group_boundary_maps(provisional_groups)
+        normalized_review_candidates_by_key: dict[tuple, dict] = {}
+        for candidate in review_candidates_by_key.values():
+            rewritten = _rewrite_candidate_to_block_boundary(
+                candidate,
+                start_by_scene=start_by_scene,
+                end_by_scene=end_by_scene,
+                groups=groups,
+            )
+            if rewritten is None:
+                continue
+            key = (
+                rewritten.get("candidate_type"),
+                tuple(rewritten.get("scene_indices") or []),
+                tuple(rewritten.get("middle_scene_indices") or []),
+            )
+            previous = normalized_review_candidates_by_key.get(key)
+            if previous is None or _duplicate_parallel_candidate_score(rewritten) < _duplicate_parallel_candidate_score(previous):
+                normalized_review_candidates_by_key[key] = rewritten
+
+        review_candidates = [
+            limit_vlm_review_candidate_images(candidate)
+            for candidate in sorted(
+                normalized_review_candidates_by_key.values(),
+                key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
+            )
+        ]
+        review_payload = {
+            "version": 1,
+            "description": (
+                "LocalLLM/VLM 검증용 후보. same_slide_duplicate는 규칙 기반 같은 슬라이드 후보이고, "
+                "same_slide_build는 연속 base가 같은 강의자료 슬라이드의 build 단계일 가능성이 있는 후보이다."
+            ),
+            "candidate_count": len(review_candidates),
+            "candidates": review_candidates,
+            "adjacent_base_comparison_count": len(boundary_comparisons),
+            "adjacent_base_comparisons_path": "base_boundary_comparisons.json",
+        }
+        review_path = out_path / "llm_review_candidates.json"
+        with open(review_path, "w", encoding="utf-8") as f:
+            json.dump(review_payload, f, ensure_ascii=False, indent=2)
+        boundary_path = out_path / "base_boundary_comparisons.json"
+        with open(boundary_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 1,
+                    "description": "시간순 인접 base_i -> base_{i+1}의 BUILD 후보 비교 결과. annotation 유무와 무관하게 항상 생성된다.",
+                    "comparison_count": len(boundary_comparisons),
+                    "comparisons": boundary_comparisons,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        log.info(
+            "LocalLLM/VLM 검증 후보 저장: %s (count=%s, adjacent_base_pairs=%s)",
+            review_path,
+            len(review_candidates),
+            len(boundary_comparisons),
+        )
+
+        all_indices = list(groups.keys())
+        parent = {idx: idx for idx in all_indices}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        for idx_a, neighbors in duplicate_map.items():
+            for idx_b in neighbors:
+                union(idx_a, idx_b)
+
+        dup_groups: dict[int, set[int]] = defaultdict(set)
+        for idx in all_indices:
+            dup_groups[find(idx)].add(idx)
+
+        group_of: dict[int, set[int]] = {}
+        for members in dup_groups.values():
+            for idx in members:
+                group_of[idx] = members
+
+        canonical_by_scene: dict[int, int] = {}
+        for members in dup_groups.values():
+            canonical = min(
+                members,
+                key=lambda idx: (_metadata_presence_ratio(base_items.get(idx)), idx),
+            )
+            for idx in members:
+                canonical_by_scene[idx] = canonical
+
+        family_visit_order: dict[int, int] = {}
+        family_prev_visit: dict[int, int | None] = {}
+        family_next_visit: dict[int, int | None] = {}
+        for members in dup_groups.values():
+            ordered = sorted(members)
+            for pos, idx in enumerate(ordered, start=1):
+                family_visit_order[idx] = pos
+                family_prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
+                family_next_visit[idx] = ordered[pos] if pos < len(ordered) else None
+
+        # Non-contiguous matches are revisits, not chronological merges. Keep
+        # their concise status visible without enabling the extremely verbose
+        # per-pair comparison log.
+        revisit_groups = [
+            sorted(members)
+            for members in dup_groups.values()
+            if len(members) >= 2 and any((right - left) > 1 for left, right in zip(sorted(members), sorted(members)[1:]))
+        ]
+        revisit_groups.sort(key=lambda members: (members[0], len(members)))
+        confirmed_revisits = "; ".join(
+            " -> ".join(f"scene_{scene:03d}" for scene in members)
+            for members in revisit_groups
+        ) or "none"
+        pending_revisit_pairs = sorted({
+            tuple(sorted(candidate.get("scene_indices") or []))
+            for candidate in review_candidates
+            if candidate.get("candidate_type") == "same_slide_duplicate"
+            and len(candidate.get("scene_indices") or []) == 2
+            and abs(int(candidate["scene_indices"][1]) - int(candidate["scene_indices"][0])) > 1
+        })
+        pending_revisits = "; ".join(
+            f"scene_{left:03d} <-> scene_{right:03d}"
+            for left, right in pending_revisit_pairs
+        ) or "none"
+        log.info(
+            "  revisit duplicate visual-confirmed: groups=%s %s",
+            len(revisit_groups),
+            confirmed_revisits,
+        )
+        log.info(
+            "  revisit duplicate pending OCR/VLM: pairs=%s %s",
+            len(pending_revisit_pairs),
+            pending_revisits,
+        )
+
+        for m in metadata:
+            idx = int(m["scene_index"])
+            members = sorted(group_of.get(idx, {idx}))
+            others = [x for x in members if x != idx]
+            m["duplicate_of"] = others
+            m["scene_group"] = members
+            canonical = canonical_by_scene.get(idx, members[0])
+            m["scene_canonical"] = canonical
+            m["scene_group_size"] = len(members)
+            m["same_slide_group"] = members
+            m["same_slide_canonical"] = canonical
+            m["same_slide_group_size"] = len(members)
+            m["same_slide_visit_order"] = family_visit_order.get(idx, 1)
+            m["same_slide_is_revisit"] = family_visit_order.get(idx, 1) > 1
+            m["same_slide_previous"] = family_prev_visit.get(idx)
+            m["same_slide_next"] = family_next_visit.get(idx)
+            m["slide_group"] = members
+            m["slide_canonical_index"] = canonical
+            m["slide_group_size"] = len(members)
+            m["slide_visit_order"] = family_visit_order.get(idx, 1)
+            m["slide_is_revisit"] = family_visit_order.get(idx, 1) > 1
+            m["previous_scene_index"] = family_prev_visit.get(idx)
+            m["next_scene_index"] = family_next_visit.get(idx)
+
+        log.info(
+            "  duplicate parallel timings: features=%.1fs pairs=%.1fs build=%.1fs boundary=%.1fs total=%.1fs "
+            "pairs=%s compared=%s skipped=%s duplicates=%s build_candidates=%s boundary_reviews=%s",
+            feature_elapsed,
+            pair_elapsed,
+            build_elapsed,
+            boundary_elapsed,
+            time.perf_counter() - started_at,
+            pair_count,
+            compared_count,
+            prefilter_skipped,
+            duplicate_count,
+            build_count,
+            boundary_count,
+        )
+        return metadata
+
+    except Exception as exc:
+        log.warning(
+            "parallel mark_visual_duplicates failed; falling back to sequential implementation: %s",
+            exc,
+            exc_info=True,
+        )
+        return mark_visual_duplicates_sequential(metadata, out_path, cfg)
+
+def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Config) -> list:
     """
     모든 슬라이드의 대표 프레임(base + clean_final + last_annot)을 풀에 쌓고
     전체 쌍(all-pairs)을 비교하여 같은 슬라이드 그룹을 표시한다.
@@ -2781,7 +4466,7 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
         base_list  = [f for f in frames if f["capture_type"] == "base"]
-        annot_list = [f for f in frames if f["capture_type"] == "annotation"]
+        annot_list = [f for f in frames if f["capture_type"] in {"annotation", "build"}]
 
         if base_list:
             pool[f"base{idx}"] = (idx, base_list[0]["filename"], base_list[0])
@@ -2844,6 +4529,17 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             return False
         if metrics.get("reason") not in {"strict", "near-identical"}:
             return False
+        content_exact = (
+            metrics["content_phash"] <= 8
+            and metrics["content_dhash"] <= 12
+            and metrics["content_changed"] <= 0.02
+            and metrics["content_mse"] <= 0.003
+            and metrics["content_edge"] >= 0.95
+            and metrics["content_hist"] >= 0.998
+            and metrics["hist"] >= 0.995
+        )
+        if content_exact:
+            return True
         return (
             metrics["phash"] <= 22
             and metrics["content_phash"] <= 20
@@ -2870,6 +4566,8 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     )
     log.info(f"  {'-'*30}  {'-'*4} {'-'*4} {'-'*4} {'-'*5} {'-'*6} {'-'*5}  {'-'*12}")
 
+    pair_count = 0
+    prefilter_skipped = 0
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
             la, lb  = labels[i], labels[j]
@@ -2878,6 +4576,22 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
 
             # 같은 슬라이드 내 base↔annot 쌍은 건너뜀
             if idx_a == idx_b:
+                continue
+
+            pair_count += 1
+            should_compare, prefilter_metrics = duplicate_pair_prefilter(
+                representatives[la],
+                representatives[lb],
+                cfg,
+            )
+            if not should_compare:
+                prefilter_skipped += 1
+                log.info(
+                    f"  {la:<14} ↔ {lb:<14}  "
+                    f"{prefilter_metrics['phash']:>4} {prefilter_metrics['dhash']:>4} "
+                    f"{prefilter_metrics['content_phash']:>4} "
+                    f"{'-':>5} {'-':>6} {prefilter_metrics['hist']:>5.3f}  [cheap-skip]"
+                )
                 continue
 
             is_dup, metrics = duplicate_pair_decision(
@@ -2914,6 +4628,12 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 })
 
     log.info("──────────────────────────────────────────────────────────────\n")
+    log.info(
+        "  duplicate prefilter: compared=%s skipped=%s total=%s",
+        pair_count - prefilter_skipped,
+        prefilter_skipped,
+        pair_count,
+    )
 
     base_representatives: dict[int, dict] = {}
     for idx, fname in base_pool.items():
@@ -2927,74 +4647,89 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         idx_b = ordered_base_indices[pos + 1]
         if idx_b <= idx_a:
             continue
-        is_build, build_metrics = build_pair_decision(
+        base_is_build, base_metrics = build_pair_decision(
             base_representatives[idx_a],
             base_representatives[idx_b],
             cfg,
         )
-        if not is_build:
-            continue
-        if (idx_a, idx_b) in auto_confirmed_scene_pairs:
-            continue
+        previous_label = f"annot{idx_a}" if f"annot{idx_a}" in representatives else f"base{idx_a}"
+        previous_rep = representatives[previous_label]
+        previous_filename = pool[previous_label][1]
+        is_build, build_metrics = build_pair_decision(
+            previous_rep,
+            base_representatives[idx_b],
+            cfg,
+        )
+        # Keep every adjacent base boundary for OCR/VLM review, including
+        # pairs that were also marked as visual duplicates.
         review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
+        review_candidates_by_key.pop(("same_slide_build", idx_a, idx_b), None)
         _add_review_candidate({
             "candidate_type": "same_slide_build",
-            "source": "adjacent_base_build_postprocess",
-            "proposed_decision": "same_slide_build",
+            "source": "adjacent_final_state_boundary_postprocess" if is_build else "adjacent_final_state_boundary_review",
+            "proposed_decision": "same_slide_build" if is_build else "needs_vlm_same_slide_check",
             "scene_indices": [idx_a, idx_b],
-            "labels": [f"base{idx_a}", f"base{idx_b}"],
-            "filenames": [base_pool[idx_a], base_pool[idx_b]],
-            "reason": build_metrics["reason"],
+            "labels": [previous_label, f"base{idx_b}"],
+            "filenames": [previous_filename, base_pool[idx_b]],
+            "reason": build_metrics["reason"] if is_build else "adjacent final-state boundary review",
             "metrics": build_metrics,
-        })
+        }, allow_auto_confirmed=True)
 
-    provisional_parent = {idx: idx for idx in groups.keys()}
-
-    def provisional_find(x: int) -> int:
-        while provisional_parent[x] != x:
-            provisional_parent[x] = provisional_parent[provisional_parent[x]]
-            x = provisional_parent[x]
-        return x
-
-    def provisional_union(x: int, y: int) -> None:
-        if x not in provisional_parent or y not in provisional_parent:
-            return
-        px, py = provisional_find(x), provisional_find(y)
-        if px != py:
-            provisional_parent[max(px, py)] = min(px, py)
-
-    for idx_a, neighbors in duplicate_map.items():
-        for idx_b in neighbors:
-            provisional_union(idx_a, idx_b)
-
-    provisional_groups: dict[int, set[int]] = defaultdict(set)
-    for idx in groups.keys():
-        provisional_groups[provisional_find(idx)].add(idx)
-
-    for members in provisional_groups.values():
-        ordered = sorted(idx for idx in members if idx in base_representatives and idx in base_pool)
-        if len(ordered) < 3:
+    start_by_scene, end_by_scene = _scene_group_boundary_maps(provisional_groups)
+    normalized_review_candidates_by_key: dict[tuple, dict] = {}
+    for candidate in review_candidates_by_key.values():
+        rewritten = _rewrite_candidate_to_block_boundary(
+            candidate,
+            start_by_scene=start_by_scene,
+            end_by_scene=end_by_scene,
+            groups=groups,
+        )
+        if rewritten is None:
             continue
-        for idx_a, idx_b in zip(ordered, ordered[1:]):
-            _, metrics = duplicate_pair_decision(base_representatives[idx_a], base_representatives[idx_b], cfg)
-            _add_review_candidate({
-                "candidate_type": "same_slide_duplicate",
-                "source": "auto_group_boundary_review",
-                "proposed_decision": "needs_vlm_same_slide_check",
-                "scene_indices": [idx_a, idx_b],
-                "labels": [f"base{idx_a}", f"base{idx_b}"],
-                "filenames": [base_pool[idx_a], base_pool[idx_b]],
-                "reason": metrics.get("reason") or "auto_group_boundary",
-                "metrics": metrics,
-            }, allow_auto_confirmed=True)
+        key = (
+            rewritten.get("candidate_type"),
+            tuple(rewritten.get("scene_indices") or []),
+            tuple(rewritten.get("middle_scene_indices") or []),
+        )
+        previous = normalized_review_candidates_by_key.get(key)
+        if previous is None or _candidate_score(rewritten) < _candidate_score(previous):
+            normalized_review_candidates_by_key[key] = rewritten
 
     review_candidates = [
         limit_vlm_review_candidate_images(candidate)
         for candidate in sorted(
-            review_candidates_by_key.values(),
+            normalized_review_candidates_by_key.values(),
             key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
         )
     ]
+    boundary_comparisons = []
+    for pos in range(len(ordered_base_indices) - 1):
+        idx_a = ordered_base_indices[pos]
+        idx_b = ordered_base_indices[pos + 1]
+        if idx_b <= idx_a:
+            continue
+        previous_label = f"annot{idx_a}" if f"annot{idx_a}" in representatives else f"base{idx_a}"
+        previous_rep = representatives[previous_label]
+        is_build, build_metrics = build_pair_decision(
+            previous_rep,
+            base_representatives[idx_b],
+            cfg,
+        )
+        _base_is_build, base_metrics = build_pair_decision(
+            base_representatives[idx_a],
+            base_representatives[idx_b],
+            cfg,
+        )
+        boundary_comparisons.append({
+            "scene_indices": [idx_a, idx_b],
+            "filenames": [pool[previous_label][1], base_pool[idx_b]],
+            "base_filenames": [base_pool[idx_a], base_pool[idx_b]],
+            "previous_boundary_label": previous_label,
+            "is_build_candidate": bool(is_build),
+            "metrics": build_metrics,
+            "base_metrics": base_metrics,
+        })
+
     review_payload = {
         "version": 1,
         "description": (
@@ -3003,14 +4738,29 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         ),
         "candidate_count": len(review_candidates),
         "candidates": review_candidates,
+        "adjacent_base_comparison_count": len(boundary_comparisons),
+        "adjacent_base_comparisons_path": "base_boundary_comparisons.json",
     }
     review_path = out_path / "llm_review_candidates.json"
     with open(review_path, "w", encoding="utf-8") as f:
         json.dump(review_payload, f, ensure_ascii=False, indent=2)
+    with open(out_path / "base_boundary_comparisons.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "version": 1,
+                "description": "시간순 인접 base_i -> base_{i+1}의 BUILD 후보 비교 결과. annotation 유무와 무관하게 항상 생성된다.",
+                "comparison_count": len(boundary_comparisons),
+                "comparisons": boundary_comparisons,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     log.info(
-        "LocalLLM/VLM 검증 후보 저장: %s (count=%s)",
+        "LocalLLM/VLM 검증 후보 저장: %s (count=%s, adjacent_base_pairs=%s)",
         review_path,
         len(review_candidates),
+        len(boundary_comparisons),
     )
 
     # ── union-find로 전이적 같은 슬라이드 그룹 확정 ────────────────────── #
@@ -3125,7 +4875,7 @@ def finalize_scene_slide_metadata(metadata: list[dict]) -> list[dict]:
         cumulative = 0
         for scene_idx, items in scene_groups:
             annots = sorted(
-                [x for x in items if x.get("capture_type") == "annotation"],
+                [x for x in items if x.get("capture_type") in {"annotation", "build"}],
                 key=lambda x: (
                     int(x.get("annot_index", 0) or 0),
                     float(x.get("timestamp_sec", 0.0) or 0.0),
@@ -3148,7 +4898,7 @@ def finalize_scene_slide_metadata(metadata: list[dict]) -> list[dict]:
             or items[0].get("same_slide_canonical")
             or scene_idx
         )
-        scene_annots = [x for x in items if x.get("capture_type") == "annotation"]
+        scene_annots = [x for x in items if x.get("capture_type") in {"annotation", "build"}]
         start, end = scene_ranges.get(scene_idx, (0, 0))
         for item in items:
             item["slide_number"] = slide_number_lookup.get(slide_idx, slide_idx)
@@ -3157,7 +4907,7 @@ def finalize_scene_slide_metadata(metadata: list[dict]) -> list[dict]:
             item["scene_annotation_start_index"] = start
             item["scene_annotation_end_index"] = end
             item["scene_local_annot_index"] = int(item.get("annot_index", 0) or 0)
-            if item.get("capture_type") != "annotation":
+            if item.get("capture_type") not in {"annotation", "build"}:
                 item["slide_annot_index"] = 0
                 item["scene_annot_index"] = 0
 
@@ -3462,7 +5212,7 @@ if __name__ == "__main__":
         "--decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
         default=Config.DECODE_BACKEND,
-        help="프레임 디코드 백엔드 선택 (default: 환경변수 VERILEC_SLIDE_DECODE_BACKEND 또는 opencv)",
+        help="프레임 디코드 백엔드 선택 (default: 환경변수 GRAPHLEC_SLIDE_DECODE_BACKEND 또는 opencv)",
     )
     parser.add_argument(
         "--legacy",

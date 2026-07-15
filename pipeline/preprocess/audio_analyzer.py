@@ -4,9 +4,14 @@
 
 import subprocess
 import os
+import wave
 
-import librosa
 import numpy as np
+
+try:
+    import librosa
+except ModuleNotFoundError:
+    librosa = None
 
 
 def extract_audio_from_video(video_path: str, output_path: str = "temp_audio.wav") -> str:
@@ -23,6 +28,9 @@ def extract_audio_from_video(video_path: str, output_path: str = "temp_audio.wav
 def analyze_audio_features(audio_path: str) -> dict:
     """librosa로 오디오 피처 추출"""
     print(f"  오디오 로드 중...")
+    if librosa is None:
+        return _analyze_audio_features_basic(audio_path)
+
     y, sr = librosa.load(audio_path, sr=16000)
     duration = len(y) / sr
 
@@ -144,6 +152,91 @@ def analyze_audio_features(audio_path: str) -> dict:
 
     print(f"  ✓ 피처 추출 완료")
     return features
+
+
+def _analyze_audio_features_basic(audio_path: str) -> dict:
+    """Fallback audio summary when librosa is unavailable."""
+    print("  librosa 없음: 기본 PCM 오디오 요약만 생성합니다.")
+    with wave.open(audio_path, "rb") as wav:
+        sr = wav.getframerate()
+        frames = wav.readframes(wav.getnframes())
+        sample_width = wav.getsampwidth()
+        channels = wav.getnchannels()
+
+    if sample_width != 2:
+        y = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+        y = (y - np.mean(y)) / (np.max(np.abs(y - np.mean(y))) or 1.0)
+    else:
+        y = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1 and len(y) >= channels:
+        y = y.reshape(-1, channels).mean(axis=1)
+
+    duration = len(y) / sr if sr else 0.0
+    rms = float(np.sqrt(np.mean(np.square(y)))) if len(y) else 0.0
+    silence_ratio = float(np.mean(np.abs(y) < 0.01)) if len(y) else 1.0
+
+    return {
+        "metadata": {
+            "duration_seconds": float(duration),
+            "sample_rate": int(sr),
+            "num_samples": int(len(y)),
+            "fallback": "basic_pcm_no_librosa",
+        },
+        "mfcc": {
+            "shape": [0, 0],
+            "mean": [],
+            "std": [],
+            "mean_avg": 0.0,
+            "std_avg": 0.0,
+            "description": "librosa unavailable",
+        },
+        "mel_spectrogram": {
+            "shape": [0, 0],
+            "mean_energy_db": 0.0,
+            "max_energy_db": 0.0,
+            "min_energy_db": 0.0,
+            "description": "librosa unavailable",
+        },
+        "rms_energy": {
+            "mean": rms,
+            "std": 0.0,
+            "max": rms,
+            "min": rms,
+            "description": "basic RMS energy",
+        },
+        "zero_crossing_rate": {
+            "mean": 0.0,
+            "std": 0.0,
+            "description": "librosa unavailable",
+        },
+        "spectral_centroid": {
+            "mean": 0.0,
+            "std": 0.0,
+            "max": 0.0,
+            "min": 0.0,
+            "description": "librosa unavailable",
+        },
+        "spectral_rolloff": {
+            "mean": 0.0,
+            "std": 0.0,
+            "max": 0.0,
+            "min": 0.0,
+            "description": "librosa unavailable",
+        },
+        "tempo": {
+            "bpm": None,
+            "skipped": True,
+            "description": "librosa unavailable",
+        },
+        "silence_detection": {
+            "threshold_db": None,
+            "silence_ratio": silence_ratio,
+            "speech_ratio": float(1 - silence_ratio),
+            "silence_seconds": float(duration * silence_ratio),
+            "speech_seconds": float(duration * (1 - silence_ratio)),
+            "description": "basic amplitude threshold silence estimate",
+        },
+    }
 
 
 def evaluate_audio_quality(features: dict) -> dict:
