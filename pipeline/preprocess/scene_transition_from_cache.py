@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 try:
-    from .sample_cache import iter_sample_cache, load_sample_cache
+    from .sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from .person_masks import load_person_mask, masked_pair
     from .scene_transition_probe import (
         ProbeConfig,
@@ -42,7 +42,7 @@ try:
         transition_reason,
     )
 except ImportError:  # Allows direct script execution during local debugging.
-    from sample_cache import iter_sample_cache, load_sample_cache
+    from sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from person_masks import load_person_mask, masked_pair
     from scene_transition_probe import (
         ProbeConfig,
@@ -356,26 +356,14 @@ def _iter_sample_cache_range(
     seeking is 0-based. Keep that convention explicit here to avoid off-by-one
     errors in the overlap probe.
     """
-    cache_path = Path(cache_dir)
-    manifest = load_sample_cache(cache_path)
+    manifest = load_sample_cache(cache_dir)
     frames = list(manifest.get("frames", []))
     sample_count = len(frames)
     start_pos = max(0, min(int(start_pos), sample_count))
     end_pos = max(start_pos, min(int(end_pos), sample_count))
 
-    video_path = cache_path / manifest["video_filename"]
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_pos)
-        for pos in range(start_pos, end_pos):
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise RuntimeError(f"Sample cache video ended early: {video_path} pos={pos}")
-            yield frames[pos], frame
-    finally:
-        cap.release()
+    for _, frame_info, frame in _cache_range(cache_dir, start_pos, end_pos):
+        yield frame_info, frame
 
 
 def _probe_ranges(sample_count: int, chunk_samples: int, guard_samples: int) -> list[dict]:
@@ -705,10 +693,8 @@ def _run_cache_probe_iter(
             pending["last_hash"] = decision_hash
 
             if pending["stable"] >= stable_frames_required or pending["observed"] >= pending_max_frames:
-                force_save_presence_change = str(pending.get("reason", "")).startswith("person_")
                 if (
-                    not force_save_presence_change
-                    and base_decision is not None
+                    base_decision is not None
                     and is_duplicate_scene(
                         base_decision,
                         pending["decision"],
@@ -778,18 +764,10 @@ def _run_cache_probe_iter(
             prev_mask=prev_mask,
             current_mask=person_mask,
         )
-        if reason is None:
-            presence_reason, presence_details = _person_presence_change_reason(
-                base_decision,
-                decision,
-                cfg,
-                base_presence_ratio,
-                person_presence_ratio,
-                details,
-            )
-            if presence_reason is not None and presence_details is not None:
-                reason = presence_reason
-                details = presence_details
+        # A lecturer entering, leaving, or moving inside a person mask is not
+        # a slide transition.  The masked comparison above is the sole scene
+        # boundary authority; do not force a new base from presence-ratio
+        # changes after it has declared the printed content unchanged.
         if reason is not None:
             pending = {
                 "start_frame_info": dict(frame_info),
@@ -827,10 +805,8 @@ def _run_cache_probe_iter(
             log.info("%sprocessed=%s/%s %.1f%%", log_prefix, processed, sample_count, pct)
 
     if pending is not None:
-        force_save_presence_change = str(pending.get("reason", "")).startswith("person_")
         if (
-            force_save_presence_change
-            or base_decision is None
+            base_decision is None
             or not is_duplicate_scene(
                 base_decision,
                 pending["decision"],

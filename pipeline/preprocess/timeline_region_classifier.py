@@ -38,10 +38,10 @@ import numpy as np
 from PIL import Image
 
 try:
-    from .sample_cache import iter_sample_cache, load_sample_cache
+    from .sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from .person_masks import load_person_mask, masked_pair
 except ImportError:  # pragma: no cover - allows direct script execution
-    from sample_cache import iter_sample_cache, load_sample_cache
+    from sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from person_masks import load_person_mask, masked_pair
 
 
@@ -189,30 +189,7 @@ def iter_sample_cache_range(
         0-based exclusive frame position.
     """
 
-    cache_path = Path(cache_dir)
-    manifest = load_sample_cache(cache_path)
-    frames = manifest.get("frames", [])
-    total = len(frames)
-
-    start_pos = max(0, min(int(start_pos), total))
-    end_pos = max(start_pos, min(int(end_pos), total))
-    if start_pos >= end_pos:
-        return
-
-    video_path = cache_path / manifest["video_filename"]
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
-
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_pos)
-        for pos in range(start_pos, end_pos):
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise RuntimeError(f"Sample cache video ended early at pos={pos}: {video_path}")
-            yield pos, frames[pos], frame
-    finally:
-        cap.release()
+    yield from _cache_range(cache_dir, start_pos, end_pos)
 
 
 def _motion_metric_for_sample(

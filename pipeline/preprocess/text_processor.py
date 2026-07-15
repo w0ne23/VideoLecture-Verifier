@@ -365,7 +365,7 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
 def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     scene_meta: dict[int, dict] = {}
     for entry in metadata:
-        if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
+        if entry.get("capture_type") != "base":
             continue
         scene_idx = entry.get("scene_index")
         if not isinstance(scene_idx, int) or scene_idx in scene_meta:

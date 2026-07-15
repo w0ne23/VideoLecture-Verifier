@@ -33,7 +33,7 @@ PIPELINE_STAGE_KEYS = [
 PIPELINE_STAGE_LABELS = {
     'preprocess_extract_media': '슬라이드 추출 및 오디오 품질 분석',
     'preprocess_textualize_transcribe': '슬라이드 텍스트화 및 전체 전사',
-    'preprocess_enrich_audio_annotation': '필기 강조 및 오디오 후처리',
+    'preprocess_enrich_audio_annotation': '오디오 맥락 후처리',
     'verifier_build_analyzer_input': '검증 입력 데이터 구성',
     'verifier_claim_extraction': '주장 후보 추출',
     'verifier_issue_judge': '이슈 후보 판단',

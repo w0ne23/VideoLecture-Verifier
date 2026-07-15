@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import logging
 import os
@@ -33,8 +34,10 @@ from pathlib import Path
 import cv2
 
 try:
+    from .sample_cache import iter_sample_cache_range, iter_sample_cache_selected_positions
     from .video_decode import iter_video_frames, read_frame_at_timestamp, read_video_metadata
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from sample_cache import iter_sample_cache_range, iter_sample_cache_selected_positions
     from video_decode import iter_video_frames, read_frame_at_timestamp, read_video_metadata
 
 
@@ -57,6 +60,51 @@ def _load_json(path: str | Path) -> dict:
 
 def _timestamp_from_frame(frame_no: int, fps: float) -> float:
     return frame_no / fps if fps > 0 else 0.0
+
+
+def _attach_missing_sample_indices_from_manifest(metadata: list[dict], cache_manifest: dict) -> int:
+    frames = cache_manifest.get("frames", []) or []
+    frame_to_sample: dict[int, int] = {}
+    pairs: list[tuple[int, int]] = []
+    for frame in frames:
+        try:
+            frame_no = int(frame["frame_no"])
+            sample_index = int(frame["sample_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        frame_to_sample[frame_no] = sample_index
+        pairs.append((frame_no, sample_index))
+    if not pairs:
+        return 0
+
+    pairs.sort()
+    frame_nos = [frame_no for frame_no, _ in pairs]
+    filled = 0
+    for item in metadata:
+        if int(item.get("sample_index") or 0) > 0:
+            continue
+        try:
+            frame_no = int(item.get("frame_no") or 0)
+        except (TypeError, ValueError):
+            continue
+        if frame_no <= 0:
+            continue
+
+        sample_index = frame_to_sample.get(frame_no)
+        if sample_index is None:
+            pos = bisect.bisect_left(frame_nos, frame_no)
+            candidates = []
+            if pos < len(pairs):
+                candidates.append(pairs[pos])
+            if pos > 0:
+                candidates.append(pairs[pos - 1])
+            if not candidates:
+                continue
+            _, sample_index = min(candidates, key=lambda pair: abs(pair[0] - frame_no))
+        item["sample_index"] = int(sample_index)
+        item["sample_index_inferred"] = True
+        filled += 1
+    return filled
 
 
 def _base_record(scene: dict, fps: float, output_scene_index: int | None = None) -> dict:
@@ -125,6 +173,17 @@ def _annotation_records(
                 "person_mask_inherited_distance": annot.get("person_mask_inherited_distance", base_scene.get("person_mask_inherited_distance")),
                 "person_presence_mask_filename": annot.get("person_presence_mask_filename", base_scene.get("person_presence_mask_filename")),
                 "person_presence_ratio": float(annot.get("person_presence_ratio", base_scene.get("person_presence_ratio", 0.0)) or 0.0),
+                # Preserve why Step 3 selected this exact annotation frame.
+                # In particular, an annotation retained immediately before an
+                # erase must remain distinguishable from an ordinary stable
+                # annotation in downstream metadata.
+                "annotation_capture_reason": str(
+                    (annot.get("details") or {}).get("capture_reason", "stable_annotation")
+                ),
+                "annotation_stable_frame_no": int(annot.get("stable_frame_no", annot["frame_no"])),
+                "annotation_stable_timestamp_sec": round(
+                    float(annot.get("stable_timestamp_sec", annot["timestamp_sec"])), 3
+                ),
                 "source": "step3_annotation",
                 "duplicate_of": [],
             })
@@ -216,10 +275,8 @@ def build_metadata(
         for unit in units
         if unit["kind"] == "slide"
     ]
-    videos = [_video_record(unit) for unit in units if unit["kind"] == "video"]
     annotations = _annotation_records(annotation_payload, scene_index_map, scene_lookup)
     metadata = bases + annotations
-    metadata.extend(videos)
     metadata.sort(key=lambda item: (int(item["scene_index"]), int(item["annot_index"]), int(item["frame_no"])))
 
     by_scene: dict[int, list[dict]] = {}
@@ -393,31 +450,24 @@ def _materialize_from_sample_cache_random(
         raise FileNotFoundError(f"Sample cache manifest not found: {manifest_path}")
 
     manifest = _load_json(manifest_path)
-    video_path = cache_path / manifest.get("video_filename", "sampled_frames.avi")
-    if not video_path.exists():
-        raise FileNotFoundError(f"Sample cache video not found: {video_path}")
 
     targets_by_sample = _targets_by_sample_index(metadata)
     wanted = set(targets_by_sample)
     saved: set[int] = set()
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open sample cache video: {video_path}")
-
-    try:
-        for sample_index in sorted(wanted):
-            # manifest sample_index is 1-based, OpenCV frame position is 0-based.
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, sample_index - 1))
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                log.warning("sample cache seek/read failed: sample_index=%s", sample_index)
-                continue
-            for item in targets_by_sample[sample_index]:
-                _save_frame(frame, output_dir / item["filename"])
-            saved.add(sample_index)
-    finally:
-        cap.release()
+    # Review targets are sparse.  Read only their manifest positions, grouped
+    # by independently written cache segment.  This avoids a full 27k-frame
+    # scan merely to materialize a few hundred review images.
+    target_positions = [sample_index - 1 for sample_index in wanted]
+    for _, frame_info, frame in iter_sample_cache_selected_positions(cache_path, target_positions):
+        sample_index = int(frame_info.get("sample_index") or 0)
+        if sample_index not in wanted:
+            continue
+        for item in targets_by_sample[sample_index]:
+            _save_frame(frame, output_dir / item["filename"])
+        saved.add(sample_index)
+        if saved == wanted:
+            break
 
     return saved
 
@@ -428,11 +478,10 @@ def _materialize_from_sample_cache_sequential(
     metadata: list[dict],
     already_saved: set[int],
 ) -> set[int]:
-    # Sequential fallback over sampled_frames.avi for any failed random seeks.
+    # Sequential fallback over the manifest-mapped cache for any missing targets.
 
     cache_path = Path(cache_dir)
     manifest = _load_json(cache_path / "sampled_manifest.json")
-    video_path = cache_path / manifest.get("video_filename", "sampled_frames.avi")
     frames = manifest.get("frames", [])
     targets_by_sample = _targets_by_sample_index(metadata)
     missing = set(targets_by_sample) - set(already_saved)
@@ -441,25 +490,15 @@ def _materialize_from_sample_cache_sequential(
     if not missing:
         return recovered
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open sample cache video: {video_path}")
-
-    try:
-        for frame_info in frames:
-            sample_index = int(frame_info["sample_index"])
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise RuntimeError(f"Sample cache video ended early: {video_path}")
-            if sample_index not in missing:
-                continue
-            for item in targets_by_sample[sample_index]:
-                _save_frame(frame, output_dir / item["filename"])
-            recovered.add(sample_index)
-            if recovered == missing:
-                break
-    finally:
-        cap.release()
+    for _, frame_info, frame in iter_sample_cache_range(cache_path, 0, len(frames)):
+        sample_index = int(frame_info["sample_index"])
+        if sample_index not in missing:
+            continue
+        for item in targets_by_sample[sample_index]:
+            _save_frame(frame, output_dir / item["filename"])
+        recovered.add(sample_index)
+        if recovered == missing:
+            break
 
     return recovered
 
@@ -475,7 +514,7 @@ def materialize_frames_from_sample_cache(
     #
     # This keeps metadata identical to build_metadata(): frame_no/timestamp_sec
     # remain original-video coordinates. Only the temporary review image pixels are
-    # loaded from sample_cache/sampled_frames.avi using sample_index.
+    # loaded from sample_cache using sample_index and its segment mapping.
     #
     # This function is intended for Step 4A review only. Step 4B final output
     # should continue using materialize_frames() from the original video.
@@ -497,6 +536,9 @@ def materialize_frames_from_sample_cache(
         stale.unlink(missing_ok=True)
 
     metadata = build_metadata(scene_payload, annotation_payload, fps, regions_path=regions_path)
+    inferred_samples = _attach_missing_sample_indices_from_manifest(metadata, cache_manifest)
+    if inferred_samples:
+        log.info("sample-cache materialize inferred sample_index for %s metadata records", inferred_samples)
     targets_by_sample = _targets_by_sample_index(metadata)
     target_sample_count = len(targets_by_sample)
 

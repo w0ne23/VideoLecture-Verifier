@@ -9,29 +9,75 @@ before enabling automatic application.
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import io
 import json
 import os
 import re
+import logging
 import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
+
+try:
+    from .ocr_hint import (
+        compare_slide_ocr,
+        format_ocr_hint_block,
+        ocr_enabled,
+        ocr_similarity_threshold,
+    )
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from ocr_hint import (
+        compare_slide_ocr,
+        format_ocr_hint_block,
+        ocr_enabled,
+        ocr_similarity_threshold,
+    )
 
 
 DECISIONS = {
     "same_slide_duplicate",
     "same_slide_build",
+    "same_slide_annotation",
     "transition_noise",
     "different_slide",
     "uncertain",
 }
 
+_SLIDE_DECISION_LABELS = """Decision labels:
+- same_slide_duplicate: nearly identical completed slide; only crop, toolbar, compression noise, cursor, or lecturer pose may differ.
+- same_slide_build: a staged reveal where the earlier printed body remains visibly present and related printed content is added around it.
+- same_slide_annotation: printed slide is unchanged; only handwriting, highlighting, underline, pointer, or other overlay changed or disappeared.
+- transition_noise: movement/animation capture that should be dropped.
+- different_slide: different printed lecture-material slide.
+- uncertain: evidence is insufficient.
+
+"""
+
+_SLIDE_DECISION_POLICY = """Decision policy:
+1. Judge printed slide content, not title/template similarity. The same title, topic, section, colors, logo, layout, lecturer, toolbar, or visual style alone never permits a merge.
+2. different_slide: choose this when the central printed content is replaced with a new body/topic: previous distinctive bullets, paragraph, equation, definition, diagram, chart, table, screenshot, panel, image, or example disappear and are replaced by different main content. This includes a slide that keeps the same title and headings but replaces question prompts with their answers or replaces short bullets with new explanatory sentences. A different section number, title, agenda item, or slide number is always different_slide.
+3. same_slide_build: choose this only when every earlier printed body item is still visibly present in the later image and related new printed material is added around it. Reflow, expansion, or movement of the SAME text/content is allowed, but replacement is never a build. Example: "Causation: what causes X?" changing into "Causation: seasons and hormones cause X" is different_slide, not a build, even if the title and all section headings are identical. Title, shared headings, or a shared conceptual topic alone are never enough.
+4. same_slide_annotation: choose this when printed content is unchanged and only temporary overlay ink changed. If handwriting/highlighting/underlining disappears but the printed slide is the same, this is same_slide_annotation, not different_slide.
+5. transition_noise: if the first and last images are the same printed slide but a different-looking whiteboard/editor/transition frame appears only between them, choose transition_noise, set should_drop_scene=true for the middle scene, and keep the outer slide states in one group.
+6. Ignore tiny non-semantic differences: crop edge, player toolbar, page chrome, compression noise, cursor/laser position, and minor OCR mistakes. Do not ignore replacement of the central printed content.
+7. For uncertainty, choose uncertain and should_merge_slide_group=false.
+
+"""
+
+_MERGE_OUTPUT_POLICY = """Merge output rules:
+- same_slide_duplicate, same_slide_build, and same_slide_annotation: set should_merge_slide_group=true only when confident.
+- different_slide, transition_noise, and uncertain: set should_merge_slide_group=false.
+
+"""
+
+log = logging.getLogger(__name__)
 _OLLAMA_BASE_URL_LOCK = threading.Lock()
 _OLLAMA_BASE_URL_INDEX = 0
 
@@ -71,39 +117,39 @@ def env_int(name: str, default: int) -> int:
 
 
 def local_vlm_enabled() -> bool:
-    return env_bool("VERILEC_VLM_ENABLED", False)
+    return env_bool("GRAPHLEC_VLM_ENABLED", False)
 
 
 def local_vlm_apply_enabled() -> bool:
-    return env_bool("VERILEC_VLM_APPLY", False)
+    return env_bool("GRAPHLEC_VLM_APPLY", False)
 
 
 def local_vlm_worker_count(candidate_count: int) -> int:
     if candidate_count <= 1:
         return 1
-    workers = env_int("VERILEC_VLM_WORKERS", 2)
+    workers = env_int("GRAPHLEC_VLM_WORKERS", 2)
     return max(1, min(workers, candidate_count))
 
 
 def local_vlm_batch_image_limit() -> int:
     timeline_images = local_vlm_timeline_context_images()
-    return max(1, env_int("VERILEC_VLM_BATCH_IMAGES", 10), timeline_images)
+    return max(1, env_int("GRAPHLEC_VLM_BATCH_IMAGES", 10), timeline_images)
 
 
 def local_vlm_batch_overlap_images() -> int:
-    return max(0, env_int("VERILEC_VLM_BATCH_OVERLAP_IMAGES", 0))
+    return max(0, env_int("GRAPHLEC_VLM_BATCH_OVERLAP_IMAGES", 0))
 
 
 def local_vlm_batch_candidate_limit() -> int:
-    return max(1, env_int("VERILEC_VLM_BATCH_CANDIDATES", 5))
+    return max(1, env_int("GRAPHLEC_VLM_BATCH_CANDIDATES", 5))
 
 
 def local_vlm_timeline_context_images() -> int:
-    return max(0, env_int("VERILEC_VLM_TIMELINE_CONTEXT_IMAGES", 10))
+    return max(0, env_int("GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES", 10))
 
 
 def local_vlm_auto_build_candidates_enabled() -> bool:
-    return env_bool("VERILEC_VLM_AUTO_BUILD_CANDIDATES", True)
+    return env_bool("GRAPHLEC_VLM_AUTO_BUILD_CANDIDATES", True)
 
 
 def _image_b64(path: Path) -> str:
@@ -111,7 +157,7 @@ def _image_b64(path: Path) -> str:
 
 
 def _vlm_image_width() -> int:
-    return max(0, env_int("VERILEC_VLM_IMAGE_WIDTH", 768))
+    return max(0, env_int("GRAPHLEC_VLM_IMAGE_WIDTH", 768))
 
 
 def _image_b64_for_vlm(path: Path) -> str:
@@ -176,13 +222,100 @@ def _candidate_scene_indices(candidate: dict[str, Any]) -> list[int]:
     return indices
 
 
+def _is_adjacent_scene_pair(candidate: dict[str, Any]) -> bool:
+    scenes = sorted(set(_candidate_scene_indices(candidate)))
+    return len(scenes) == 2 and scenes[1] - scenes[0] == 1
+
+
+def _should_defer_same_slide_candidate(candidate: dict[str, Any]) -> bool:
+    candidate_type = str(candidate.get("candidate_type") or "")
+    if candidate_type not in {"same_slide_build", "same_slide_duplicate"}:
+        return False
+    scenes = sorted(set(_candidate_scene_indices(candidate)))
+    if len(scenes) < 2:
+        return False
+    return not _is_adjacent_scene_pair(candidate)
+
+
+def _deferred_candidate_record(candidate_index: int, candidate: dict[str, Any]) -> dict[str, Any]:
+    scenes = sorted(set(_candidate_scene_indices(candidate)))
+    return {
+        "candidate_index": candidate_index,
+        "candidate_type": candidate.get("candidate_type"),
+        "source": candidate.get("source"),
+        "scene_indices": scenes,
+        "filenames": candidate.get("filenames", []),
+        "previous_final_filename": candidate.get("previous_final_filename"),
+        "next_final_filename": candidate.get("next_final_filename"),
+        "reason": "deferred_non_adjacent_same_slide_candidate",
+        "original_reason": candidate.get("reason"),
+    }
+
+
+def adjacent_ocr_similarity_threshold() -> float:
+    return max(
+        0.0,
+        min(
+            1.0,
+            env_float("GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD", 0.83),
+        ),
+    )
+
+
+def _apply_ocr_threshold(comparison: dict[str, Any], threshold: float) -> dict[str, Any]:
+    updated = dict(comparison)
+    try:
+        similarity = float(updated.get("similarity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        similarity = 0.0
+
+    left_norm = str(updated.get("left_normalized") or "")
+    right_norm = str(updated.get("right_normalized") or "")
+    if not left_norm or not right_norm:
+        decision = "unavailable"
+    elif left_norm == right_norm or similarity >= threshold:
+        decision = "merge"
+    elif similarity <= threshold - 0.05:
+        decision = "reject"
+    else:
+        decision = "uncertain"
+
+    updated["threshold"] = threshold
+    updated["decision"] = decision
+    return updated
+
+
 def _limited_candidate_filenames(candidate: dict[str, Any]) -> list[str]:
     filenames = list(candidate.get("filenames") or [])
     scene_indices = list(candidate.get("scene_indices") or [])
+    candidate_type = str(candidate.get("candidate_type") or "")
+
+    # Build decisions are endpoint-only boundary decisions.  Supplying the
+    # base and annotation context for both scenes lets a VLM confuse a prior
+    # title/base image with the actual next base.  Always show exactly the
+    # prior terminal state and the next scene base (or the two supplied
+    # filenames when explicit endpoints are unavailable).
+    if candidate_type == "same_slide_build":
+        boundary_filenames = [
+            candidate.get("previous_final_filename") or (filenames[0] if filenames else None),
+            candidate.get("next_final_filename") or (filenames[-1] if filenames else None),
+        ]
+        endpoints = []
+        for filename in boundary_filenames:
+            if filename and filename not in endpoints:
+                endpoints.append(str(filename))
+        if len(endpoints) >= 2:
+            return endpoints[:2]
+        for filename in filenames:
+            if filename and filename not in endpoints:
+                endpoints.append(str(filename))
+            if len(endpoints) >= 2:
+                break
+        return endpoints
+
     if len(filenames) <= 2 or len(filenames) != len(scene_indices):
         return filenames
 
-    candidate_type = candidate.get("candidate_type")
     if candidate_type == "transition_noise":
         middle_indices = list(candidate.get("middle_scene_indices") or [])
         positions = []
@@ -370,7 +503,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             continue
         annot_items = [
             item for item in groups[scene_index]
-            if item.get("capture_type") == "annotation"
+            if item.get("capture_type") in {"annotation", "build"}
             and item.get("filename")
             and (slides_dir / str(item.get("filename"))).exists()
         ]
@@ -396,6 +529,43 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
                     filenames.append(filename)
         return filenames
 
+    def title_band_metrics(scene_a: int, scene_b: int) -> dict[str, Any]:
+        path_a = slides_dir / str(base_pool.get(scene_a) or "")
+        path_b = slides_dir / str(base_pool.get(scene_b) or "")
+        if not path_a.exists() or not path_b.exists():
+            return {}
+        image_a = cv2.imread(str(path_a), cv2.IMREAD_GRAYSCALE)
+        image_b = cv2.imread(str(path_b), cv2.IMREAD_GRAYSCALE)
+        if image_a is None or image_b is None:
+            return {}
+        height = min(image_a.shape[0], image_b.shape[0])
+        width = min(image_a.shape[1], image_b.shape[1])
+        if height <= 0 or width <= 0:
+            return {}
+        image_a = image_a[:height, :width]
+        image_b = image_b[:height, :width]
+        x0 = min(width - 1, max(0, int(width * 0.12)))
+        x1 = min(width, max(x0 + 1, int(width * 0.95)))
+        y0 = min(height - 1, max(0, int(height * 0.02)))
+        y1 = min(height, max(y0 + 1, int(height * 0.22)))
+        band_a = image_a[y0:y1, x0:x1]
+        band_b = image_b[y0:y1, x0:x1]
+        if band_a.size == 0 or band_b.size == 0:
+            return {}
+        diff = float(np.mean(cv2.absdiff(band_a, band_b)) / 255.0)
+        _, ink_a = cv2.threshold(band_a, 220, 255, cv2.THRESH_BINARY_INV)
+        _, ink_b = cv2.threshold(band_b, 220, 255, cv2.THRESH_BINARY_INV)
+        ink_mask_a = ink_a > 0
+        ink_mask_b = ink_b > 0
+        union = int(np.logical_or(ink_mask_a, ink_mask_b).sum())
+        intersection = int(np.logical_and(ink_mask_a, ink_mask_b).sum())
+        iou = float(intersection / union) if union else 1.0
+        return {
+            "title_band_diff": diff,
+            "title_band_iou": iou,
+            "title_band_union_pixels": union,
+        }
+
     candidates: list[dict[str, Any]] = []
     rejected = 0
     ordered = sorted(base_representatives)
@@ -405,8 +575,24 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             base_representatives[scene_b],
             cfg,
         )
+        metrics.update(title_band_metrics(scene_a, scene_b))
         if not is_build:
             rejected += 1
+            candidates.append({
+                "candidate_type": "same_slide_build",
+                "source": "local_vlm_adjacent_sequence_review",
+                "proposed_decision": "needs_vlm_same_slide_build_check",
+                "scene_indices": [scene_a, scene_b],
+                "labels": [],
+                "filenames": candidate_filenames(scene_a, scene_b),
+                "previous_final_filename": final_annot_pool.get(scene_a) or base_pool.get(scene_a),
+                # The chronological boundary is compared to the next scene's
+                # base.  Its annotations belong to a later state and must not
+                # hide a clear/reset at the boundary.
+                "next_final_filename": base_pool.get(scene_b) or final_annot_pool.get(scene_b),
+                "reason": metrics.get("reason") or "adjacent_sequence_review",
+                "metrics": metrics,
+            })
             continue
         agenda_metrics = agenda_text_guard_metrics(
             base_representatives[scene_a],
@@ -421,6 +607,18 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             )
         ):
             rejected += 1
+            candidates.append({
+                "candidate_type": "same_slide_build",
+                "source": "local_vlm_adjacent_sequence_review",
+                "proposed_decision": "needs_vlm_same_slide_build_check",
+                "scene_indices": [scene_a, scene_b],
+                "labels": [],
+                "filenames": candidate_filenames(scene_a, scene_b),
+                "previous_final_filename": final_annot_pool.get(scene_a) or base_pool.get(scene_a),
+                "next_final_filename": base_pool.get(scene_b) or final_annot_pool.get(scene_b),
+                "reason": metrics.get("reason") or "adjacent_sequence_review_agenda_guard",
+                "metrics": metrics,
+            })
             continue
         candidates.append({
             "candidate_type": "same_slide_build",
@@ -430,7 +628,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             "labels": [],
             "filenames": candidate_filenames(scene_a, scene_b),
             "previous_final_filename": final_annot_pool.get(scene_a) or base_pool.get(scene_a),
-            "next_final_filename": final_annot_pool.get(scene_b) or base_pool.get(scene_b),
+            "next_final_filename": base_pool.get(scene_b) or final_annot_pool.get(scene_b),
             "reason": metrics.get("reason") or "opencv_adjacent_build_candidate",
             "metrics": metrics,
         })
@@ -476,6 +674,9 @@ def _candidate_prompt_filenames(
     candidate: dict[str, Any],
     timeline_context: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[str]:
+    if str(candidate.get("candidate_type") or "") == "same_slide_build":
+        return _limited_candidate_filenames(candidate)
+
     filenames = []
     for row in (timeline_context or {}).get(candidate_index, []):
         filename = row.get("filename")
@@ -497,7 +698,11 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
     candidate_type = str(candidate.get("candidate_type") or "").strip()
     reason = str(raw.get("reason", "")).strip()
     reason_lc = reason.lower()
-    if candidate_type == "same_slide_duplicate" and decision == "same_slide_build":
+    is_adjacent_candidate = (
+        len(scene_indices) == 2
+        and abs(int(scene_indices[0]) - int(scene_indices[1])) == 1
+    )
+    if candidate_type == "same_slide_duplicate" and decision == "same_slide_build" and not is_adjacent_candidate:
         decision = "different_slide"
     if candidate_type == "same_slide_duplicate" and decision == "different_slide":
         duplicate_false_negative = (
@@ -518,116 +723,34 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
                 f"{reason} "
                 "[local_vlm_override: scene index or lecturer pose is not a substantive slide-content difference]"
             ).strip()
-    if candidate_type == "same_slide_build" and decision == "same_slide_build":
-        agenda_progression_terms = (
-            "agenda item",
-            "agenda/items",
-            "agenda progression",
-            "table-of-contents",
-            "table of contents",
-            "numbered item",
-            "new item",
-            "item 01",
-            "item 02",
-            "item 03",
-            "item 04",
-            "item 05",
-            "section 01",
-            "section 02",
-            "section 03",
-            "section 04",
-            "section 05",
-            "new section",
-            "summary",
-            "학습정리",
-            "확습정리",
-            "목차",
-            "항목",
-        )
-        core_visual_addition_terms = (
-            "adds a chart",
-            "adds chart",
-            "new chart",
-            "adds a diagram",
-            "adds diagram",
-            "new diagram",
-            "adds a screenshot",
-            "adds screenshot",
-            "new screenshot",
-            "adds a word cloud",
-            "adds word cloud",
-            "new word cloud",
-            "donut chart",
-            "adds a table",
-            "adds table",
-            "new table",
-            "adds a panel",
-            "adds panel",
-            "new panel",
-            "adds a webpage",
-            "adds webpage",
-            "new webpage",
-            "adds a score bar",
-            "adds score bar",
-            "score bar",
-            "new score bar",
-            "adds a visual diagram",
-            "adds a visual element",
-            "mind map",
-            "adds a highlighted example",
-            "adds an example",
-            "example text block",
-            "adds a 'tones' section",
-            "adds a tones section",
-            "adds a 'tones'",
-            "'tones' section",
-            "tones section",
-            "tones analysis panel",
-            "detailed 'tones'",
-            "adds a 'sentence-level' section",
-            "adds a sentence-level section",
-            "sentence-level section",
-            "sentence-level analysis",
-            "document-level section",
-            "adds a 'document-level' panel",
-            "adds a document-level panel",
-            "document-level panel",
-            "show button",
-            "new example",
-            "adds bullet",
-            "adds two bullet",
-            "bullet points under",
-            "new bullet",
-            "bullet points",
-            "main content area is added",
-            "main content blocks",
-            "adds two main content",
-            "previous image shows only",
-            "only the title",
-            "title and a placeholder",
-            "title-only",
-            "mostly blank",
-            "evolves from",
-            "more detailed",
-        )
-        if any(term in reason_lc for term in agenda_progression_terms):
-            decision = "different_slide"
+    if candidate_type == "same_slide_build" and is_adjacent_candidate and decision in {
+        "different_slide",
+        "uncertain",
+    }:
+        # OCR can hallucinate changes in book-cover text, handwriting, or
+        # screen overlays. When the actual pixels are effectively identical,
+        # do not let that OCR/VLM false negative split a chronological slide.
+        metrics = candidate.get("metrics") or {}
+        try:
+            exact_content = (
+                int(metrics.get("content_phash", 9999)) <= 10
+                and int(metrics.get("content_dhash", 9999)) <= 12
+                and float(metrics.get("content_mse", 1.0) or 1.0) <= 0.003
+                and float(metrics.get("content_changed", 1.0) or 1.0) <= 0.02
+                and float(metrics.get("content_edge", 0.0) or 0.0) >= 0.95
+                and float(metrics.get("content_hist", 0.0) or 0.0) >= 0.998
+            )
+        except (TypeError, ValueError):
+            exact_content = False
+        if exact_content:
             raw = dict(raw)
-            raw["local_vlm_veto"] = "agenda_item_progression_not_build"
+            raw["local_vlm_override"] = "strong_visual_identity_overrides_ocr_false_negative"
+            raw["should_merge_slide_group"] = True
+            decision = "same_slide_annotation"
             reason = (
-                f"{reason} "
-                "[local_vlm_veto: agenda/summary item progression is treated as different_slide]"
+                f"{reason} [local_vlm_override: strong visual identity; OCR text variance is treated as overlay/noise]"
             ).strip()
-        elif any(term in reason_lc for term in core_visual_addition_terms):
-            decision = "different_slide"
-            raw = dict(raw)
-            raw["local_vlm_veto"] = "core_visual_or_content_addition_not_build"
-            reason = (
-                f"{reason} "
-                "[local_vlm_veto: new core visual/text content is treated as different_slide]"
-            ).strip()
-
-    if decision == "same_slide_build":
+    if decision in {"same_slide_build", "same_slide_annotation"}:
         fallback_representative = scene_indices[-1] if scene_indices else None
     else:
         fallback_representative = scene_indices[0] if scene_indices else None
@@ -645,11 +768,15 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
     if representative not in scene_indices:
         representative = fallback_representative
 
-    if candidate_type == "same_slide_duplicate" and decision != "same_slide_duplicate":
+    if (
+        candidate_type == "same_slide_duplicate"
+        and decision != "same_slide_duplicate"
+        and not (is_adjacent_candidate and decision in {"same_slide_build", "same_slide_annotation"})
+    ):
         should_merge_slide_group = False
         should_drop_scene = False
-    elif decision in {"same_slide_duplicate", "same_slide_build"}:
-        should_merge_slide_group = bool(raw.get("should_merge_slide_group", False))
+    elif decision in {"same_slide_duplicate", "same_slide_build", "same_slide_annotation"}:
+        should_merge_slide_group = True
         should_drop_scene = False
     elif decision == "transition_noise":
         should_merge_slide_group = False
@@ -722,10 +849,206 @@ def _compact_candidate_for_prompt(
     }
 
 
+def _ocr_hint_block(image_filenames: list[str], slides_dir: Path) -> str:
+    if not ocr_enabled():
+        return ""
+    blocks: list[str] = []
+    for filename in image_filenames:
+        path = slides_dir / filename
+        if not path.exists():
+            continue
+        block = format_ocr_hint_block(path, label=filename)
+        if block:
+            blocks.append(block.strip())
+    return "\n\n".join(blocks).strip()
+
+
+def _scene_boundary_ocr_filenames(
+    candidate: dict[str, Any],
+    slides_dir: Path,
+    provisional_bounds_for_scene: Callable[[int], tuple[int, int] | None] | None = None,
+) -> tuple[str | None, str | None]:
+    scene_indices = _candidate_scene_indices(candidate)
+    if len(scene_indices) < 2:
+        return None, None
+
+    metadata = _load_local_vlm_metadata(slides_dir)
+    if not metadata:
+        return None, None
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for item in metadata:
+        try:
+            scene_index = int(item.get("scene_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(scene_index, []).append(item)
+
+    prev_scene = min(scene_indices)
+    next_scene = max(scene_indices)
+    if provisional_bounds_for_scene is not None:
+        prev_bounds = provisional_bounds_for_scene(prev_scene)
+        if prev_bounds is not None:
+            prev_scene = int(prev_bounds[1])
+        next_bounds = provisional_bounds_for_scene(next_scene)
+        if next_bounds is not None:
+            next_scene = int(next_bounds[0])
+    if next_scene - prev_scene != 1:
+        return None, None
+
+    def _base_filename(scene_index: int) -> str | None:
+        for item in grouped.get(scene_index, []):
+            if item.get("capture_type") == "base" and item.get("filename"):
+                filename = str(item.get("filename"))
+                if (slides_dir / filename).exists():
+                    return filename
+        return None
+
+    def _last_annot_filename(scene_index: int) -> str | None:
+        annots = [
+            item for item in grouped.get(scene_index, [])
+            if item.get("capture_type") in {"annotation", "build"} and item.get("filename")
+        ]
+        annots = [item for item in annots if (slides_dir / str(item.get("filename"))).exists()]
+        if annots:
+            return str(annots[-1].get("filename"))
+        return _base_filename(scene_index)
+
+    return _last_annot_filename(prev_scene), _base_filename(next_scene)
+
+
+def _ocr_prefilter_same_slide_candidate(
+    candidate: dict[str, Any],
+    slides_dir: Path,
+    provisional_bounds_for_scene: Callable[[int], tuple[int, int] | None] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    candidate_type = str(candidate.get("candidate_type") or "")
+    if candidate_type not in {"same_slide_build", "same_slide_duplicate"}:
+        return None, None
+    if not ocr_enabled():
+        return None, None
+
+    filenames = list(candidate.get("filenames") or [])
+    if len(filenames) < 2:
+        return None, {"candidate_type": candidate_type, "status": "skipped", "reason": "not_enough_filenames"}
+
+    prev_filename, next_filename = _scene_boundary_ocr_filenames(
+        candidate,
+        slides_dir,
+        provisional_bounds_for_scene=provisional_bounds_for_scene,
+    )
+    if not prev_filename or not next_filename:
+        prev_filename = candidate.get("previous_final_filename") or filenames[0]
+        next_filename = candidate.get("next_final_filename") or filenames[-1]
+    if not prev_filename or not next_filename:
+        return None, {"candidate_type": candidate_type, "status": "skipped", "reason": "missing_endpoint_filename"}
+
+    prev_path = slides_dir / str(prev_filename)
+    next_path = slides_dir / str(next_filename)
+    if not prev_path.exists() or not next_path.exists():
+        return None, {
+            "candidate_type": candidate_type,
+            "status": "skipped",
+            "reason": "endpoint_file_missing",
+            "previous_final_filename": str(prev_filename),
+            "next_final_filename": str(next_filename),
+        }
+
+    try:
+        comparison = compare_slide_ocr(prev_path, next_path)
+        if _is_adjacent_scene_pair(candidate):
+            comparison = _apply_ocr_threshold(comparison, adjacent_ocr_similarity_threshold())
+    except Exception as exc:
+        return None, {
+            "candidate_type": candidate_type,
+            "status": "error",
+            "reason": str(exc),
+            "previous_final_filename": str(prev_filename),
+            "next_final_filename": str(next_filename),
+        }
+    similarity = float(comparison.get("similarity", 0.0) or 0.0)
+    threshold = float(comparison.get("threshold", ocr_similarity_threshold()) or ocr_similarity_threshold())
+    diagnostic = {
+        "candidate_type": candidate_type,
+        "status": "checked",
+        "decision": comparison.get("decision"),
+        "similarity": similarity,
+        "threshold": threshold,
+        "previous_final_filename": str(prev_filename),
+        "next_final_filename": str(next_filename),
+        "ocr_comparison": comparison,
+    }
+    if comparison.get("decision") != "merge" or similarity < threshold:
+        diagnostic["status"] = "not_prefiltered"
+        return None, diagnostic
+
+    # OCR similarity is dominated by shared titles, section headings, and
+    # boilerplate.  It must not auto-merge a slide whose body was replaced by
+    # another slide with the same title/topic.  Large visual changes remain a
+    # LocalVLM decision, while ordinary handwriting-only boundaries still
+    # complete in the OCR fast path.
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+    content_changed = float(metrics.get("content_changed", 0.0) or 0.0)
+    content_mse = float(metrics.get("content_mse", 0.0) or 0.0)
+    edge_preserve = float(metrics.get("prev_edge_preserve", 1.0) or 0.0)
+    substantive_visual_change = (
+        content_changed >= 0.08
+        or content_mse >= 0.012
+        or edge_preserve < 0.88
+    )
+    diagnostic["visual_guard"] = {
+        "content_changed": content_changed,
+        "content_mse": content_mse,
+        "prev_edge_preserve": edge_preserve,
+        "substantive_visual_change": substantive_visual_change,
+    }
+    if substantive_visual_change:
+        diagnostic["status"] = "review_required"
+        diagnostic["reason"] = "high OCR similarity but substantive visual body change requires LocalVLM"
+        return None, diagnostic
+
+    # OCR can establish text similarity but cannot distinguish a real printed
+    # build, temporary ink, and a duplicate base captured while a lecturer
+    # moves.  Auto-labeling a build candidate as an annotation promoted later
+    # base frames (including presenter-only differences) into fake annot JPGs.
+    # Keep OCR as the cheap candidate signal, then let the VLM choose the
+    # capture type for every same_slide_build boundary.
+    if candidate_type == "same_slide_build":
+        diagnostic["status"] = "review_required"
+        diagnostic["reason"] = "OCR merge candidate requires LocalVLM build/annotation/duplicate labeling"
+        return None, diagnostic
+
+    scene_indices = _candidate_scene_indices(candidate)
+    representative = scene_indices[-1] if scene_indices else None
+    prefilter_decision = "same_slide_duplicate"
+    decision = {
+        "candidate_type": candidate.get("candidate_type"),
+        "source": f"ocr_prefilter_{candidate_type}",
+        "decision": prefilter_decision,
+        "confidence": min(0.99, max(0.95, similarity)),
+        "representative_scene_index": representative,
+        "should_merge_slide_group": True,
+        "should_drop_scene": False,
+        "reason": (
+            f"ocr similarity {similarity:.4f} >= threshold {threshold:.2f}; "
+            "same-slide group merge without OCR build/annotation relabeling"
+        ),
+        "scene_indices": scene_indices,
+        "raw_response": {
+            "ocr_prefilter": comparison,
+        },
+        "ocr_prefilter": comparison,
+        "candidate_index": candidate.get("candidate_index"),
+    }
+    diagnostic["status"] = "prefiltered"
+    return decision, diagnostic
+
+
 def _batch_prompt(
     batch_items: list[tuple[int, dict[str, Any]]],
     image_filenames: list[str],
     timeline_context: dict[int, list[dict[str, Any]]] | None = None,
+    ocr_hint_text: str = "",
 ) -> str:
     image_labels = {filename: f"image_{idx}" for idx, filename in enumerate(image_filenames, start=1)}
     tasks = [
@@ -745,6 +1068,12 @@ def _batch_prompt(
         }
         for filename in image_filenames
     ]
+    ocr_block = ""
+    if str(ocr_hint_text or "").strip():
+        ocr_block = (
+            "[Pre-extracted OCR hint - use only as a hint, trust the image if they conflict]\n"
+            f"{ocr_hint_text.strip()}\n\n"
+        )
     return (
         "/no_think\n"
         "no_think\n"
@@ -759,58 +1088,10 @@ def _batch_prompt(
         "For candidate_type=same_slide_build, compare previous_final_image against next_final_image first. "
         "Base images and annotation images from the same scene are context for that scene's evolution, "
         "but the merge decision is whether the earlier scene's final visible state and the later scene's final visible state are the same slide/build.\n\n"
-        "Decision labels:\n"
-        "- same_slide_duplicate: nearly identical completed slide or nearly identical revisited slide only.\n"
-        "- same_slide_build: later image keeps the same topic, preserves the previous readable text/content, "
-        "and only adds non-core annotations, highlights, pointer/animation marks, or small explanatory text that does not change the slide's main content.\n"
-        "- transition_noise: middle image is slide movement/animation/noisy capture and should be dropped.\n"
-        "- different_slide: different lecture-material slides.\n"
-        "- uncertain: not enough evidence.\n\n"
-        "Absolute non-negotiable rules. You must always follow these rules:\n"
-        "- If readable section numbers differ, choose different_slide.\n"
-        "- If readable titles differ, choose different_slide.\n"
-        "- If key Korean/English text differs in meaning, choose different_slide.\n"
-        "- If agenda/item numbers or item sets change, choose different_slide even when the title/section is the same.\n"
-        "- If agenda/item numbers or item sets switch to a different title/section/topic, choose different_slide.\n"
-        "- If previous substantive text/content disappears, is covered, is replaced, or the main content area is redrawn with different content, choose different_slide.\n"
-        "- If a new screenshot, chart, diagram, word cloud, table, panel, webpage, example, score bar, or other main visual/content block appears, choose different_slide.\n"
-        "- Never merge based only on template, layout, colors, logos, speaker position, charts, or visual similarity.\n\n"
-        "Strict rules:\n"
-        "- Default to different_slide unless readable slide content is clearly the same.\n"
-        "- For candidate_type=same_slide_duplicate, use a near-exact identity standard: substantive text, title, "
-        "section number, bullets, tables, charts, screenshots, item sets, and main content must be almost exactly the same.\n"
-        "- For candidate_type=same_slide_duplicate, do not use same_slide_build. If content is added, removed, "
-        "revealed, hidden, replaced, reordered, or semantically changed, choose different_slide.\n"
-        "- For candidate_type=same_slide_duplicate, same template, same title, same section, same layout, or "
-        "similar visual appearance is not enough. Any meaningful content difference means different_slide.\n"
-        "- For candidate_type=same_slide_build, additive reveal is allowed only for adjacent/chronological build candidates.\n"
-        "- For candidate_type=same_slide_build, do not ignore previous_final_image. If previous_final_image is a mostly blank/title-only slide and next_final_image adds a main UI, panel, screenshot, chart, diagram, word cloud, table, example, or content block, choose different_slide.\n"
-        "- For candidate_type=same_slide_build, first compare readable OCR text conceptually: previous readable text must remain visible and unchanged.\n"
-        "- For candidate_type=same_slide_build, added text is allowed only when it is non-core annotation/explanation/highlight text. "
-        "If added text is a new main bullet, agenda item, section item, table row, chart label, example, or substantive body content, choose different_slide.\n"
-        "- For candidate_type=same_slide_build, if any previous readable text is removed, covered, replaced, reordered, or semantically changed, choose different_slide.\n"
-        "- Similar template, colors, logos, speaker position, layout, or visual metrics are not enough for a merge.\n"
-        "- If titles, section numbers, agenda numbers, table headings, bullet labels, key Korean/English text, "
-        "or item sets switch to a different topic, choose different_slide.\n"
-        "- For title/agenda/table-of-contents/summary slides, adding, removing, revealing, hiding, or changing "
-        "numbered items is different_slide, not same_slide_build.\n"
-        "- Choose same_slide_build only for additive reveal: prior visible text/items/figures must remain visible "
-        "and unchanged, and the later image may add only non-core annotation/highlight/animation content without replacing the earlier content.\n"
-        "- same_slide_build is forbidden when a previously visible screenshot, diagram, chart, panel, table, "
-        "highlight box, or large background/content block disappears in the later image. Choose different_slide.\n"
-        "- same_slide_build is also forbidden when the later image adds a new screenshot, diagram, chart, word cloud, "
-        "table, panel, webpage, example, score bar, or other main visual/content block. Choose different_slide.\n"
-        "- For agenda/summary slides, same_slide_build is not allowed for item-number progression. "
-        "If numbered items differ in any meaningful way, choose different_slide.\n"
-        "- If the later image changes a selected tab/category/filter, swaps examples, replaces a chart/table, "
-        "overwrites a screenshot region, or otherwise hides/removes the previous main content, choose different_slide.\n"
-        "- If a slide disappears and later a similar-looking slide appears, treat it as different_slide unless "
-        "the substantive text is still the same.\n"
-        "- For candidate_type=same_slide_duplicate, set should_merge_slide_group=true only when decision is same_slide_duplicate.\n"
-        "- For other candidate types, if decision is same_slide_duplicate or same_slide_build, set should_merge_slide_group=true.\n"
-        "- If decision is different_slide, transition_noise, or uncertain, set should_merge_slide_group=false.\n"
-        "- Set should_merge_slide_group=true only for high-confidence exact duplicates or true incremental builds. "
-        "For any uncertainty, keep should_merge_slide_group=false.\n\n"
+        f"{_SLIDE_DECISION_LABELS}"
+        f"{_SLIDE_DECISION_POLICY}"
+        f"{_MERGE_OUTPUT_POLICY}"
+        f"{ocr_block}"
         "Confidence rules:\n"
         "- confidence is your actual certainty from 0.0 to 1.0, not a fixed placeholder.\n"
         "- Use 0.9-1.0 for clear different_slide cases with different section numbers, titles, or key text.\n"
@@ -822,7 +1103,7 @@ def _batch_prompt(
         '  "results": [\n'
         "    {\n"
         '      "candidate_index": 1,\n'
-        '      "decision": "same_slide_duplicate|same_slide_build|transition_noise|different_slide|uncertain",\n'
+        '      "decision": "same_slide_duplicate|same_slide_build|same_slide_annotation|transition_noise|different_slide|uncertain",\n'
         '      "confidence": 0.0,\n'
         '      "representative_scene_index": 0,\n'
         '      "should_merge_slide_group": false,\n'
@@ -897,7 +1178,13 @@ def _pack_candidate_batches(
     return batches
 
 
-def _prompt(candidate: dict[str, Any]) -> str:
+def _prompt(candidate: dict[str, Any], ocr_hint_text: str = "") -> str:
+    ocr_block = ""
+    if str(ocr_hint_text or "").strip():
+        ocr_block = (
+            "[Pre-extracted OCR hint - use only as a hint, trust the image if they conflict]\n"
+            f"{ocr_hint_text.strip()}\n\n"
+        )
     return (
         "/no_think\n"
         "no_think\n"
@@ -907,64 +1194,11 @@ def _prompt(candidate: dict[str, Any]) -> str:
         "Compare the provided images in order. Decide whether they are the same lecture slide, "
         "a build/animation step of the same slide, a transition/noisy intermediate frame, "
         "or genuinely different slides.\n\n"
-        "Definitions:\n"
-        "- same_slide_duplicate: nearly identical completed slide or nearly identical revisited slide only; minor crop/noise/toolbars may differ.\n"
-        "- same_slide_build: second image preserves the first slide structure and prior readable text/content, "
-        "and only adds non-core annotations, highlights, pointer/animation marks, or small explanatory text that does not change the slide's main content.\n"
-        "- transition_noise: image is captured during slide movement/animation and should not be used as a representative scene.\n"
-        "- different_slide: images are different lecture-material slides.\n"
-        "- uncertain: not enough evidence.\n\n"
-        "Absolute non-negotiable rules. You must always follow these rules:\n"
-        "- If readable section numbers differ, choose different_slide.\n"
-        "- If readable titles differ, choose different_slide.\n"
-        "- If key Korean/English text differs in meaning, choose different_slide.\n"
-        "- If agenda/item numbers or item sets change, choose different_slide even when the title/section is the same.\n"
-        "- If agenda/item numbers or item sets switch to a different title/section/topic, choose different_slide.\n"
-        "- If previous substantive text/content disappears, is covered, is replaced, or the main content area is redrawn with different content, choose different_slide.\n"
-        "- If a new screenshot, chart, diagram, word cloud, table, panel, webpage, example, score bar, or other main visual/content block appears, choose different_slide.\n"
-        "- Never merge based only on template, layout, colors, logos, speaker position, charts, or visual similarity.\n\n"
-        "Critical rule for lecture slides:\n"
-        "- Default to different_slide unless readable slide content is clearly the same.\n"
-        "- Candidate type: "
-        f"{candidate.get('candidate_type')}\n"
-        "- If candidate_type is same_slide_duplicate, use a near-exact identity standard: substantive text, title, "
-        "section number, bullets, tables, charts, screenshots, item sets, and main content must be almost exactly the same.\n"
-        "- If candidate_type is same_slide_duplicate, do not use same_slide_build. If content is added, removed, "
-        "revealed, hidden, replaced, reordered, or semantically changed, choose different_slide.\n"
-        "- If candidate_type is same_slide_duplicate, same template, same title, same section, same layout, or "
-        "similar visual appearance is not enough. Any meaningful content difference means different_slide.\n"
-        "- If candidate_type is same_slide_build, additive reveal is allowed only for adjacent/chronological build candidates.\n"
-        "- If candidate_type is same_slide_build, do not ignore the earlier scene's final visible state. If it is mostly blank/title-only and the later scene adds a main UI, panel, screenshot, chart, diagram, word cloud, table, example, or content block, choose different_slide.\n"
-        "- If candidate_type is same_slide_build, first compare readable OCR text conceptually: previous readable text must remain visible and unchanged.\n"
-        "- If candidate_type is same_slide_build, added text is allowed only when it is non-core annotation/explanation/highlight text. "
-        "If added text is a new main bullet, agenda item, section item, table row, chart label, example, or substantive body content, choose different_slide.\n"
-        "- If candidate_type is same_slide_build, if any previous readable text is removed, covered, replaced, reordered, or semantically changed, choose different_slide.\n"
-        "- Prioritize readable slide content over layout similarity. If titles, section numbers, agenda numbers, "
-        "bullet labels, table headings, or key Korean/English text switch to a different topic, choose different_slide even "
-        "when the template, colors, circles, logos, speaker position, or overall layout are nearly identical.\n"
-        "- For title/agenda/table-of-contents/summary slides, adding, removing, revealing, hiding, or changing "
-        "numbered items is different_slide, not same_slide_build.\n"
-        "- same_slide_build requires additive reveal: prior visible text/items/figures must remain visible "
-        "and unchanged, and the later image may add only non-core annotation/highlight/animation content without replacing the earlier content.\n"
-        "- same_slide_build is forbidden when a previously visible screenshot, diagram, chart, panel, table, "
-        "highlight box, or large background/content block disappears in the later image. Choose different_slide.\n"
-        "- same_slide_build is also forbidden when the later image adds a new screenshot, diagram, chart, word cloud, "
-        "table, panel, webpage, example, score bar, or other main visual/content block. Choose different_slide.\n"
-        "- For agenda/summary slides, same_slide_build is not allowed for item-number progression. "
-        "If numbered items differ in any meaningful way, choose different_slide.\n"
-        "- If the later image changes a selected tab/category/filter, swaps examples, replaces a chart/table, "
-        "overwrites a screenshot region, or otherwise hides/removes the previous main content, choose different_slide.\n"
-        "- Choose same_slide_duplicate only when the substantive text and semantic content are the same. "
-        "Allowed differences are lecturer pose, masking, crop/toolbars, compression noise, pointer position, "
-        "or tiny non-semantic visual changes.\n"
-        "- Choose same_slide_build only when the later image keeps the same slide topic and merely adds/reveals "
-        "non-core annotation/highlight/animation content from that same topic; do not use it for new main bullets, "
-        "examples, table rows, chart labels, agenda/table-of-contents item progression, a different agenda page, "
-        "different title, or different section.\n\n"
-        "Merge output rules:\n"
-        "- If candidate_type is same_slide_duplicate, set should_merge_slide_group=true only when decision is same_slide_duplicate.\n"
-        "- For other candidate types, if decision is same_slide_duplicate or same_slide_build, set should_merge_slide_group=true.\n"
-        "- If decision is different_slide, transition_noise, or uncertain, set should_merge_slide_group=false.\n\n"
+        f"{_SLIDE_DECISION_LABELS}"
+        f"{_SLIDE_DECISION_POLICY}"
+        f"Candidate type: {candidate.get('candidate_type')}\n\n"
+        f"{ocr_block}"
+        f"{_MERGE_OUTPUT_POLICY}"
         "Confidence rules:\n"
         "- confidence is your actual certainty from 0.0 to 1.0, not a fixed placeholder.\n"
         "- Use 0.9-1.0 for clear different_slide cases with different section numbers, titles, or key text.\n"
@@ -981,7 +1215,7 @@ def _prompt(candidate: dict[str, Any]) -> str:
         "Return one valid JSON object only. Do not include markdown, code fences, explanations, or prose.\n"
         "Use exactly this schema:\n"
         "{\n"
-        '  "decision": "same_slide_duplicate|same_slide_build|transition_noise|different_slide|uncertain",\n'
+        '  "decision": "same_slide_duplicate|same_slide_build|same_slide_annotation|transition_noise|different_slide|uncertain",\n'
         '  "confidence": 0.0,\n'
         '  "representative_scene_index": 0,\n'
         '  "should_merge_slide_group": false,\n'
@@ -994,12 +1228,12 @@ def _prompt(candidate: dict[str, Any]) -> str:
 class OllamaVLMProvider:
     def __init__(self):
         self.base_url = self._next_base_url()
-        self.model = os.getenv("VERILEC_OLLAMA_MODEL", "gemma3:4b")
+        self.model = os.getenv("GRAPHLEC_OLLAMA_MODEL", "qwen3.5:9b")
 
     @staticmethod
     def _base_urls() -> list[str]:
-        raw = os.getenv("VERILEC_OLLAMA_BASE_URLS") or os.getenv(
-            "VERILEC_OLLAMA_BASE_URL",
+        raw = os.getenv("GRAPHLEC_OLLAMA_BASE_URLS") or os.getenv(
+            "GRAPHLEC_OLLAMA_BASE_URL",
             "http://host.docker.internal:11434",
         )
         urls = [url.strip().rstrip("/") for url in raw.split(",") if url.strip()]
@@ -1024,6 +1258,7 @@ class OllamaVLMProvider:
                 images.append(_image_b64_for_vlm(path))
         if not images:
             raise FileNotFoundError(f"candidate images not found: {candidate.get('filenames')}")
+        ocr_hint_text = _ocr_hint_block(_limited_candidate_filenames(candidate), slides_dir)
 
         payload = {
             "model": self.model,
@@ -1031,15 +1266,15 @@ class OllamaVLMProvider:
             "messages": [
                 {
                     "role": "user",
-                    "content": _prompt(candidate),
+                    "content": _prompt(candidate, ocr_hint_text=ocr_hint_text),
                     "images": images,
                 }
             ],
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("VERILEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("VERILEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1049,7 +1284,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("VERILEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1087,8 +1322,8 @@ class OllamaVLMProvider:
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("VERILEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("VERILEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1098,7 +1333,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("VERILEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1120,8 +1355,9 @@ class OllamaVLMProvider:
         slides_dir: Path,
         timeline_context: dict[int, list[dict[str, Any]]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        ocr_hint_text = _ocr_hint_block(image_filenames, slides_dir)
         raw = self._chat_json(
-            _batch_prompt(batch_items, image_filenames, timeline_context),
+            _batch_prompt(batch_items, image_filenames, timeline_context, ocr_hint_text=ocr_hint_text),
             image_filenames,
             slides_dir,
         )
@@ -1159,11 +1395,172 @@ class OllamaVLMProvider:
         return results, errors
 
 
+
+class OpenAICompatibleVLMProvider:
+    def __init__(self):
+        self.base_url = os.getenv("GRAPHLEC_OPENAI_BASE_URL", "http://host.docker.internal:8000/v1").rstrip("/")
+        self.api_key = os.getenv("GRAPHLEC_OPENAI_API_KEY", "none")
+        self.model = os.getenv(
+            "GRAPHLEC_OPENAI_MODEL",
+            os.getenv("GRAPHLEC_OLLAMA_MODEL", "google/diffusiongemma-26B-A4B-it"),
+        )
+
+    @staticmethod
+    def _image_content(path: Path) -> dict[str, Any]:
+        # OpenAI-compatible vision servers generally accept base64 data URLs.
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{_image_b64_for_vlm(path)}"
+            },
+        }
+
+    def _chat_json(self, prompt: str, image_filenames: list[str], slides_dir: Path) -> dict[str, Any]:
+        content: list[dict[str, Any]] = []
+        for filename in image_filenames:
+            path = slides_dir / filename
+            if path.exists():
+                content.append(self._image_content(path))
+        if not content:
+            raise FileNotFoundError(f"batch images not found: {image_filenames}")
+
+        # Put images before text. DiffusionGemma's model card recommends image
+        # content before text for multimodal inputs.
+        content.append({"type": "text", "text": prompt})
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": content}],
+            "max_completion_tokens": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+        }
+        # GPT-5.6 models accept only their server-side default temperature.
+        # Sending the inherited LocalVLM default (0.0) makes every request,
+        # including the single-candidate fallback, fail with HTTP 400.
+        if not self.model.strip().lower().startswith("gpt-5.6"):
+            payload["temperature"] = env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0)
+        if env_bool("GRAPHLEC_OPENAI_RESPONSE_FORMAT", True):
+            payload["response_format"] = {"type": "json_object"}
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 600.0)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                error_body = ""
+            raise LocalVLMResponseError(
+                f"OpenAI-compatible VLM HTTP {exc.code}: {error_body[:2000]}",
+                raw_response={"status_code": exc.code, "body": error_body[:2000]},
+            ) from exc
+
+        choices = body.get("choices") or []
+        if not choices:
+            raise LocalVLMResponseError("OpenAI-compatible VLM response missing choices", raw_response=body)
+
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content_text = message.get("content", "") if isinstance(message, dict) else ""
+        if isinstance(content_text, list):
+            parts = []
+            for item in content_text:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item))
+            content_text = "".join(parts)
+        content_text = str(content_text or "")
+        if not content_text.strip():
+            raise LocalVLMResponseError("empty OpenAI-compatible VLM response content", raw_response=body, content=content_text)
+
+        try:
+            return _extract_json_object(content_text)
+        except json.JSONDecodeError as exc:
+            raise LocalVLMResponseError(
+                f"invalid OpenAI-compatible VLM JSON response: {exc}",
+                raw_response=body,
+                content=content_text,
+            ) from exc
+
+    def review(self, candidate: dict[str, Any], slides_dir: Path) -> dict[str, Any]:
+        image_filenames = []
+        for filename in _limited_candidate_filenames(candidate):
+            if filename and (slides_dir / filename).exists():
+                image_filenames.append(filename)
+        if not image_filenames:
+            raise FileNotFoundError(f"candidate images not found: {candidate.get('filenames')}")
+        ocr_hint_text = _ocr_hint_block(image_filenames, slides_dir)
+        raw = self._chat_json(_prompt(candidate, ocr_hint_text=ocr_hint_text), image_filenames, slides_dir)
+        return _normalize_result(candidate, raw)
+
+    def review_batch(
+        self,
+        batch_items: list[tuple[int, dict[str, Any]]],
+        image_filenames: list[str],
+        slides_dir: Path,
+        timeline_context: dict[int, list[dict[str, Any]]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        ocr_hint_text = _ocr_hint_block(image_filenames, slides_dir)
+        raw = self._chat_json(
+            _batch_prompt(batch_items, image_filenames, timeline_context, ocr_hint_text=ocr_hint_text),
+            image_filenames,
+            slides_dir,
+        )
+        raw_results = raw.get("results", [])
+        if not isinstance(raw_results, list):
+            raise LocalVLMResponseError("OpenAI-compatible VLM batch response missing results array", raw_response=raw)
+
+        candidates_by_index = {candidate_index: candidate for candidate_index, candidate in batch_items}
+        seen: set[int] = set()
+        results: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for raw_item in raw_results:
+            if not isinstance(raw_item, dict):
+                continue
+            try:
+                candidate_index = int(raw_item.get("candidate_index"))
+            except (TypeError, ValueError):
+                continue
+            candidate = candidates_by_index.get(candidate_index)
+            if candidate is None:
+                continue
+            normalized = _normalize_result(candidate, raw_item)
+            normalized["candidate_index"] = candidate_index
+            results.append(normalized)
+            seen.add(candidate_index)
+
+        for candidate_index, candidate in batch_items:
+            if candidate_index not in seen:
+                errors.append({
+                    "candidate_index": candidate_index,
+                    "scene_indices": candidate.get("scene_indices"),
+                    "filenames": candidate.get("filenames"),
+                    "error": "OpenAI-compatible VLM batch response omitted candidate",
+                })
+        return results, errors
+
+
+
 def load_provider():
-    provider = os.getenv("VERILEC_VLM_PROVIDER", "ollama").strip().lower()
-    if provider != "ollama":
-        raise ValueError(f"unsupported VERILEC_VLM_PROVIDER={provider!r}; only 'ollama' is implemented")
-    return OllamaVLMProvider()
+    provider = os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama").strip().lower()
+    if provider == "ollama":
+        return OllamaVLMProvider()
+    if provider in {"openai", "openai-compatible", "openai_compatible", "vllm", "sglang"}:
+        return OpenAICompatibleVLMProvider()
+    raise ValueError(
+        f"unsupported GRAPHLEC_VLM_PROVIDER={provider!r}; "
+        "supported providers: 'ollama', 'openai'"
+    )
 
 
 def _pair_keys(scene_indices: Any) -> set[tuple[int, int]]:
@@ -1223,6 +1620,200 @@ def _resolve_cross_candidate_conflicts(results: list[dict[str, Any]]) -> None:
         ).strip()
 
 
+def _result_preference_key(result: dict[str, Any]) -> tuple[int, float]:
+    decision = str(result.get("decision") or "")
+    candidate_type = str(result.get("candidate_type") or "")
+    confidence = float(result.get("confidence", 0.0) or 0.0)
+    merge = bool(result.get("should_merge_slide_group"))
+
+    if candidate_type == "same_slide_build" and decision in {"same_slide_build", "same_slide_annotation"} and merge:
+        rank = 6
+    elif candidate_type == "same_slide_duplicate" and decision == "same_slide_duplicate" and merge:
+        rank = 5
+    elif decision in {"same_slide_build", "same_slide_annotation"} and merge:
+        rank = 4
+    elif decision == "same_slide_duplicate" and merge:
+        rank = 3
+    elif decision == "different_slide":
+        rank = 2
+    elif decision == "uncertain":
+        rank = 1
+    else:
+        rank = 0
+    return (rank, confidence)
+
+
+def _consolidate_pair_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, ...], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+
+    for result in results:
+        pair = tuple(sorted(_candidate_scene_indices({"scene_indices": result.get("scene_indices")})))
+        if len(pair) == 2 and abs(pair[0] - pair[1]) == 1:
+            grouped.setdefault(pair, []).append(result)
+        else:
+            passthrough.append(result)
+
+    consolidated = list(passthrough)
+    for pair, rows in grouped.items():
+        best = max(rows, key=_result_preference_key)
+        if len(rows) > 1:
+            raw = dict(best.get("raw_response") or {})
+            raw["pair_consolidation"] = {
+                "pair": list(pair),
+                "candidate_count": len(rows),
+                "candidates": [
+                    {
+                        "candidate_index": row.get("candidate_index"),
+                        "candidate_type": row.get("candidate_type"),
+                        "decision": row.get("decision"),
+                        "confidence": row.get("confidence"),
+                        "should_merge_slide_group": row.get("should_merge_slide_group"),
+                    }
+                    for row in rows
+                ],
+            }
+            best = dict(best)
+            best["raw_response"] = raw
+        consolidated.append(best)
+
+    consolidated.sort(key=lambda item: int(item.get("candidate_index", 0) or 0))
+    return consolidated
+
+
+def _scene_chain_components_from_results(results: list[dict[str, Any]]) -> list[list[int]]:
+    parent: dict[int, int] = {}
+
+    def find(scene: int) -> int:
+        parent.setdefault(scene, scene)
+        while parent[scene] != scene:
+            parent[scene] = parent[parent[scene]]
+            scene = parent[scene]
+        return scene
+
+    def union(scene_a: int, scene_b: int) -> None:
+        root_a = find(scene_a)
+        root_b = find(scene_b)
+        if root_a != root_b:
+            parent[max(root_a, root_b)] = min(root_a, root_b)
+
+    for result in results:
+        if not result.get("should_merge_slide_group"):
+            continue
+        scenes = sorted(set(_candidate_scene_indices({"scene_indices": result.get("scene_indices")})))
+        if len(scenes) < 2:
+            continue
+        for scene in scenes:
+            parent.setdefault(scene, scene)
+        for left, right in zip(scenes, scenes[1:]):
+            if right - left == 1:
+                union(left, right)
+
+    groups: dict[int, list[int]] = {}
+    for scene in sorted(parent):
+        groups.setdefault(find(scene), []).append(scene)
+    return [members for members in sorted(groups.values(), key=lambda members: (members[0], len(members)))]
+
+
+def _format_scene_chain(scene_indices: list[int]) -> str:
+    return " -> ".join(f"{scene:03d}" for scene in scene_indices)
+
+
+def _assign_resolved_scene_groups(
+    metadata: list[dict[str, Any]],
+    *,
+    group_of: dict[int, list[int]],
+    canonical_by_scene: dict[int, int],
+    build_representatives: set[int],
+    result_by_scene: dict[int, list[dict[str, Any]]],
+    min_confidence: float,
+    dropped_scenes: set[int],
+) -> None:
+    visit_order_by_scene: dict[int, int] = {}
+    prev_by_scene: dict[int, int | None] = {}
+    next_by_scene: dict[int, int | None] = {}
+
+    seen_groups: set[tuple[int, ...]] = set()
+    for members in group_of.values():
+        key = tuple(members)
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        for pos, idx in enumerate(members, start=1):
+            visit_order_by_scene[idx] = pos
+            prev_by_scene[idx] = members[pos - 2] if pos > 1 else None
+            next_by_scene[idx] = members[pos] if pos < len(members) else None
+
+    for item in metadata:
+        idx = int(item.get("scene_index", 0) or 0)
+        members = group_of.get(idx, [idx])
+        canonical = canonical_by_scene.get(idx, members[0])
+        visit_order = visit_order_by_scene.get(idx, 1)
+        previous_scene = prev_by_scene.get(idx)
+        next_scene = next_by_scene.get(idx)
+        scene_results = result_by_scene.get(idx, [])
+
+        item["duplicate_of"] = [x for x in members if x != idx]
+        item["scene_group"] = members
+        item["scene_canonical"] = canonical
+        item["scene_group_size"] = len(members)
+        item["same_slide_group"] = members
+        item["same_slide_canonical"] = canonical
+        item["same_slide_group_size"] = len(members)
+        item["same_slide_visit_order"] = visit_order
+        item["same_slide_is_revisit"] = visit_order > 1
+        item["same_slide_previous"] = previous_scene
+        item["same_slide_next"] = next_scene
+        item["slide_group"] = members
+        item["slide_canonical_index"] = canonical
+        item["slide_group_size"] = len(members)
+        item["slide_visit_order"] = visit_order
+        item["slide_is_revisit"] = visit_order > 1
+        item["previous_scene_index"] = previous_scene
+        item["next_scene_index"] = next_scene
+
+        if scene_results:
+            item["vlm_review_decisions"] = [
+                {
+                    "decision": r.get("decision"),
+                    "confidence": r.get("confidence"),
+                    "scene_indices": r.get("scene_indices"),
+                    "middle_scene_indices": r.get("middle_scene_indices"),
+                    "representative_scene_index": r.get("representative_scene_index"),
+                    "should_merge_slide_group": r.get("should_merge_slide_group"),
+                    "reason": r.get("reason"),
+                }
+                for r in scene_results
+            ]
+        else:
+            item.pop("vlm_review_decisions", None)
+
+        if any(
+            r.get("decision") == "different_slide"
+            and float(r.get("confidence", 0.0) or 0.0) >= min_confidence
+            for r in scene_results
+        ):
+            item["vlm_different_slide_veto"] = True
+        else:
+            item.pop("vlm_different_slide_veto", None)
+
+        preferred = idx == canonical and idx in build_representatives
+        if preferred:
+            item["vlm_preferred_representative"] = True
+        else:
+            item["vlm_preferred_representative"] = False
+
+        if idx in dropped_scenes:
+            item["is_transition_noise"] = True
+            item["manual_review"] = False
+        else:
+            item.pop("is_transition_noise", None)
+            if any(r.get("decision") == "uncertain" for r in scene_results):
+                item["manual_review"] = True
+            else:
+                item.pop("manual_review", None)
+
+
 def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
     slides_dir = Path(slides_dir)
     candidates_path = slides_dir / "llm_review_candidates.json"
@@ -1235,257 +1826,436 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
     candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
     candidates, candidate_preparation = _prepare_review_candidates(candidates_payload, slides_dir)
-    indexed_candidates = list(enumerate(candidates, start=1))
-    timeline_context = _timeline_context_by_candidate(indexed_candidates, slides_dir)
-    batch_image_limit = local_vlm_batch_image_limit()
-    batch_overlap_images = min(local_vlm_batch_overlap_images(), max(0, batch_image_limit - 1))
-    batch_candidate_limit = local_vlm_batch_candidate_limit()
-    batches = _pack_candidate_batches(
-        indexed_candidates,
-        max_images=batch_image_limit,
-        overlap_images=batch_overlap_images,
-        max_candidates=batch_candidate_limit,
-        timeline_context=timeline_context,
+    all_indexed_candidates = list(enumerate(candidates, start=1))
+    indexed_candidates = all_indexed_candidates
+
+    prefiltered_results: list[dict[str, Any]] = []
+    ocr_prefilter_diagnostics: list[dict[str, Any]] = []
+    reviewable_candidates: list[tuple[int, dict[str, Any]]] = []
+    indexed_lookup: dict[int, dict[str, Any]] = {}
+    total_candidates = len(indexed_candidates)
+    original_candidate_count = len(all_indexed_candidates)
+
+    provisional_scenes = sorted({
+        scene
+        for _, candidate in indexed_candidates
+        for scene in _candidate_scene_indices(candidate)
+    })
+    provisional_parent = {scene: scene for scene in provisional_scenes}
+
+    def provisional_find(scene: int) -> int:
+        while provisional_parent.get(scene, scene) != scene:
+            provisional_parent[scene] = provisional_parent[provisional_parent[scene]]
+            scene = provisional_parent[scene]
+        return scene
+
+    def provisional_union(scene_a: int, scene_b: int) -> None:
+        if scene_a not in provisional_parent or scene_b not in provisional_parent:
+            return
+        root_a = provisional_find(scene_a)
+        root_b = provisional_find(scene_b)
+        if root_a != root_b:
+            provisional_parent[max(root_a, root_b)] = min(root_a, root_b)
+
+    def scenes_in_same_provisional_group(candidate: dict[str, Any]) -> bool:
+        scenes = sorted(set(_candidate_scene_indices(candidate)))
+        if len(scenes) < 2:
+            return False
+        if any(scene not in provisional_parent for scene in scenes):
+            return False
+        return len({provisional_find(scene) for scene in scenes}) == 1
+
+    ocr_attempted_count = 0
+    ocr_prefiltered_count = 0
+    ocr_not_prefiltered_count = 0
+    ocr_error_count = 0
+    ocr_skipped_count = 0
+    ocr_build_review_required_count = 0
+    log.info(
+        "OCR prefilter 시작: total_candidates=%s original_candidates=%s",
+        total_candidates,
+        original_candidate_count,
     )
-    worker_count = local_vlm_worker_count(len(batches))
-
-    results = []
-    errors = []
-    started = time.time()
-
-    def review_one(idx: int, candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        item_started = time.time()
-        try:
-            provider = load_provider()
-            result = provider.review(candidate, slides_dir)
-            result["candidate_index"] = idx
-            result["elapsed_sec"] = round(time.time() - item_started, 3)
-            return "result", result
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            error_payload = {
-                "candidate_index": idx,
-                "scene_indices": candidate.get("scene_indices"),
-                "filenames": candidate.get("filenames"),
-                "elapsed_sec": round(time.time() - item_started, 3),
-                "error": str(exc),
-            }
-            if isinstance(exc, LocalVLMResponseError):
-                if exc.content:
-                    error_payload["raw_content_preview"] = exc.content[:500]
-                if exc.raw_response:
-                    error_payload["raw_response_keys"] = sorted(exc.raw_response.keys())
-                    message = exc.raw_response.get("message")
-                    if isinstance(message, dict):
-                        error_payload["raw_message_keys"] = sorted(message.keys())
-                    if exc.raw_response.get("done_reason"):
-                        error_payload["done_reason"] = exc.raw_response.get("done_reason")
-            return "error", error_payload
-
-    def review_batch(batch: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        item_started = time.time()
-        batch_index = int(batch.get("batch_index", 0) or 0)
-        batch_items = batch.get("items", [])
-        image_filenames = batch.get("image_filenames", [])
-        try:
-            provider = load_provider()
-            batch_results, batch_errors = provider.review_batch(
-                batch_items,
-                image_filenames,
-                slides_dir,
-                timeline_context,
+    for candidate_index, candidate in indexed_candidates:
+        indexed_lookup[candidate_index] = candidate
+        ocr_result, ocr_diagnostic = _ocr_prefilter_same_slide_candidate(
+            candidate,
+            slides_dir,
+        )
+        ocr_attempted_count += 1
+        if ocr_diagnostic is not None:
+            ocr_diagnostic["candidate_index"] = candidate_index
+            ocr_prefilter_diagnostics.append(ocr_diagnostic)
+            status = str(ocr_diagnostic.get("status") or "")
+            if status == "prefiltered":
+                ocr_prefiltered_count += 1
+            elif status == "not_prefiltered":
+                ocr_not_prefiltered_count += 1
+            elif status == "error":
+                ocr_error_count += 1
+            elif status == "review_required":
+                ocr_build_review_required_count += 1
+            else:
+                ocr_skipped_count += 1
+        if ocr_result is not None:
+            ocr_result["candidate_index"] = candidate_index
+            ocr_result["prefiltered"] = True
+            prefiltered_results.append(ocr_result)
+            scenes = _candidate_scene_indices(candidate)
+            if len(scenes) == 2:
+                provisional_union(scenes[0], scenes[1])
+        else:
+            reviewable_candidates.append((candidate_index, candidate))
+        if ocr_attempted_count % 10 == 0 or ocr_attempted_count == total_candidates:
+            log.info(
+                "OCR prefilter 진행: %s/%s checked, prefiltered=%s, review_required=%s, reviewable=%s, not_prefiltered=%s, errors=%s, skipped=%s",
+                ocr_attempted_count,
+                total_candidates,
+                ocr_prefiltered_count,
+                ocr_build_review_required_count,
+                len(reviewable_candidates),
+                ocr_not_prefiltered_count,
+                ocr_error_count,
+                ocr_skipped_count,
             )
-            elapsed = round(time.time() - item_started, 3)
-            for item in batch_results:
-                item["batch_index"] = batch_index
-                item["elapsed_sec"] = elapsed
-            for item in batch_errors:
-                item["batch_index"] = batch_index
-                item["elapsed_sec"] = elapsed
-            return batch_results, batch_errors
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            batch_errors = []
-            fallback_results = []
 
-            def retry_one(
-                candidate_index: int,
-                candidate: dict[str, Any],
-                parent_error: Exception,
-                fallback_level: str,
-            ) -> None:
-                one_started = time.time()
-                try:
-                    provider = load_provider()
-                    result = provider.review(candidate, slides_dir)
-                    result["candidate_index"] = candidate_index
-                    result["batch_index"] = batch_index
-                    result["elapsed_sec"] = round(time.time() - one_started, 3)
-                    result["batch_fallback"] = True
-                    result["batch_fallback_level"] = fallback_level
-                    fallback_results.append(result)
-                except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as fallback_exc:
-                    item_exc = fallback_exc
+    ocr_diagnostics_path = slides_dir / "ocr_prefilter_diagnostics.json"
+    ocr_diagnostics_payload = {
+        "enabled": ocr_enabled(),
+        "threshold": ocr_similarity_threshold(),
+        "adjacent_threshold": adjacent_ocr_similarity_threshold(),
+        "candidate_count": len(candidates),
+        "reviewed_candidate_count": total_candidates,
+        "attempted_count": len(ocr_prefilter_diagnostics),
+        "prefiltered_count": len(prefiltered_results),
+        "review_required_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "review_required"),
+        "not_prefiltered_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "not_prefiltered"),
+        "error_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "error"),
+        "skipped_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "skipped"),
+        "phase": "after_ocr_prefilter",
+        "diagnostics": ocr_prefilter_diagnostics,
+    }
+    ocr_diagnostics_path.write_text(
+        json.dumps(ocr_diagnostics_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    log.info("OCR prefilter diagnostics 저장: %s", ocr_diagnostics_path)
+    ocr_chain_groups = _scene_chain_components_from_results(prefiltered_results)
+    remaining_candidates_report = [
+        {
+            "candidate_index": candidate_index,
+            "candidate_type": candidate.get("candidate_type"),
+            "source": candidate.get("source"),
+            "proposed_decision": candidate.get("proposed_decision"),
+            "scene_indices": candidate.get("scene_indices"),
+            "filenames": candidate.get("filenames"),
+            "reason": candidate.get("reason"),
+            "labels": candidate.get("labels"),
+            "vlm_image_policy": candidate.get("vlm_image_policy"),
+        }
+        for candidate_index, candidate in reviewable_candidates
+    ]
+    ocr_report_path = slides_dir / "ocr_prefilter_report.json"
+    ocr_report_payload = {
+        "enabled": ocr_enabled(),
+        "threshold": ocr_similarity_threshold(),
+        "adjacent_threshold": adjacent_ocr_similarity_threshold(),
+        "candidate_count": len(candidates),
+        "reviewed_candidate_count": total_candidates,
+        "prefiltered_count": len(prefiltered_results),
+        "remaining_candidate_count": len(reviewable_candidates),
+        "merged_scene_chains": [
+            {
+                "scene_indices": group,
+                "chain": _format_scene_chain(group),
+            }
+            for group in ocr_chain_groups
+        ],
+        "remaining_candidates": remaining_candidates_report,
+    }
+    ocr_report_path.write_text(
+        json.dumps(ocr_report_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    log.info(
+        "OCR prefilter 후 남은 후보: %s/%s, 병합 체인=%s, 보고서=%s",
+        len(reviewable_candidates),
+        total_candidates,
+        len(ocr_chain_groups),
+        ocr_report_path,
+    )
+    log.info(
+        "OCR -> LocalVLM 전달: adjacent_build_review_required=%s total_reviewable=%s",
+        ocr_build_review_required_count,
+        len(reviewable_candidates),
+    )
 
-                    error_payload = {
-                        "candidate_index": candidate_index,
-                        "batch_index": batch_index,
-                        "scene_indices": candidate.get("scene_indices"),
-                        "filenames": candidate.get("filenames"),
-                        "elapsed_sec": round(time.time() - one_started, 3),
-                        "batch_error": str(parent_error),
-                        "error": str(item_exc),
-                    }
-                    if isinstance(item_exc, LocalVLMResponseError):
-                        if item_exc.content:
-                            error_payload["raw_content_preview"] = item_exc.content[:500]
-                        if item_exc.raw_response:
-                            error_payload["raw_response_keys"] = sorted(item_exc.raw_response.keys())
-                            message = item_exc.raw_response.get("message")
-                            if isinstance(message, dict):
-                                error_payload["raw_message_keys"] = sorted(message.keys())
-                            if item_exc.raw_response.get("done_reason"):
-                                error_payload["done_reason"] = item_exc.raw_response.get("done_reason")
-                    batch_errors.append(error_payload)
+    def _run_vlm_phase(
+        phase_name: str,
+        phase_candidates: list[tuple[int, dict[str, Any]]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        if not phase_candidates:
+            return [], [], {"phase": phase_name, "candidate_count": 0, "batch_count": 0, "worker_count": 0}
 
-            def retry_pair(pair_items: list[tuple[int, dict[str, Any]]]) -> None:
-                if len(pair_items) <= 1:
-                    candidate_index, candidate = pair_items[0]
-                    retry_one(candidate_index, candidate, exc, "single")
-                    return
+        timeline_context = _timeline_context_by_candidate(phase_candidates, slides_dir)
+        batch_image_limit = local_vlm_batch_image_limit()
+        batch_overlap_images = min(local_vlm_batch_overlap_images(), max(0, batch_image_limit - 1))
+        batch_candidate_limit = local_vlm_batch_candidate_limit()
+        batches = _pack_candidate_batches(
+            phase_candidates,
+            max_images=batch_image_limit,
+            overlap_images=batch_overlap_images,
+            max_candidates=batch_candidate_limit,
+            timeline_context=timeline_context,
+        )
+        worker_count = local_vlm_worker_count(len(batches))
+        phase_started = time.time()
+        log.info(
+            "LocalVLM phase start: phase=%s candidates=%s batches=%s workers=%s image_limit=%s candidate_limit=%s",
+            phase_name,
+            len(phase_candidates),
+            len(batches),
+            worker_count,
+            batch_image_limit,
+            batch_candidate_limit,
+        )
+        phase_results: list[dict[str, Any]] = []
+        phase_errors: list[dict[str, Any]] = []
 
-                pair_started = time.time()
-                pair_images = []
-                for candidate_index, candidate in pair_items:
-                    for filename in _candidate_prompt_filenames(candidate_index, candidate, timeline_context):
-                        if filename and filename not in pair_images:
-                            pair_images.append(filename)
-                try:
-                    provider = load_provider()
-                    pair_results, pair_errors = provider.review_batch(
-                        pair_items,
-                        pair_images,
-                        slides_dir,
-                        timeline_context,
-                    )
-                    elapsed = round(time.time() - pair_started, 3)
-                    for item in pair_results:
-                        item["batch_index"] = batch_index
-                        item["elapsed_sec"] = elapsed
-                        item["batch_fallback"] = True
-                        item["batch_fallback_level"] = "pair"
-                        fallback_results.append(item)
+        def review_batch(batch: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            batch_index = int(batch.get("batch_index", 0) or 0)
+            batch_items = batch.get("items", [])
+            image_filenames = batch.get("image_filenames", [])
+            try:
+                provider = load_provider()
+                batch_results, batch_errors = provider.review_batch(
+                    batch_items,
+                    image_filenames,
+                    slides_dir,
+                    timeline_context,
+                )
+                for item in batch_results:
+                    item["batch_index"] = batch_index
+                    item["vlm_phase"] = phase_name
+                for item in batch_errors:
+                    item["batch_index"] = batch_index
+                    item["vlm_phase"] = phase_name
+                return batch_results, batch_errors
+            except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+                log.warning(
+                    "LocalVLM batch fallback: phase=%s batch=%s candidates=%s error=%s",
+                    phase_name,
+                    batch_index,
+                    len(batch_items),
+                    exc,
+                )
+                fallback_results: list[dict[str, Any]] = []
+                fallback_errors: list[dict[str, Any]] = []
+                for candidate_index, candidate in batch_items:
+                    try:
+                        provider = load_provider()
+                        result = provider.review(candidate, slides_dir)
+                        result["candidate_index"] = candidate_index
+                        result["batch_index"] = batch_index
+                        result["batch_fallback"] = True
+                        result["vlm_phase"] = phase_name
+                        fallback_results.append(result)
+                    except Exception as fallback_exc:
+                        fallback_errors.append({
+                            "candidate_index": candidate_index,
+                            "scene_indices": candidate.get("scene_indices"),
+                            "filenames": candidate.get("filenames"),
+                            "batch_index": batch_index,
+                            "vlm_phase": phase_name,
+                            "batch_error": str(exc),
+                            "error": str(fallback_exc),
+                        })
+                return fallback_results, fallback_errors
 
-                    omitted = {
-                        int(item.get("candidate_index", 0) or 0)
-                        for item in pair_errors
-                        if item.get("error") == "VLM batch response omitted candidate"
-                    }
-                    for candidate_index, candidate in pair_items:
-                        if candidate_index in omitted:
-                            retry_one(candidate_index, candidate, exc, "single")
-                    for item in pair_errors:
-                        candidate_index = int(item.get("candidate_index", 0) or 0)
-                        if candidate_index not in omitted:
-                            item["batch_index"] = batch_index
-                            item["elapsed_sec"] = elapsed
-                            item["batch_error"] = str(exc)
-                            batch_errors.append(item)
-                except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as pair_exc:
-                    for candidate_index, candidate in pair_items:
-                        retry_one(candidate_index, candidate, pair_exc, "single")
-
-            for start in range(0, len(batch_items), 2):
-                retry_pair(batch_items[start:start + 2])
-            return fallback_results, batch_errors
-
-    if batches:
+        completed_batches = 0
         if worker_count <= 1:
             for batch in batches:
                 batch_results, batch_errors = review_batch(batch)
-                results.extend(batch_results)
-                errors.extend(batch_errors)
+                phase_results.extend(batch_results)
+                phase_errors.extend(batch_errors)
+                completed_batches += 1
+                log.info(
+                    "LocalVLM phase progress: phase=%s batches=%s/%s results=%s errors=%s",
+                    phase_name,
+                    completed_batches,
+                    len(batches),
+                    len(phase_results),
+                    len(phase_errors),
+                )
         else:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = {
-                    executor.submit(review_batch, batch): int(batch.get("batch_index", 0) or 0)
-                    for batch in batches
-                }
+                futures = [executor.submit(review_batch, batch) for batch in batches]
                 for future in as_completed(futures):
                     batch_results, batch_errors = future.result()
-                    results.extend(batch_results)
-                    errors.extend(batch_errors)
-    elif worker_count <= 1:
-        iterator = (
-            review_one(idx, candidate)
-            for idx, candidate in enumerate(candidates, start=1)
+                    phase_results.extend(batch_results)
+                    phase_errors.extend(batch_errors)
+                    completed_batches += 1
+                    if completed_batches % 5 == 0 or completed_batches == len(batches):
+                        log.info(
+                            "LocalVLM phase progress: phase=%s batches=%s/%s results=%s errors=%s",
+                            phase_name,
+                            completed_batches,
+                            len(batches),
+                            len(phase_results),
+                            len(phase_errors),
+                        )
+
+        decision_counts = dict(sorted(Counter(str(item.get("decision") or "unknown") for item in phase_results).items()))
+        elapsed_sec = round(time.time() - phase_started, 3)
+        log.info(
+            "LocalVLM phase done: phase=%s results=%s errors=%s decisions=%s elapsed=%.1fs",
+            phase_name,
+            len(phase_results),
+            len(phase_errors),
+            decision_counts,
+            elapsed_sec,
         )
-        for kind, payload_item in iterator:
-            if kind == "result":
-                results.append(payload_item)
-            else:
-                errors.append(payload_item)
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(review_one, idx, candidate): idx
-                for idx, candidate in enumerate(candidates, start=1)
-            }
-            for future in as_completed(futures):
-                kind, payload_item = future.result()
-                if kind == "result":
-                    results.append(payload_item)
-                else:
-                    errors.append(payload_item)
+        return phase_results, phase_errors, {
+            "phase": phase_name,
+            "candidate_count": len(phase_candidates),
+            "batch_count": len(batches),
+            "worker_count": worker_count,
+            "result_count": len(phase_results),
+            "error_count": len(phase_errors),
+            "decision_counts": decision_counts,
+            "elapsed_sec": elapsed_sec,
+        }
 
+    started = time.time()
+    batch_image_limit = local_vlm_batch_image_limit()
+    batch_overlap_images = min(local_vlm_batch_overlap_images(), max(0, batch_image_limit - 1))
+    batch_candidate_limit = local_vlm_batch_candidate_limit()
+
+    adjacent_reviewable = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in reviewable_candidates
+        if _is_adjacent_scene_pair(candidate) or str(candidate.get("candidate_type") or "") == "transition_noise"
+    ]
+    post_adjacent_reviewable = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in reviewable_candidates
+        if (candidate_index, candidate) not in adjacent_reviewable
+    ]
+
+    log.info("LocalVLM 1-pass 시작: adjacent_candidates=%s", len(adjacent_reviewable))
+    adjacent_results, adjacent_errors, adjacent_meta = _run_vlm_phase("adjacent", adjacent_reviewable)
+
+    # Apply adjacent VLM approvals to the provisional chain before inspecting distant candidates.
+    adjacent_vlm_merges = 0
+    for result in adjacent_results:
+        scenes = _candidate_scene_indices(result)
+        decision = result.get("decision")
+        confidence = float(result.get("confidence", 0.0) or 0.0)
+        if (
+            len(scenes) == 2
+            and _is_adjacent_scene_pair({"scene_indices": scenes})
+            and decision in {"same_slide_build", "same_slide_annotation", "same_slide_duplicate"}
+            and result.get("should_merge_slide_group")
+            and confidence >= env_float("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", 0.95)
+        ):
+            provisional_union(scenes[0], scenes[1])
+            adjacent_vlm_merges += 1
+
+    log.info(
+        "LocalVLM 1-pass applied: adjacent_merges=%s results=%s errors=%s",
+        adjacent_vlm_merges,
+        len(adjacent_results),
+        len(adjacent_errors),
+    )
+
+    post_group_results: list[dict[str, Any]] = []
+    post_candidates_for_vlm: list[tuple[int, dict[str, Any]]] = []
+    for candidate_index, candidate in post_adjacent_reviewable:
+        if scenes_in_same_provisional_group(candidate):
+            post_group_results.append({
+                "candidate_type": candidate.get("candidate_type"),
+                "source": "vlm_prefilter_provisional_adjacent_group",
+                "decision": "same_slide_duplicate",
+                "confidence": 0.99,
+                "representative_scene_index": (_candidate_scene_indices(candidate) or [None])[-1],
+                "should_merge_slide_group": True,
+                "should_drop_scene": False,
+                "reason": "candidate is already connected by adjacent OCR/VLM approvals",
+                "scene_indices": _candidate_scene_indices(candidate),
+                "raw_response": {"provisional_adjacent_group": True},
+                "candidate_index": candidate_index,
+                "prefiltered": True,
+                "vlm_phase": "post_adjacent_skipped",
+            })
+        else:
+            post_candidates_for_vlm.append((candidate_index, candidate))
+
+    log.info(
+        "LocalVLM 2-pass 시작: post_adjacent_candidates=%s skipped_by_group=%s",
+        len(post_candidates_for_vlm),
+        len(post_group_results),
+    )
+    post_results, post_errors, post_meta = _run_vlm_phase("post_adjacent", post_candidates_for_vlm)
+
+    results = list(prefiltered_results) + adjacent_results + post_group_results + post_results
+    errors = adjacent_errors + post_errors
+    batches = [adjacent_meta.get("batch_count", 0), post_meta.get("batch_count", 0)]
+    batch_count = sum(batches)
+    worker_count = max(adjacent_meta.get("worker_count", 0), post_meta.get("worker_count", 0))
+    indexed_candidates = adjacent_reviewable + post_candidates_for_vlm
     omitted_retry_count = 0
-    if batches and errors:
-        retry_indexes = sorted({
-            int(item.get("candidate_index", 0) or 0)
-            for item in errors
-            if item.get("error") == "VLM batch response omitted candidate"
-        })
-        retry_indexes = [idx for idx in retry_indexes if 1 <= idx <= len(candidates)]
-        if retry_indexes:
-            omitted_retry_count = len(retry_indexes)
-            retry_set = set(retry_indexes)
-            errors = [
-                item
-                for item in errors
-                if int(item.get("candidate_index", 0) or 0) not in retry_set
-            ]
-            retry_worker_count = local_vlm_worker_count(len(retry_indexes))
-            if retry_worker_count <= 1:
-                iterator = (review_one(idx, candidates[idx - 1]) for idx in retry_indexes)
-                for kind, payload_item in iterator:
-                    payload_item["batch_retry"] = True
-                    if kind == "result":
-                        results.append(payload_item)
-                    else:
-                        errors.append(payload_item)
-            else:
-                with ThreadPoolExecutor(max_workers=retry_worker_count) as executor:
-                    futures = {
-                        executor.submit(review_one, idx, candidates[idx - 1]): idx
-                        for idx in retry_indexes
-                    }
-                    for future in as_completed(futures):
-                        kind, payload_item = future.result()
-                        payload_item["batch_retry"] = True
-                        if kind == "result":
-                            results.append(payload_item)
-                        else:
-                            errors.append(payload_item)
-
     results.sort(key=lambda item: int(item.get("candidate_index", 0) or 0))
     errors.sort(key=lambda item: int(item.get("candidate_index", 0) or 0))
+    ocr_diagnostics_path = slides_dir / "ocr_prefilter_diagnostics.json"
+    ocr_diagnostics_payload = {
+        "enabled": ocr_enabled(),
+        "threshold": ocr_similarity_threshold(),
+        "adjacent_threshold": adjacent_ocr_similarity_threshold(),
+        "candidate_count": len(candidates),
+        "reviewed_candidate_count": total_candidates,
+        "attempted_count": len(ocr_prefilter_diagnostics),
+        "prefiltered_count": len(prefiltered_results),
+        "review_required_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "review_required"),
+        "not_prefiltered_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "not_prefiltered"),
+        "error_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "error"),
+        "skipped_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "skipped"),
+        "phase": "final",
+        "diagnostics": ocr_prefilter_diagnostics,
+    }
+    ocr_diagnostics_path.write_text(
+        json.dumps(ocr_diagnostics_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    log.info("OCR prefilter diagnostics 저장: %s", ocr_diagnostics_path)
     _resolve_cross_candidate_conflicts(results)
+    results = _consolidate_pair_results(results)
 
     payload = {
         "status": "ok" if not errors else "partial",
-        "provider": os.getenv("VERILEC_VLM_PROVIDER", "ollama"),
-        "model": os.getenv("VERILEC_OLLAMA_MODEL", "gemma3:4b"),
+        "provider": os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama"),
+        "model": os.getenv("GRAPHLEC_OLLAMA_MODEL", "qwen3.5:9b"),
         "candidate_count": len(candidates),
+        "reviewed_candidate_count": total_candidates,
+        "prefiltered_count": len(prefiltered_results),
+        "ocr_prefilter": {
+            "enabled": ocr_enabled(),
+            "attempted_count": len(ocr_prefilter_diagnostics),
+            "reviewed_candidate_count": total_candidates,
+            "prefiltered_count": len(prefiltered_results),
+            "remaining_candidate_count": len(reviewable_candidates),
+            "review_required_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "review_required"),
+            "not_prefiltered_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "not_prefiltered"),
+            "error_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "error"),
+            "skipped_count": sum(1 for item in ocr_prefilter_diagnostics if item.get("status") == "skipped"),
+            "threshold": ocr_similarity_threshold(),
+            "adjacent_threshold": adjacent_ocr_similarity_threshold(),
+            "diagnostics_path": str(ocr_diagnostics_path),
+            "report_path": str(ocr_report_path),
+            "diagnostics": ocr_prefilter_diagnostics[:200],
+        },
         "candidate_preparation": candidate_preparation,
-        "batch_count": len(batches),
+        "batch_count": batch_count,
+        "phase_counts": {"adjacent": adjacent_meta, "post_adjacent": post_meta},
         "batch_image_limit": batch_image_limit,
         "batch_overlap_images": batch_overlap_images,
         "batch_candidate_limit": batch_candidate_limit,
@@ -1499,13 +2269,26 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
         "results": results,
         "errors": errors,
     }
+    final_decision_counts = dict(sorted(Counter(str(item.get("decision") or "unknown") for item in results).items()))
+    log.info(
+        "LocalVLM review done: candidates=%s ocr_prefiltered=%s adjacent=%s post_adjacent=%s post_skipped=%s results=%s errors=%s decisions=%s elapsed=%.1fs",
+        len(candidates),
+        len(prefiltered_results),
+        adjacent_meta.get("candidate_count", 0),
+        post_meta.get("candidate_count", 0),
+        len(post_group_results),
+        len(results),
+        len(errors),
+        final_decision_counts,
+        payload["elapsed_sec"],
+    )
     results_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
 
 def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    min_confidence = env_float("VERILEC_VLM_APPLY_MIN_CONFIDENCE", 0.65)
-    merge_min_confidence = max(min_confidence, env_float("VERILEC_VLM_MERGE_MIN_CONFIDENCE", 0.95))
+    min_confidence = env_float("GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE", 0.65)
+    merge_min_confidence = max(min_confidence, env_float("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", 0.95))
     results = review_payload.get("results", [])
 
     scenes = sorted({int(item.get("scene_index")) for item in metadata if item.get("scene_index") is not None})
@@ -1556,6 +2339,10 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
     veto_pairs: set[tuple[int, int]] = set()
     approved_pairs: set[tuple[int, int]] = set()
     reviewed_pairs: set[tuple[int, int]] = set()
+
+    def is_adjacent_pair(scene_a: int, scene_b: int) -> bool:
+        return abs(int(scene_a) - int(scene_b)) == 1
+
     for result in results:
         scene_indices = known_scene_indices(result.get("scene_indices", []))
         decision = result.get("decision")
@@ -1569,7 +2356,7 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
 
         if confidence < min_confidence:
             continue
-        if decision in {"same_slide_duplicate", "same_slide_build"}:
+        if decision in {"same_slide_duplicate", "same_slide_build", "same_slide_annotation"}:
             if not result.get("should_merge_slide_group", False):
                 continue
             if confidence < merge_min_confidence:
@@ -1577,8 +2364,9 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
             if len(scene_indices) >= 2:
                 first = scene_indices[0]
                 for other in scene_indices[1:]:
-                    union(first, other)
-                    approved_pairs.add(tuple(sorted((first, other))))
+                    if is_adjacent_pair(first, other):
+                        union(first, other)
+                        approved_pairs.add(tuple(sorted((first, other))))
             if decision == "same_slide_build":
                 representative = known_scene_indices([result.get("representative_scene_index")])
                 if not representative and scene_indices:
@@ -1588,6 +2376,14 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
         elif decision == "transition_noise" and result.get("should_drop_scene", True):
             drop_indices = known_scene_indices(result.get("middle_scene_indices") or scene_indices)
             dropped_scenes.update(drop_indices)
+            # A verified [same slide, transient middle, same slide] sandwich
+            # makes the two outer states adjacent after the middle is dropped.
+            # This is the sole intentional non-adjacent union in this stage.
+            middle_set = set(drop_indices)
+            outer_scenes = [scene for scene in scene_indices if scene not in middle_set]
+            if len(outer_scenes) == 2:
+                union(outer_scenes[0], outer_scenes[1])
+                approved_pairs.add(tuple(sorted((outer_scenes[0], outer_scenes[1]))))
         elif decision == "different_slide" and len(scene_indices) >= 2:
             for i, scene_a in enumerate(scene_indices):
                 for scene_b in scene_indices[i + 1:]:
@@ -1615,7 +2411,7 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
         members = known_scene_indices(item.get("same_slide_group") or [])
         for scene_a, scene_b in zip(sorted(set(members)), sorted(set(members))[1:]):
             pair = tuple(sorted((scene_a, scene_b)))
-            if pair not in reviewed_pairs:
+            if is_adjacent_pair(scene_a, scene_b) and pair not in reviewed_pairs:
                 existing_adjacent_pairs.add(pair)
 
     for scene_a, scene_b in sorted(existing_adjacent_pairs | approved_pairs):
@@ -1627,7 +2423,6 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
     split_groups = list(split_group_by_root.values())
 
     group_of = {scene: sorted(members) for members in split_groups for scene in members}
-    canonical_by_root: dict[int, int] = {}
     canonical_by_scene: dict[int, int] = {}
     for members in split_groups:
         preferred = sorted(scene for scene in members if scene in build_representatives)
@@ -1638,39 +2433,15 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
         for scene in members:
             canonical_by_scene[scene] = canonical
 
-    for item in metadata:
-        idx = int(item.get("scene_index", 0) or 0)
-        members = group_of.get(idx, [idx])
-        canonical = canonical_by_scene.get(idx, members[0])
-        item["duplicate_of"] = [x for x in members if x != idx]
-        item["same_slide_group"] = members
-        item["same_slide_canonical"] = canonical
-        item["same_slide_group_size"] = len(members)
-        item["slide_group"] = members
-        item["slide_canonical_index"] = canonical
-        item["slide_group_size"] = len(members)
-        scene_results = result_by_scene.get(idx, [])
-        if scene_results:
-            item["vlm_review_decisions"] = [
-                {
-                    "decision": r.get("decision"),
-                    "confidence": r.get("confidence"),
-                    "scene_indices": r.get("scene_indices"),
-                    "middle_scene_indices": r.get("middle_scene_indices"),
-                    "representative_scene_index": r.get("representative_scene_index"),
-                    "reason": r.get("reason"),
-                }
-                for r in scene_results
-            ]
-        if any(r.get("decision") == "different_slide" and float(r.get("confidence", 0.0) or 0.0) >= min_confidence for r in scene_results):
-            item["vlm_different_slide_veto"] = True
-        if idx == canonical:
-            item["vlm_preferred_representative"] = idx in build_representatives
-        if idx in dropped_scenes:
-            item["is_transition_noise"] = True
-            item["manual_review"] = False
-        elif any(r.get("decision") == "uncertain" for r in scene_results):
-            item["manual_review"] = True
+    _assign_resolved_scene_groups(
+        metadata,
+        group_of=group_of,
+        canonical_by_scene=canonical_by_scene,
+        build_representatives=build_representatives,
+        result_by_scene=result_by_scene,
+        min_confidence=min_confidence,
+        dropped_scenes=dropped_scenes,
+    )
 
     if dropped_scenes:
         return [
