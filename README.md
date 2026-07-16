@@ -28,17 +28,10 @@ tests/      pytest 회귀 스위트 (DB/백엔드 없으면 통합 테스트 자
 # 1. 환경변수 — .env.example을 복사해 API 키를 채운다
 cp .env.example .env
 
-# 2. Postgres (호스트 포트 5433로 노출)
-docker compose up -d db
-
-# 3. 파이썬 의존성
-python3.12 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt -r pipeline/requirements.verify.txt
-
-# 4. 백엔드
+# 2. 백엔드
 ./scripts/verilec_compose.sh up -d --build --force-recreate
 
-# 5. 프론트 (5173, /api 프록시로 백엔드 연결)
+# 3. 프론트 (5173, /api 프록시로 백엔드 연결)
 VERILEC_API_TARGET=http://localhost:8003 ./scripts/dev_frontend.sh
 ```
 
