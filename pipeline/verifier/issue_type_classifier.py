@@ -97,10 +97,7 @@ def _split_csv(value: str | None) -> list[str]:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = (
-        _split_csv(os.getenv("ISSUE_TYPE_CLASSIFIER_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_ISSUE_TYPE_CLASSIFIER_MODELS"))
-    )
+    configured = _split_csv(os.getenv("ISSUE_TYPE_CLASSIFIER_MODELS"))
     return configured or list(DEFAULT_MODELS)
 
 
@@ -335,53 +332,33 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
         return {
             "provider": "openai",
             "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-                default="gpt-5.4",
-            ),
+            "resolved_model": _env_first("ISSUE_TYPE_CLASSIFIER_GPT_MODEL", default="gpt-5.4"),
         }
     if lowered in {"claude", "cluade", "anthropic"}:
         return {
             "provider": "anthropic",
             "alias": raw,
             "resolved_model": _resolve_anthropic_model(
-                _env_first(
-                    "ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-                    "VERIFIER_ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-                    default="claude-sonnet-4.5",
-                )
+                _env_first("ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL", default="claude-sonnet-4.5")
             ),
         }
     if lowered in {"grok", "xai"}:
         return {
             "provider": "xai",
             "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-                default="grok-4",
-            ),
+            "resolved_model": _env_first("ISSUE_TYPE_CLASSIFIER_GROK_MODEL", default="grok-4"),
         }
     if lowered in {"deepseek", "deepseek-default"}:
         return {
             "provider": "deepseek",
             "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_DEEPSEEK_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_DEEPSEEK_MODEL",
-                default="deepseek-v4-flash",
-            ),
+            "resolved_model": _env_first("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_MODEL", default="deepseek-v4-flash"),
         }
     if lowered in {"gemini", "google"}:
         return {
             "provider": "gemini",
             "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_GEMINI_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GEMINI_MODEL",
-                default="gemini-2.5-flash",
-            ),
+            "resolved_model": _env_first("ISSUE_TYPE_CLASSIFIER_GEMINI_MODEL", default="gemini-2.5-flash"),
         }
     if lowered.startswith(("gpt", "o1", "o3")):
         return {"provider": "openai", "alias": raw, "resolved_model": raw}
@@ -1344,12 +1321,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=int(
-            os.getenv(
-                "VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE",
-                os.getenv("ISSUE_TYPE_CLASSIFIER_BATCH_SIZE", "20"),
-            )
-        ),
+        default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_BATCH_SIZE", "20")),
     )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_TOKENS", "8192")))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", "12")))

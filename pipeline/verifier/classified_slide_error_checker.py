@@ -77,10 +77,7 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = (
-        _split_csv(os.getenv("CLASSIFIED_SLIDE_ERROR_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_CLASSIFIED_SLIDE_ERROR_MODELS"))
-    )
+    configured = _split_csv(os.getenv("CLASSIFIED_SLIDE_ERROR_MODELS"))
     return configured or list(DEFAULT_MODELS)
 
 
@@ -459,7 +456,7 @@ def detect_classified_slide_errors(
     slide_classified_path: str | Path | None,
     models: list[str] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    max_workers: int = 1,
+    max_workers: int = 12,
     max_tokens: int = 4096,
     current_date: str | None = None,
     min_score: float | None = None,

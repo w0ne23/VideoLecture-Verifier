@@ -18,11 +18,7 @@ def issue_judge_min_confidence() -> float:
 
 
 def _issue_judge_batch_max_workers() -> int:
-    raw = (
-        os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS")
-        or os.getenv("VERIFIER_JUDGE_BATCH_MAX_WORKERS")
-        or "2"
-    )
+    raw = os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS", "12")
     try:
         return max(1, int(raw))
     except ValueError:

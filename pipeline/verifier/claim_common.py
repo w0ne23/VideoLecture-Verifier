@@ -510,6 +510,17 @@ def _call_llm(
                 kwargs.pop("prompt_cache_key", None)
                 kwargs.pop("prompt_cache_retention", None)
                 return client.chat.completions.create(**kwargs)
+            except Exception as e:
+                # Some reasoning-capable GPT endpoints only accept their
+                # default temperature. Retry once without it rather than
+                # aborting an entire verifier run.
+                message = str(e).lower()
+                if "temperature" not in kwargs or "temperature" not in message or not (
+                    "unsupported" in message or "does not support" in message
+                ):
+                    raise
+                kwargs.pop("temperature", None)
+                return client.chat.completions.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
         return resp.choices[0].message.content or "", _extract_openai_usage(resp, model, stage)

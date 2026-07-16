@@ -20,7 +20,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import groq_client
 
@@ -324,15 +324,20 @@ def _concat_audio_slices(audio_path: str, ranges: list[tuple[float, float]], chu
 
 # ── Groq 호출 ────────────────────────────────────────────────────
 
-def _call_groq(chunk_path: str) -> Optional[object]:
+def _call_groq(chunk_path: str, prompt: str = "") -> Optional[object]:
     """Groq Whisper API 호출. 실패 시 None."""
     try:
         with open(chunk_path, "rb") as f:
+            request = {
+                "file": (chunk_path, f.read()),
+                "model": "whisper-large-v3-turbo",
+                "language": "ko",
+                "response_format": "verbose_json",
+            }
+            if prompt.strip():
+                request["prompt"] = prompt.strip()
             return groq_client.audio.transcriptions.create(
-                file=(chunk_path, f.read()),
-                model="whisper-large-v3-turbo",
-                language="ko",
-                response_format="verbose_json",
+                **request,
             )
     except Exception as e:
         print(f"    [Groq 오류] {e}")
@@ -345,6 +350,7 @@ def _transcribe_chunks_from_audio(
     time_offset: float,
     base_dir: Path,
     label_prefix: str = "",
+    prompt_for_range: Optional[Callable[[float, float], str]] = None,
 ) -> list[dict]:
     """
     이미 추출된 audio_path에서 무음 제거 후 묶은 chunks를 Groq에 전송한다.
@@ -364,7 +370,10 @@ def _transcribe_chunks_from_audio(
         if not p.exists() or p.stat().st_size == 0:
             continue
 
-        transcription = _call_groq(str(chunk_path))
+        source_start = time_offset + ranges[0][0]
+        source_end = time_offset + ranges[-1][1]
+        prompt = prompt_for_range(source_start, source_end) if prompt_for_range else ""
+        transcription = _call_groq(str(chunk_path), prompt=prompt)
         try:
             from .cost_report import record_audio_call
 
@@ -412,6 +421,7 @@ def transcribe_range(
     start_sec: float,
     end_sec: float,
     output_dir: Path,
+    prompt_for_range: Optional[Callable[[float, float], str]] = None,
 ) -> dict:
     """
     영상의 [start_sec, end_sec] 구간을 전사한다.
@@ -460,6 +470,7 @@ def transcribe_range(
             time_offset=start_sec,
             base_dir=base_dir,
             label_prefix=f"{int(start_sec)}_",
+            prompt_for_range=prompt_for_range,
         )
 
         # silences를 영상 절대 시간으로 변환
@@ -477,7 +488,12 @@ def transcribe_range(
         Path(audio_path).unlink(missing_ok=True)
 
 
-def transcribe_video(video_path: str, duration: float, output_dir=None) -> dict:
+def transcribe_video(
+    video_path: str,
+    duration: float,
+    output_dir=None,
+    prompt_for_range: Optional[Callable[[float, float], str]] = None,
+) -> dict:
     """
     영상 전체를 전사한다 (metadata 없이 fallback 경로).
 
@@ -494,4 +510,5 @@ def transcribe_video(video_path: str, duration: float, output_dir=None) -> dict:
         start_sec=0.0,
         end_sec=duration,
         output_dir=Path(output_dir) if output_dir else Path("."),
+        prompt_for_range=prompt_for_range,
     )

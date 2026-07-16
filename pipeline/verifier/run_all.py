@@ -64,17 +64,20 @@ def _load_json_file(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 12)
+DEFAULT_VERIFIER_MAX_WORKERS = _env_int("VERIFIER_MAX_WORKERS", 12)
+DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int(
+    "ISSUE_JUDGE_MAX_WORKERS", DEFAULT_VERIFIER_MAX_WORKERS
+)
+DEFAULT_WEB_GROUNDING_MAX_WORKERS = _env_int(
+    "CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", 1
+)
 CLAIM_EXTRACT_BATCH_SIZE = _env_int(
     "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
     _env_int("VERIFIER_BATCH_SIZE", 4),
 )
 ISSUE_DETECTOR_BATCH_SIZE = _env_int("VERIFIER_ISSUE_DETECTOR_BATCH_SIZE", 4)
-ISSUE_TYPE_CLASSIFIER_BATCH_SIZE = _env_int("VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE", 20)
-CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE = _env_int(
-    "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
-    _env_int("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", 5),
-)
+ISSUE_TYPE_CLASSIFIER_BATCH_SIZE = _env_int("ISSUE_TYPE_CLASSIFIER_BATCH_SIZE", 20)
+CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE = _env_int("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", 5)
 
 
 class _DockerLogTee:
@@ -156,10 +159,7 @@ def _split_model_specs(value: str | None) -> list[str]:
 
 
 def _default_issue_judge_models() -> list[str]:
-    configured = (
-        _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
-        or _split_model_specs(os.getenv("VERIFIER_ISSUE_JUDGE_MODELS"))
-    )
+    configured = _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
     return configured or ["gpt-5.4", "claude-sonnet-4.5"]
 
 
@@ -1129,7 +1129,7 @@ def run_classified_issue_pipeline(
     issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     issue_type_batch_size: int = ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
     verifier_batch_size: int = CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
-    max_workers: int = 1,
+    max_workers: int = DEFAULT_VERIFIER_MAX_WORKERS,
     max_tokens: int = 8192,
     stage_notify: Callable[[str, str], None] | None = None,
 ) -> dict:
@@ -1287,7 +1287,7 @@ def run_classified_issue_pipeline(
                 verifier_result = ground_classified_issues(
                     verifier_result,
                     current_date=current_date or datetime.now().date().isoformat(),
-                    max_workers=max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", str(max_workers)))),
+                    max_workers=DEFAULT_WEB_GROUNDING_MAX_WORKERS,
                     max_tokens=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")),
                 )
                 verifier_result["output_path"] = str(verifier_output_path)
@@ -1423,7 +1423,7 @@ def main():
         "--issue-type-batch-size",
         type=int,
         default=ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
-        help="Issue_type classification에서 한 prompt에 넣을 issue 후보 수. 기본 VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE 또는 20",
+        help="Issue_type classification에서 한 prompt에 넣을 issue 후보 수. 기본 ISSUE_TYPE_CLASSIFIER_BATCH_SIZE 또는 20",
     )
     parser.add_argument(
         "--verifier-batch-size",
@@ -1431,7 +1431,7 @@ def main():
         dest="verifier_batch_size",
         type=int,
         default=CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
-        help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
+        help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE 또는 5",
     )
     parser.add_argument(
         "--issue-judge-min-confidence",

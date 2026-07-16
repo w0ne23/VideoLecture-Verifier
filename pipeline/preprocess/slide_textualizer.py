@@ -80,15 +80,18 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    provider: str = os.getenv("VERILEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
+    provider: str = os.getenv(
+        "GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER",
+        os.getenv("VERILEC_SLIDE_TEXTUALIZER_PROVIDER", "openai"),
+    )
     model: str = os.getenv(
-        "VERILEC_SLIDE_TEXTUALIZER_MODEL",
-        os.getenv("VERILEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
+        "GRAPHLEC_SLIDE_TEXTUALIZER_MODEL",
+        os.getenv("VERILEC_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini"),
     )
     gemini_model: str = GEMINI_GENERATIVE_MODEL
     max_retries: int = 3
     retry_delay: float = 5.0
-    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "1"))
+    workers: int = max(1, int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "15")))
     ocr_provider: str = os.getenv("GRAPHLEC_SLIDE_OCR_PROVIDER", "none")
     ocr_model_dir: str = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "")
     ocr_lang: str = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual")
@@ -666,13 +669,17 @@ class T1Extractor:
         last_exc = None
         for attempt in range(self.config.max_retries):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.config.model,
-                    messages=[{"role": "user", "content": content}],
-                    response_format={"type": "json_object"},
-                    max_completion_tokens=4096,
-                    temperature=0,
-                )
+                request_kwargs = {
+                    "model": self.config.model,
+                    "messages": [{"role": "user", "content": content}],
+                    "response_format": {"type": "json_object"},
+                    "max_completion_tokens": 4096,
+                }
+                # GPT-5 계열은 temperature 파라미터를 지원하지 않으므로
+                # 구형 모델에서만 기존 temperature=0 동작을 유지한다.
+                if not self.config.model.strip().lower().startswith("gpt-5"):
+                    request_kwargs["temperature"] = 0
+                response = self.client.chat.completions.create(**request_kwargs)
                 try:
                     from .cost_report import record_model_call
 

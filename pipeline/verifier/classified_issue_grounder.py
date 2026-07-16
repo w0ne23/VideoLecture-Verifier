@@ -331,7 +331,7 @@ def _parse_line_response(text: str) -> dict[str, Any]:
 
 
 def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -> tuple[dict[str, Any], dict[str, int]]:
-    model = os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL", os.getenv("VERIFIER_GROUNDING_MODEL", "gemini-2.5-flash")).strip()
+    model = os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL", "gemini-2.5-flash").strip()
     prompt = _build_grounding_prompt(issue, current_date)
     contents = [types.Part.from_text(text=prompt)]
     config = types.GenerateContentConfig(

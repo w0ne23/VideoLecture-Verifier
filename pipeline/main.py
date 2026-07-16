@@ -5,8 +5,8 @@ main.py
 실행 흐름:
   [병렬] P1A extract_slides            — 슬라이드 프레임 추출
          P1B analyze_audio_quality     — 오디오 품질 분석
-  [병렬] P2A textualize_slides         — 슬라이드 텍스트 + 강조 추출
-         P2B transcribe_audio          — 전체 전사 (scene 매핑용)
+  [직렬] P2A textualize_slides         — 슬라이드 텍스트 + 강조 추출
+         P2B transcribe_audio          — 슬라이드 용어 힌트 기반 전체 전사
   [병렬] P3A analyze_annotation        — 필기 강조 분석
          P3B process_audio             — 오디오 후처리
                      text_processor    — 2-pass 교정 + 침묵 구간 저장
@@ -24,6 +24,7 @@ Usage:
 
 import json
 import os
+import re
 import sys
 import time
 import argparse
@@ -166,6 +167,7 @@ def _transcribe_by_scene(
     meta_path: Optional[str],
     slide_ranges: list[dict],
     output_dir: Path,
+    prompt_for_range: Optional[Callable[[float, float], str]] = None,
 ) -> dict:
     """
     전역 전사 후 scene 시간축에 매핑하기 위한 세그먼트를 생성한다.
@@ -180,11 +182,11 @@ def _transcribe_by_scene(
 
     if not meta_path or not slide_ranges:
         print("  ℹ️ metadata 없음 → 전체 전사 방식 사용")
-        return transcribe_video(video_path, duration, output_dir=output_dir)
+        return transcribe_video(video_path, duration, output_dir=output_dir, prompt_for_range=prompt_for_range)
 
     unique_scenes = len(slide_ranges)
     print(f"  ℹ️ scene {unique_scenes}개 기준 시간 매핑용 전체 전사 사용")
-    return transcribe_video(video_path, duration, output_dir=output_dir)
+    return transcribe_video(video_path, duration, output_dir=output_dir, prompt_for_range=prompt_for_range)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -308,7 +310,96 @@ def textualize_slides(args, slides_dir: Path, output_dir: Path) -> dict:
     return {"textualized_path": str(textualized_path), "elapsed": elapsed}
 
 
-def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path) -> dict:
+def build_slide_prompt_provider(
+    textualized_path: str | Path | None,
+    slide_ranges: list[dict],
+) -> Optional[Callable[[float, float], str]]:
+    """청크 시간대와 겹치는 슬라이드 용어만 Groq Whisper prompt로 제공한다."""
+    # Groq Whisper prompts are helpful only for narrow, measured cases.  A
+    # large dynamic slide glossary can instead bias the transcript, so it is
+    # disabled by default and remains an explicit experiment switch.
+    if os.getenv("TRANSCRIBE_SLIDE_GLOSSARY_PROMPT", "0").strip() != "1" or not textualized_path:
+        return None
+    try:
+        with open(textualized_path, encoding="utf-8") as f:
+            textualized = json.load(f)
+    except (OSError, ValueError) as exc:
+        log.warning("슬라이드 Whisper 용어 힌트를 불러오지 못했습니다: %s", exc)
+        return None
+
+    # Existing Kiwi glossary extraction selects noun phrases, acronyms and
+    # foreign terms from t1 without another model call.
+    slide_texts: dict[int, dict] = {}
+    for scene in textualized.get("scenes", []) or []:
+        scene_index = scene.get("scene_index", scene.get("scene_number"))
+        if isinstance(scene_index, int):
+            slide_texts[scene_index] = {
+                "title": scene.get("title", ""),
+                "glossary_text": scene.get("t1", ""),
+                "scene_numbers": [scene_index],
+            }
+    try:
+        from .preprocess.text_processor import extract_glossary_term_records
+        term_records = extract_glossary_term_records(slide_texts)
+    except Exception as exc:
+        log.warning("Kiwi 슬라이드 용어 추출 실패: %s", exc)
+        return None
+    terms_by_scene: dict[int, list[str]] = {}
+    for record in term_records:
+        term = str(record.get("term", "") or "").strip()
+        for scene_index in record.get("source_scenes", []) or []:
+            if isinstance(scene_index, int) and term:
+                terms_by_scene.setdefault(scene_index, []).append(term)
+    if not terms_by_scene or not slide_ranges:
+        return None
+
+    max_terms = max(1, int(os.getenv("TRANSCRIBE_PROMPT_MAX_TERMS", "24")))
+    max_chars = max(80, int(os.getenv("TRANSCRIBE_PROMPT_MAX_CHARS", "320")))
+
+    def prompt_for_range(start_sec: float, end_sec: float) -> str:
+        matching = [
+            item for item in slide_ranges
+            if float(item.get("start_sec", 0.0)) <= end_sec
+            and float(item.get("end_sec", 0.0)) >= start_sec
+        ]
+        terms: list[str] = []
+        seen: set[str] = set()
+        for item in matching:
+            for term in terms_by_scene.get(item.get("scene_index"), []):
+                key = term.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    terms.append(term)
+
+        selected: list[str] = []
+        used_chars = 0
+        for term in terms:
+            extra_chars = len(term) + (2 if selected else 0)
+            if len(selected) >= max_terms or used_chars + extra_chars > max_chars:
+                break
+            selected.append(term)
+            used_chars += extra_chars
+        if not selected:
+            return ""
+        context = os.getenv("TRANSCRIBE_PROMPT_CONTEXT", "").strip()
+        prefix = f"{context}\n" if context else ""
+        return (
+            prefix
+            + "다음은 화면에 인쇄된 전문 용어의 표기 참고용입니다. "
+            + "한글 표기가 있는 항목은 한글 표기를 우선하고, 실제로 들리는 말만 전사하세요: "
+            + ", ".join(selected)
+        )
+
+    return prompt_for_range
+
+
+def transcribe_audio(
+    args,
+    meta_path: str,
+    duration: float,
+    output_dir: Path,
+    textualized_path: str | Path | None = None,
+) -> dict:
     from .segment_grouper import load_slide_ranges
 
     stem = Path(args.input).stem
@@ -320,7 +411,17 @@ def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path) ->
     _banner("P2B transcribe_audio — 전체 전사  (Groq Whisper)")
     t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-    transcribe_result = _transcribe_by_scene(args.input, duration, meta_path, slide_ranges, output_dir)
+    prompt_for_range = build_slide_prompt_provider(textualized_path, slide_ranges)
+    if prompt_for_range:
+        print("  ℹ️ 현재 슬라이드의 전문 용어를 Whisper 전사 프롬프트에 반영합니다.")
+    transcribe_result = _transcribe_by_scene(
+        args.input,
+        duration,
+        meta_path,
+        slide_ranges,
+        output_dir,
+        prompt_for_range=prompt_for_range,
+    )
     payload = {
         "video_path": args.input,
         "segment_count": len(transcribe_result.get("segments", [])),

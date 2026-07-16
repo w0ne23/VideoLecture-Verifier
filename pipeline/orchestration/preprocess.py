@@ -49,27 +49,29 @@ def run_preprocess_pipeline(
     print(f"\n  ✓ P1 extract_media 완료 — 슬라이드 추출 + 오디오 품질 분석  ({timings['P1 extract_media total — 슬라이드 추출 + 오디오 품질 분석 총합']:.1f}초)")
     print("─" * 70)
 
-    helpers._banner("P2 textualize_transcribe — 슬라이드 텍스트화 + 전체 전사")
+    helpers._banner("P2 textualize_transcribe — 슬라이드 텍스트화 → 용어 힌트 전사")
     t_parallel = time.time()
     transcript_result: dict = {}
 
     notify_stage("preprocess_textualize_transcribe", "run")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_2a = executor.submit(helpers.textualize_slides, args, slides_dir, output_dir)
-        future_2b = executor.submit(helpers.transcribe_audio, args, meta_path, duration, output_dir)
-        for future in as_completed([future_2a, future_2b]):
-            if future is future_2a:
-                r2 = future.result()
-                textualized_path = r2["textualized_path"]
-                timings["P2A textualize_slides — 슬라이드 텍스트화"] = r2["elapsed"]
-            else:
-                transcript_result = future.result()
-                timings["P2B transcribe_audio — 전체 전사"] = transcript_result["elapsed"]
+    # Whisper prompt에 현재 시간대의 슬라이드 전문 용어를 넣기 위해,
+    # 텍스트화 결과가 준비된 다음에 전사를 시작한다.
+    r2 = helpers.textualize_slides(args, slides_dir, output_dir)
+    textualized_path = r2["textualized_path"]
+    timings["P2A textualize_slides — 슬라이드 텍스트화"] = r2["elapsed"]
+    transcript_result = helpers.transcribe_audio(
+        args,
+        meta_path,
+        duration,
+        output_dir,
+        textualized_path=textualized_path,
+    )
+    timings["P2B transcribe_audio — 전체 전사"] = transcript_result["elapsed"]
 
     timings["P2 textualize_transcribe total — 텍스트화 + 전사 총합"] = time.time() - t_parallel
     notify_stage("preprocess_textualize_transcribe", "done")
-    print(f"\n  ✓ P2 textualize_transcribe 완료 — 슬라이드 텍스트화 + 전체 전사  ({timings['P2 textualize_transcribe total — 텍스트화 + 전사 총합']:.1f}초)")
+    print(f"\n  ✓ P2 textualize_transcribe 완료 — 슬라이드 텍스트화 + 용어 힌트 전사  ({timings['P2 textualize_transcribe total — 텍스트화 + 전사 총합']:.1f}초)")
     print("─" * 70)
 
     helpers._banner("P3 build_audio_context — 오디오 context 후처리")
