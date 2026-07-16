@@ -35,11 +35,11 @@ docker compose up -d db
 python3.12 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt -r pipeline/requirements.verify.txt
 
-# 4. 백엔드 (기본 8000, 포트가 차 있으면 PORT=8010)
-PORT=8010 ./scripts/dev_backend.sh
+# 4. 백엔드
+./scripts/verilec_compose.sh up -d --build --force-recreate
 
 # 5. 프론트 (5173, /api 프록시로 백엔드 연결)
-VERILEC_API_TARGET=http://localhost:8010 ./scripts/dev_frontend.sh
+VERILEC_API_TARGET=http://localhost:8003 ./scripts/dev_frontend.sh
 ```
 
 브라우저에서 http://localhost:5173 → 영상 업로드 → 진행 표시 → 검증 결과.
