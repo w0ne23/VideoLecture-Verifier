@@ -331,6 +331,153 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+_BRACKET_OPENERS = {"(": ")", "[": "]", "{": "}"}
+_BRACKET_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _find_bracket_mismatch(text: str) -> str | None:
+    """스택 기반으로 괄호 짝을 확인합니다. 사람이 눈으로 세는 대신 결정론적으로 계산하므로
+    LLM에게 판단을 맡기는 것보다 정확합니다. 문제가 있으면 설명을, 없으면 None을 반환합니다."""
+    stack: list[str] = []
+    for ch in text:
+        if ch in _BRACKET_OPENERS:
+            stack.append(ch)
+        elif ch in _BRACKET_CLOSERS:
+            if not stack:
+                return f"'{ch}' 앞에 대응하는 여는 기호가 없습니다"
+            top = stack.pop()
+            if _BRACKET_OPENERS[top] != ch:
+                return f"'{top}'로 열었는데 '{ch}'로 닫혔습니다"
+    if stack:
+        return f"닫히지 않은 여는 기호가 남아 있습니다: {''.join(stack)}"
+    return None
+
+
+def _build_code_transcription_prompt(slide_no: int, title: str) -> str:
+    return f"""당신은 강의 슬라이드 이미지 속 코드나 수식을 있는 그대로 옮겨 적는 전사자입니다.
+
+대상 슬라이드 번호: {slide_no}
+제목: {title}
+
+작업:
+- 이 슬라이드 이미지 안에 프로그래밍 코드 또는 괄호가 포함된 수식이 있는지 확인하세요.
+- 있다면, 보이는 그대로 한 글자도 빠짐없이 옮겨 적으세요. 특히 소괄호()·대괄호[]·중괄호{{}}는
+  절대 생략하거나 요약하지 말고, 실제 이미지에 있는 개수와 위치 그대로 옮기세요.
+- 옳고 그름을 판단하거나 고치지 마세요. 이미지에 실제로 보이는 그대로 옮겨 적는 것이 유일한 목표입니다.
+- 코드/수식 블록이 여러 개면 각각 따로 옮겨 적으세요.
+- 코드나 수식이 전혀 없으면 빈 배열을 출력하세요.
+
+출력 형식은 JSON만 허용합니다.
+
+```json
+{{
+  "blocks": [
+    {{"transcription": "이미지에 보이는 그대로의 코드 또는 수식 텍스트"}}
+  ]
+}}
+```
+
+JSON 외 텍스트는 출력하지 마세요.
+"""
+
+
+def _check_code_syntax_mechanical(
+    *,
+    model: str,
+    slide: dict[str, Any],
+    img_dir: str | None,
+    max_tokens: int,
+) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+    """VLM에게는 '보이는 그대로 옮겨 적기'만 시키고, 괄호 짝 판단은 결정론적 알고리즘이
+    맡습니다. 시각 인식과 문법 판단을 한 번에 묶어서 시켰던 기존 방식보다 정확도가 높을
+    것으로 기대되는 별도 경로입니다.
+
+    OCR 텍스트로 코드/수식 슬라이드를 미리 걸러내지 않고 모든 슬라이드에 대해 무조건
+    전사를 시도합니다 — OCR이 코드 블록을 놓치면 걸러내기 자체가 실패해 탐지가 통째로
+    스킵되는 위험이 있었기 때문입니다. 대신 판단이 필요 없는 단순 전사 작업이라는 점을
+    이용해 저렴한 전용 모델(VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL, 기본 gpt-5.4-mini)을
+    써서 전체 슬라이드에 걸어도 비용 부담이 크지 않게 합니다."""
+    from . import claim_common as cc
+
+    slide_number = _slide_number(slide) or 0
+    img_path = _existing_path(slide.get("image_path")) or _find_slide_image(img_dir, slide_number)
+    img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
+    if not img_bytes:
+        return [], 0, cc._empty_token_usage()
+
+    transcribe_model = cc._resolve_stage_model("slide_error_transcribe") or model
+    title = str(slide.get("title", "") or "")
+    prompt = _build_code_transcription_prompt(slide_number, title)
+    response_format = (
+        {"type": "json_object"} if cc._supports_json_object_response_format(transcribe_model) else None
+    )
+    token_usage = cc._empty_token_usage()
+    api_calls = 0
+
+    for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
+        text, call_usage = cc._call_llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            image_bytes=img_bytes,
+            thinking_budget=0,
+            response_format=response_format,
+            stage="slide_error_transcribe",
+        )
+        api_calls += 1
+        cc._add_call_usage(token_usage, call_usage)
+        try:
+            payload = json.loads(_strip_json_fence(text))
+            blocks = payload.get("blocks", [])
+            if not isinstance(blocks, list):
+                blocks = []
+            errors: list[dict[str, Any]] = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                transcription = str(block.get("transcription", "") or "").strip()
+                if not transcription:
+                    continue
+                issue = _find_bracket_mismatch(transcription)
+                if not issue:
+                    continue
+                digest = hashlib.sha1(
+                    json.dumps(
+                        {
+                            "slide_number": slide_number,
+                            "error_type": "code_syntax",
+                            "transcription": transcription,
+                            "model": transcribe_model,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()[:10]
+                errors.append(
+                    {
+                        "slide_error_id": f"S{slide_number:03d}:{digest}",
+                        "slide_number": slide_number,
+                        "slide_title": slide.get("title", ""),
+                        "slide_image_path": slide.get("image_path", ""),
+                        "problematic_text": transcription,
+                        "corrected_text": "",
+                        "reason": f"괄호/기호 짝이 맞지 않습니다 ({issue}).",
+                        "confidence": 0.95,
+                        "severity_score": 0.95,
+                        "error_type": "code_syntax",
+                        "error_type_label": SLIDE_ERROR_TYPES["code_syntax"],
+                        "is_reportable": True,
+                        "source": "classified_slide_error_checker.mechanical",
+                        "model": transcribe_model,
+                    }
+                )
+            return errors, api_calls, token_usage
+        except Exception:
+            if attempt < cc.VERIFIER_PARSE_RETRIES:
+                continue
+    return [], api_calls, token_usage
+
+
 def _is_reportable_slide_error(
     problematic: str,
     corrected: str,
@@ -463,6 +610,7 @@ def _check_single_slide(
     token_usage = cc._empty_token_usage()
     api_calls = 0
 
+    errors: list[dict[str, Any]] | None = None
     for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
         text, call_usage = cc._call_llm(
             prompt,
@@ -484,11 +632,24 @@ def _check_single_slide(
                 error = _normalize_error(row, slide=slide, slide_number=slide_number, model=model)
                 if error:
                     errors.append(error)
-            return errors, False, api_calls, token_usage
+            break
         except Exception:
             if attempt < cc.VERIFIER_PARSE_RETRIES:
                 print(f"    ↺ 슬라이드 {slide_number} 오류 JSON 파싱 재시도 ({attempt+1}/{cc.VERIFIER_PARSE_RETRIES})")
-    return [], True, api_calls, token_usage
+
+    if errors is None:
+        return [], True, api_calls, token_usage
+
+    mech_errors, mech_calls, mech_usage = _check_code_syntax_mechanical(
+        model=model,
+        slide=slide,
+        img_dir=img_dir,
+        max_tokens=max_tokens,
+    )
+    errors.extend(mech_errors)
+    api_calls += mech_calls
+    cc._add_call_usage(token_usage, mech_usage)
+    return errors, False, api_calls, token_usage
 
 
 def detect_classified_slide_errors(
