@@ -32,6 +32,8 @@ DEFAULT_MIN_SCORE = 0.0
 SLIDE_ERROR_TYPES = {
     "text_error": "철자/표기 오류",
     "numeric_unit": "숫자/단위 표기 오류",
+    "code_syntax": "코드/수식 문법 오류",
+    "visual_defect": "이미지 깨짐·텍스트 겹침 등 시각적 결함",
     "other": "기타 슬라이드 표면 오류",
 }
 
@@ -250,12 +252,12 @@ def _slides_for_check(
 
 
 def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str:
-    return f"""당신은 강의 슬라이드에서 눈에 보이는 텍스트 오류를 찾는 교정자입니다.
+    return f"""당신은 강의 슬라이드에서 눈에 보이는 오류를 찾는 검수자입니다.
 
 중요:
 - 슬라이드 이미지가 원본입니다.
 - 아래 OCR 텍스트는 보조 정보일 뿐이며, 이미지와 다르면 이미지를 우선하세요.
-- 내용의 사실성, 더 좋은 표현, 문체 개선, 디자인 문제는 보고하지 마세요.
+- 내용의 사실성, 더 좋은 표현, 문체 개선, 미적 취향(배치·색상 선택 등 디자인 문제)은 보고하지 마세요.
 - 애매하면 보고하지 마세요.
 
 대상 슬라이드:
@@ -264,16 +266,31 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 - OCR 본문:
 {slide_text[:3000]}
 
-보고할 것:
-- 이미지에서 명백하게 보이는 한글 철자/표기 오류
-- 영문 철자 오류
-- 숫자/단위 오기
+보고할 것 (error_type별 기준):
+- text_error: 이미지에서 명백하게 보이는 한글/영문 철자·표기 오류
+- numeric_unit: 숫자/단위 오기. 단위 기호 자체가 틀린 경우뿐 아니라, 강의 맥락이나 도메인 지식으로
+  해석할 필요 없이 이미 그 자체로 하나의 값이 고정되어 있는 수치(상수, 정의상 고정된 환산 비율 등)가
+  실제 값과 다르게 적힌 경우도 포함합니다. 이런 고정값의 오기는 아래 "사실 오류" 배제 대상이
+  아닙니다 — 문맥 판단이 필요 없는, 이미 정답이 하나로 확정된 값이기 때문입니다.
+- code_syntax: 코드나 수식이 실제 문법 규칙을 명백히 위반한 경우(괄호 불일치, 연산자 누락 등).
+  의사코드나 개념 설명을 위해 의도적으로 단순화한 표기는 문법 오류로 보지 마세요.
+  괄호·중괄호·대괄호 짝은 전체적인 느낌만으로 판단하지 말고, 코드나 수식이 있는 줄마다 여는 기호
+  (소괄호·대괄호·중괄호)와 닫는 기호를 하나씩 순서대로 대응시켜 개수를 세어보세요. 한 줄이 끝났는데
+  대응하지 못한 여는 기호나 닫는 기호가 남아 있으면, 그 줄을 code_syntax로 보고하세요.
+  이 대응 확인은 프로그래밍 코드뿐 아니라 제곱근·분수·지수가 섞인 수식에도 똑같이 적용하세요.
+  수식에서는 괄호 기호가 작거나 다른 기호(근호, 분수선 등)와 붙어 있어 놓치기 쉬우니, 여는 기호가
+  나올 때마다 그 수식이 끝날 때까지 대응하는 닫는 기호가 실제로 나오는지 끝까지 따라가며 확인하세요.
+- visual_defect: 이미지가 깨지거나 로드되지 않아 내용을 알아볼 수 없는 경우, 텍스트·도형이
+  서로 겹쳐 내용을 읽을 수 없는 경우, 콘텐츠가 슬라이드 경계에 잘려 일부가 안 보이는 경우.
+  미적 취향의 문제가 아니라 콘텐츠를 읽을 수 없게 만드는 기능적 결함일 때만 보고하세요.
 
 보고하지 말 것:
 - OCR이 잘못 읽은 텍스트 자체
 - 용어 선택/문체/표현 선호
-- 사실 오류나 개념 오류
-- 띄어쓰기, 줄바꿈, 글자 간격, 디자인 문제
+- 사실 오류나 개념 오류 (단, 강의 맥락과 무관하게 이미 하나의 값으로 고정된 수치가 명백히 틀리게
+  적힌 경우는 예외입니다 — numeric_unit으로 보고하세요)
+- 띄어쓰기, 줄바꿈, 글자 간격
+- 배치·색상 선택 등 미적 취향의 디자인 문제 (읽는 데 지장이 없다면)
 - 약어, 고유명사, 표기 관례처럼 오류로 단정하기 어려운 것
 - 복합어 띄어쓰기 관례
 - 조사/어미/접속 표현 교정
@@ -286,8 +303,9 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 {{
   "slide_errors": [
     {{
-      "problematic_text": "슬라이드의 문제 표현",
-      "corrected_text": "수정 표현",
+      "error_type": "text_error | numeric_unit | code_syntax | visual_defect",
+      "problematic_text": "문제가 있는 원문 또는 위치·대상 설명",
+      "corrected_text": "수정 표현 (visual_defect면 빈 문자열)",
       "confidence": 0.0,
       "reason": "한두 문장 근거"
     }}
@@ -298,8 +316,12 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 지침:
 1. 확신이 0.80 미만이면 출력하지 마세요.
 2. "더 자연스럽다", "더 적절하다" 수준이면 출력하지 마세요.
-3. 오류가 없으면 {{"slide_errors": []}}만 출력하세요.
-4. JSON 외 텍스트 금지.
+3. error_type은 반드시 text_error, numeric_unit, code_syntax, visual_defect 중 하나만 사용하세요.
+4. visual_defect는 corrected_text를 빈 문자열로 두고, problematic_text에 문제 위치·대상을 설명하세요.
+5. 오류가 없으면 {{"slide_errors": []}}만 출력하세요.
+6. JSON 외 텍스트 금지.
+7. 슬라이드 하나에 오류가 여러 개 있을 수 있습니다. 하나를 찾았다고 바로 멈추지 말고, 슬라이드 전체를
+   끝까지 마저 확인해서 발견되는 오류를 모두 slide_errors 배열에 각각 출력하세요.
 """
 
 
@@ -309,10 +331,20 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
-def _is_reportable_slide_error(problematic: str, corrected: str, reason: str = "") -> bool:
+def _is_reportable_slide_error(
+    problematic: str,
+    corrected: str,
+    reason: str = "",
+    error_type: str = "text_error",
+) -> bool:
     p = str(problematic or "").strip()
-    c = str(corrected or "").strip()
     r = str(reason or "").strip().lower()
+
+    if error_type == "visual_defect":
+        # 고칠 "텍스트"가 없는 유형이라, 문제 위치/대상 설명과 근거만 있으면 됩니다.
+        return bool(p) and bool(r)
+
+    c = str(corrected or "").strip()
     if not p or not c or p == c:
         return False
     p_compact = _compact_no_space(p)
@@ -352,7 +384,13 @@ def _is_reportable_slide_error(problematic: str, corrected: str, reason: str = "
     return True
 
 
-def _guess_error_type(problematic: str, corrected: str) -> str:
+def _normalize_error_type(raw_value: object, problematic: str, corrected: str) -> str:
+    """LLM이 준 error_type을 검증하고, 없거나 잘못됐을 때만 텍스트로 추론합니다."""
+    value = str(raw_value or "").strip().lower()
+    if value in SLIDE_ERROR_TYPES:
+        return value
+    if not corrected:
+        return "visual_defect"
     if re.search(r"\d|[%℃°]|(?:ms|sec|kb|mb|gb|hz|khz|mhz|ghz)\b", f"{problematic} {corrected}", re.IGNORECASE):
         return "numeric_unit"
     return "text_error"
@@ -371,14 +409,15 @@ def _normalize_error(
     confidence = _clamp01(row.get("confidence"))
     if confidence < 0.80:
         return None
-    if not _is_reportable_slide_error(problematic, corrected, reason):
+    error_type = _normalize_error_type(row.get("error_type"), problematic, corrected)
+    if not _is_reportable_slide_error(problematic, corrected, reason, error_type):
         return None
-    error_type = _guess_error_type(problematic, corrected)
     severity_score = confidence
     digest = hashlib.sha1(
         json.dumps(
             {
                 "slide_number": slide_number,
+                "error_type": error_type,
                 "problematic_text": problematic,
                 "corrected_text": corrected,
                 "model": model,
