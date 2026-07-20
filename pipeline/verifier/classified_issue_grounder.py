@@ -1,7 +1,7 @@
 """Web grounding for classified issue verifier results.
 
 This stage runs after ``classified_issue_verifier`` and checks externally
-verifiable factual_error and temporal_error issues with Gemini Search.
+verifiable factual_error and temporal_error issues with GPT web grounding by default.
 It only grounds surfaced verifier candidates and can lower refuted candidates
 below the rejected threshold.
 """
@@ -141,7 +141,7 @@ def _grounding_model_specs() -> list[str]:
         or _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL"))
         or _split_csv(os.getenv("VERIFIER_GROUNDING_MODEL"))
     )
-    return configured or ["gemini", "gpt", "claude"]
+    return configured or ["gpt"]
 
 
 def _max_sources_per_trial() -> int:
@@ -1967,7 +1967,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default="",
-        help="comma/space-separated grounding models. Defaults to CLASSIFIED_ISSUE_GROUNDING_MODELS or gemini,gpt,claude.",
+        help="comma/space-separated grounding models. Defaults to CLASSIFIED_ISSUE_GROUNDING_MODELS or gpt.",
     )
     return parser
 
