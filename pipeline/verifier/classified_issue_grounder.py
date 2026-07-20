@@ -9,6 +9,8 @@ below the rejected threshold.
 from __future__ import annotations
 
 import argparse
+from difflib import SequenceMatcher
+from html.parser import HTMLParser
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -18,6 +20,9 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from google.genai import types
 
@@ -28,6 +33,11 @@ if str(_ROOT) not in sys.path:
 from config import get_gemini_client_sequence
 from utils import api_call_with_retry, is_retryable_api_error
 
+try:
+    from .issue_type_classifier import _call_llm, _resolve_model_spec, _split_csv
+except ImportError:
+    from verifier.issue_type_classifier import _call_llm, _resolve_model_spec, _split_csv
+
 
 GROUNDABLE_CATEGORIES = {"factual_error", "temporal_error"}
 GROUNDING_STATUSES = {
@@ -35,6 +45,7 @@ GROUNDING_STATUSES = {
     "refutes_issue",
     "insufficient_evidence",
     "grounding_unavailable",
+    "not_applicable",
 }
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
@@ -88,12 +99,47 @@ def _confirmed_threshold() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.80)
 
 
+def _resurrected_score() -> float:
+    configured = os.getenv("CLASSIFIED_ISSUE_GROUNDING_RESURRECT_SCORE")
+    if configured is not None and str(configured).strip():
+        return _clamp01(configured, _rejected_threshold() + 0.001)
+    return min(_confirmed_threshold() - 0.001, _rejected_threshold() + 0.001)
+
+
 def _status_from_score(score: float) -> str:
     if score >= _confirmed_threshold():
         return "confirmed"
     if score <= _rejected_threshold():
         return "rejected"
     return "professor_check"
+
+
+def _grounding_model_specs() -> list[str]:
+    configured = (
+        _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODELS"))
+        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODELS"))
+        or _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL"))
+        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODEL"))
+    )
+    return configured or ["gemini", "gpt", "claude"]
+
+
+def _max_sources_per_trial() -> int:
+    try:
+        return max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_SOURCES", "4")))
+    except ValueError:
+        return 4
+
+
+def _fetch_timeout_sec() -> float:
+    return max(1.0, _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_TIMEOUT_SEC"), 8.0))
+
+
+def _fetch_max_bytes() -> int:
+    try:
+        return max(32_768, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_MAX_BYTES", "1200000")))
+    except ValueError:
+        return 1_200_000
 
 
 def _usage_from_gemini(resp: Any, model: str) -> dict[str, Any]:
@@ -175,6 +221,8 @@ Current date: {current_date}
 
 Your task is to check whether external web evidence supports or refutes the issue.
 Only judge externally verifiable facts. Do not overrule lecture-context judgments unless web evidence clearly supports/refutes the factual claim.
+Record the exact search queries you used or would use to find the evidence.
+For each source URL, include the most relevant sentence or paragraph you relied on. Prefer short passages, but keep enough surrounding context to avoid misleading quote fragments.
 
 Issue category: {issue.get("category", "")}
 Resolved claim: {issue.get("resolved_claim", "")}
@@ -202,11 +250,13 @@ If the web evidence only addresses a different unit, region, product, or time pe
 Do not mark a claim false only because a source does not explicitly state it. Use claim_false only when reliable sources directly contradict the claim.
 If the claim can only be supported or rejected by indirect arithmetic, unofficial blogs, screenshots, or mixed sources, use uncertain unless the official source clearly supplies all required values.
 
-Return exactly these five lines. Do not use JSON or markdown.
+Return exactly these seven lines. Do not use JSON or markdown.
+SEARCH_QUERIES=query1 | query2
 CLAIM_VERDICT=claim_true | claim_false | uncertain
 STATUS=supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable
 REASON=one or two Korean sentences explaining the web-grounded judgment
 SOURCES=URL1, URL2
+EVIDENCE_PASSAGES=[{{"url":"URL1","quote_or_paragraph":"source passage","key_sentence":"most important sentence","stance":"supports_issue | refutes_issue | unclear","why_relevant":"why this passage matters"}}]
 SUMMARY=short Korean summary of the evidence
 
 Consistency requirements:
@@ -216,12 +266,78 @@ Consistency requirements:
 """
 
 
+def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> str:
+    prompt = _build_grounding_prompt(issue, current_date)
+    json_contract = """Return JSON only:
+{
+  "search_queries": ["query1", "query2"],
+  "claim_verdict": "claim_true | claim_false | uncertain",
+  "status": "supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable",
+  "issue_supported": true,
+  "reason": "one or two Korean sentences explaining the web-grounded judgment",
+  "evidence_sources": ["URL1", "URL2"],
+  "evidence_passages": [
+    {
+      "url": "URL1",
+      "quote_or_paragraph": "the relevant source sentence or paragraph",
+      "key_sentence": "the most important sentence",
+      "stance": "supports_issue | refutes_issue | unclear",
+      "why_relevant": "why this passage supports or refutes the issue"
+    }
+  ],
+  "evidence_summary": "short Korean summary of the evidence"
+}
+"""
+    return re.sub(
+        r"Return exactly these seven lines\..*?(?=Consistency requirements:)",
+        json_contract + "\n",
+        prompt,
+        flags=re.DOTALL,
+    )
+
+
 def _normalize_status(value: Any) -> str:
     status = str(value or "").strip().lower()
     return status if status in GROUNDING_STATUSES else "insufficient_evidence"
 
 
-def _parse_response(text: str) -> dict[str, Any]:
+def _normalize_evidence_passages(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(_strip_json_fence(value), strict=False)
+        except Exception:
+            value = []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("source") or item.get("source_url") or "").strip()
+        quote = str(
+            item.get("quote_or_paragraph")
+            or item.get("passage")
+            or item.get("paragraph")
+            or item.get("quote")
+            or item.get("text")
+            or ""
+        ).strip()
+        key_sentence = str(item.get("key_sentence") or item.get("sentence") or "").strip()
+        stance = _normalize_status(item.get("stance") or item.get("status") or item.get("supports"))
+        rows.append({
+            "id": str(item.get("id") or f"E{index}"),
+            "url": url,
+            "quote_or_paragraph": quote[:1800],
+            "key_sentence": key_sentence[:800],
+            "stance": stance if stance in {"supports_issue", "refutes_issue", "insufficient_evidence"} else "insufficient_evidence",
+            "why_relevant": str(item.get("why_relevant") or item.get("reason") or "").strip()[:800],
+        })
+    return rows
+
+
+def _parse_response(text: str, *, require_sources: bool = True) -> dict[str, Any]:
     raw = _strip_json_fence(text)
     try:
         payload = json.loads(raw, strict=False)
@@ -270,44 +386,61 @@ def _parse_response(text: str) -> dict[str, Any]:
         issue_supported = None
     else:
         status = _normalize_status(payload.get("status"))
-    sources = payload.get("evidence_sources", [])
+    sources = payload.get("evidence_sources", payload.get("sources", []))
     if not isinstance(sources, list):
-        sources = []
+        sources = [part for part in re.split(r"[,|\n]+", str(sources or "")) if part.strip()]
     sources = [
         str(source).strip()
         for source in sources
         if re.match(r"^https?://", str(source).strip(), flags=re.IGNORECASE)
     ]
-    if status in {"supports_issue", "refutes_issue"} and not sources:
+    search_queries = payload.get("search_queries", payload.get("queries", []))
+    if not isinstance(search_queries, list):
+        search_queries = [part for part in re.split(r"[|\n]+", str(search_queries or "")) if part.strip()]
+    search_queries = [str(query).strip() for query in search_queries if str(query).strip()]
+    if require_sources and status in {"supports_issue", "refutes_issue"} and not sources:
         status = "insufficient_evidence"
         claim_verdict = "uncertain"
         issue_supported = None
+    evidence_passages = _normalize_evidence_passages(
+        payload.get("evidence_passages")
+        or payload.get("passages")
+        or payload.get("evidence_quotes")
+        or payload.get("quotes")
+        or []
+    )
     return {
         "status": status,
         "claim_verdict": claim_verdict or "uncertain",
         "issue_supported": issue_supported if isinstance(issue_supported, bool) else None,
         "reason": reason,
         "evidence_sources": sources,
+        "evidence_passages": evidence_passages,
         "evidence_summary": evidence_summary,
+        "search_queries": search_queries,
     }
 
 
 def _parse_line_response(text: str) -> dict[str, Any]:
     fields = {
+        "search_queries": [],
         "claim_verdict": "",
         "status": "",
         "reason": "",
         "evidence_sources": [],
+        "evidence_passages": [],
         "evidence_summary": "",
     }
     key_map = {
+        "SEARCH_QUERIES": "search_queries",
         "CLAIM_VERDICT": "claim_verdict",
         "STATUS": "status",
         "REASON": "reason",
         "SOURCES": "evidence_sources",
+        "EVIDENCE_PASSAGES": "evidence_passages",
         "SUMMARY": "evidence_summary",
     }
-    matches = list(re.finditer(r"(?m)^(CLAIM_VERDICT|STATUS|REASON|SOURCES|SUMMARY)\s*=\s*", text))
+    matches = list(re.finditer(r"(?m)^(SEARCH_QUERIES|CLAIM_VERDICT|STATUS|REASON|SOURCES|EVIDENCE_PASSAGES|SUMMARY)\s*=\s*", text))
     if not matches:
         raise ValueError("grounding response is neither JSON nor key-value lines")
     for index, match in enumerate(matches):
@@ -315,7 +448,9 @@ def _parse_line_response(text: str) -> dict[str, Any]:
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         value = text[start:end].strip()
-        if key == "evidence_sources":
+        if key == "search_queries":
+            fields[key] = [part.strip() for part in value.split("|") if part.strip()]
+        elif key == "evidence_sources":
             lowered = value.lower()
             if lowered in {"", "none", "n/a", "없음"}:
                 fields[key] = []
@@ -325,32 +460,418 @@ def _parse_line_response(text: str) -> dict[str, Any]:
                     for part in value.split(",")
                     if re.sub(r"\s+", "", part)
                 ]
+        elif key == "evidence_passages":
+            fields[key] = _normalize_evidence_passages(value)
         else:
             fields[key] = value
     return fields
 
 
-def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -> tuple[dict[str, Any], dict[str, int]]:
-    model = os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL", os.getenv("VERIFIER_GROUNDING_MODEL", "gemini-2.5-flash")).strip()
+class _VisibleTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_stack: list[str] = []
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg", "canvas"}:
+            self._skip_stack.append(tag.lower())
+        if tag.lower() in {"p", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if self._skip_stack and self._skip_stack[-1] == lowered:
+            self._skip_stack.pop()
+        if lowered in {"p", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        text = re.sub(r"\s+", " ", data or "").strip()
+        if text:
+            self.parts.append(text)
+
+
+def _domain_from_url(url: str) -> str:
+    return (urlparse(url).netloc or "").lower().removeprefix("www.")
+
+
+def _source_trust(url: str) -> dict[str, Any]:
+    domain = _domain_from_url(url)
+    trust_level = "secondary"
+    score = 0.55
+    if domain.endswith((".gov", ".go.kr", ".gov.kr")):
+        trust_level, score = "government", 0.95
+    elif domain.endswith((".edu", ".ac.kr")):
+        trust_level, score = "academic", 0.85
+    elif any(token in domain for token in ("w3.org", "ietf.org", "rfc-editor.org", "iso.org", "ecma-international.org")):
+        trust_level, score = "standards", 0.95
+    elif any(token in domain for token in ("docs.", "developer.", "learn.", "support.", "help.", "cloud.")):
+        trust_level, score = "official_docs", 0.80
+    elif any(token in domain for token in ("blog", "medium.", "tistory.", "velog.", "reddit.", "stackoverflow.")):
+        trust_level, score = "weak_secondary", 0.30
+    elif any(token in domain for token in ("news", "reuters.", "apnews.", "bbc.", "nytimes.", "wsj.")):
+        trust_level, score = "news", 0.60
+    return {"domain": domain, "trust_level": trust_level, "trust_score": score}
+
+
+def _decode_bytes(data: bytes, content_type: str) -> str:
+    charset_match = re.search(r"charset=([^;\s]+)", content_type or "", flags=re.IGNORECASE)
+    encodings = [charset_match.group(1)] if charset_match else []
+    encodings.extend(["utf-8", "cp949", "latin-1"])
+    for encoding in encodings:
+        try:
+            return data.decode(encoding, errors="replace")
+        except LookupError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _html_to_text(html: str) -> str:
+    parser = _VisibleTextParser()
+    parser.feed(html or "")
+    text = "\n".join(parser.parts)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _fetch_url_text(url: str) -> dict[str, Any]:
+    trust = _source_trust(url)
+    row = {
+        "url": url,
+        **trust,
+        "fetch_status": "unavailable",
+        "content_type": "",
+        "text_length": 0,
+        "error": "",
+        "text": "",
+    }
+    try:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": os.getenv(
+                    "CLASSIFIED_ISSUE_GROUNDING_USER_AGENT",
+                    "VeriLecGrounder/1.0 (+https://example.invalid/verilec)",
+                )
+            },
+        )
+        with urlopen(req, timeout=_fetch_timeout_sec()) as resp:
+            content_type = resp.headers.get("content-type", "")
+            data = resp.read(_fetch_max_bytes())
+    except HTTPError as exc:
+        row.update({"fetch_status": "http_error", "error": f"HTTP {exc.code}: {exc.reason}"})
+        return row
+    except URLError as exc:
+        row.update({"fetch_status": "url_error", "error": str(exc.reason)})
+        return row
+    except Exception as exc:
+        row.update({"fetch_status": "error", "error": str(exc)})
+        return row
+
+    row["content_type"] = content_type
+    if "pdf" in content_type.lower():
+        row.update({"fetch_status": "unsupported_content_type", "error": "PDF extraction is not enabled"})
+        return row
+    raw_text = _decode_bytes(data, content_type)
+    text = _html_to_text(raw_text) if "html" in content_type.lower() or "<html" in raw_text[:2000].lower() else raw_text
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n\s+", "\n", text).strip()
+    row.update({"fetch_status": "ok", "text": text, "text_length": len(text)})
+    return row
+
+
+def _claim_terms(issue: dict[str, Any]) -> list[str]:
+    text = " ".join(
+        str(issue.get(key) or "")
+        for key in ("resolved_claim", "claim_text", "category")
+    )
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9.+#/_-]{1,}|[가-힣]{2,}|\d+(?:\.\d+)?%?", text)
+    stopwords = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "about",
+        "입니다", "있습니다", "한다", "되는", "대한", "때문", "그리고", "하지만",
+    }
+    seen: set[str] = set()
+    terms: list[str] = []
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in stopwords or lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(token)
+    return terms[:24]
+
+
+def _split_passages(text: str, max_chars: int = 900) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n{1,}", text or "") if part.strip()]
+    passages: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if not current:
+            current = paragraph
+        elif len(current) + len(paragraph) + 1 <= max_chars:
+            current = f"{current}\n{paragraph}"
+        else:
+            passages.append(current)
+            current = paragraph
+    if current:
+        passages.append(current)
+    return passages
+
+
+def _match_passages(text: str, terms: list[str], *, limit: int = 3) -> list[dict[str, Any]]:
+    if not text or not terms:
+        return []
+    lowered_terms = [term.lower() for term in terms]
+    scored: list[tuple[float, str, list[str]]] = []
+    for passage in _split_passages(text):
+        lowered = passage.lower()
+        matched = [term for term, lowered_term in zip(terms, lowered_terms) if lowered_term in lowered]
+        numeric_matches = sum(1 for term in matched if re.search(r"\d", term))
+        score = len(matched) + numeric_matches * 1.5
+        if score > 0:
+            scored.append((score, passage[:900], matched[:12]))
+    scored.sort(key=lambda item: (-item[0], len(item[1])))
+    return [
+        {
+            "passage_id": f"P{index}",
+            "match_score": round(score, 3),
+            "matched_terms": matched,
+            "text": passage,
+        }
+        for index, (score, passage, matched) in enumerate(scored[:limit], start=1)
+    ]
+
+
+def _normalize_match_text(text: str) -> str:
+    lowered = (text or "").lower()
+    lowered = re.sub(r"\s+", " ", lowered)
+    lowered = re.sub(r"[^\w가-힣.%+#/-]+", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _best_fuzzy_match(needle: str, haystack: str) -> tuple[str, float, str]:
+    needle_norm = _normalize_match_text(needle)
+    haystack_norm = _normalize_match_text(haystack)
+    if not needle_norm or not haystack_norm:
+        return "", 0.0, "not_found"
+    if needle_norm in haystack_norm:
+        return needle[:900], 1.0, "exact"
+
+    best_text = ""
+    best_score = 0.0
+    for passage in _split_passages(haystack, max_chars=max(900, min(1800, len(needle) + 500))):
+        passage_norm = _normalize_match_text(passage)
+        score = SequenceMatcher(None, needle_norm[:1200], passage_norm[:1600]).ratio()
+        if score > best_score:
+            best_score = score
+            best_text = passage[:900]
+    status = "fuzzy" if best_score >= _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_PASSAGE_MATCH_THRESHOLD"), 0.62) else "not_found"
+    return best_text, round(best_score, 4), status
+
+
+def _reported_passages_for_url(passages: list[dict[str, Any]], url: str) -> list[dict[str, Any]]:
+    target_domain = _domain_from_url(url)
+    rows = []
+    for passage in passages:
+        if not isinstance(passage, dict):
+            continue
+        passage_url = str(passage.get("url") or "").strip()
+        if not passage_url:
+            continue
+        if passage_url == url or _domain_from_url(passage_url) == target_domain:
+            rows.append(passage)
+    return rows
+
+
+def _verify_reported_passages(text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    verified = []
+    for passage in passages:
+        quote = str(passage.get("quote_or_paragraph") or "").strip()
+        key_sentence = str(passage.get("key_sentence") or "").strip()
+        candidate = quote or key_sentence
+        if not candidate:
+            row = dict(passage)
+            row.update({"match_status": "not_found", "match_score": 0.0, "matched_text": ""})
+            verified.append(row)
+            continue
+        matched_text, score, status = _best_fuzzy_match(candidate, text)
+        if status == "not_found" and key_sentence and key_sentence != candidate:
+            matched_text, score, status = _best_fuzzy_match(key_sentence, text)
+        row = dict(passage)
+        row.update({
+            "match_status": status,
+            "match_score": score,
+            "matched_text": matched_text,
+            "selection_method": "model_reported_passage",
+        })
+        verified.append(row)
+    return verified
+
+
+def _verify_payload_sources(issue: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    sources = payload.get("evidence_sources") if isinstance(payload.get("evidence_sources"), list) else []
+    reported_passages = payload.get("evidence_passages") if isinstance(payload.get("evidence_passages"), list) else []
+    terms = _claim_terms(issue)
+    verified_sources = []
+    for url in sources[:_max_sources_per_trial()]:
+        row = _fetch_url_text(str(url))
+        text = str(row.pop("text", "") or "")
+        source_reported = _reported_passages_for_url(reported_passages, str(url))
+        row["model_reported_passages"] = source_reported
+        row["verified_model_passages"] = _verify_reported_passages(text, source_reported) if text else [
+            {**passage, "match_status": "unverified_fetch_failed", "match_score": 0.0, "matched_text": ""}
+            for passage in source_reported
+        ]
+        matched_model_passages = [
+            passage for passage in row["verified_model_passages"]
+            if passage.get("match_status") in {"exact", "fuzzy"}
+        ]
+        fallback_passages = [] if matched_model_passages else _match_passages(text, terms)
+        for passage in fallback_passages:
+            passage["selection_method"] = "keyword_fallback"
+            passage["match_status"] = "keyword_fallback"
+        row["matched_passages"] = matched_model_passages or fallback_passages
+        row["direct_match"] = bool(row["matched_passages"])
+        verified_sources.append(row)
+
+    matched_sources = [row for row in verified_sources if row.get("direct_match")]
+    if matched_sources:
+        verification_status = "verified"
+    elif verified_sources:
+        verification_status = "no_direct_passage"
+    else:
+        verification_status = "no_sources"
+
+    payload["verified_sources"] = verified_sources
+    payload["source_verification_status"] = verification_status
+    payload["direct_evidence_count"] = sum(len(row.get("matched_passages") or []) for row in matched_sources)
+    if payload.get("status") in {"supports_issue", "refutes_issue"} and verification_status != "verified":
+        payload["pre_source_verification_status"] = payload.get("status")
+        payload["status"] = "insufficient_evidence"
+        payload["claim_verdict"] = "uncertain"
+        payload["issue_supported"] = None
+        payload["reason"] = (
+            "모델이 웹 근거를 제시했지만 URL 본문에서 claim과 직접 연결되는 근거 문단을 확인하지 못했습니다."
+        )
+    return payload
+
+
+def _build_evidence_recheck_prompt(issue: dict[str, Any], payload: dict[str, Any], current_date: str) -> str:
+    excerpts = []
+    for source in payload.get("verified_sources", []) or []:
+        if not isinstance(source, dict) or not source.get("direct_match"):
+            continue
+        passages = source.get("matched_passages") if isinstance(source.get("matched_passages"), list) else []
+        excerpts.append({
+            "url": source.get("url", ""),
+            "domain": source.get("domain", ""),
+            "trust_level": source.get("trust_level", ""),
+            "trust_score": source.get("trust_score", 0.0),
+            "passages": passages[:3],
+        })
+    return f"""You are rechecking a lecture issue using only fetched source excerpts.
+Current date: {current_date}
+
+Do not use web search, memory, or assumptions. Judge only from the excerpts.
+If the excerpts do not directly prove the claim true or false in the relevant region/time/product context, return uncertain.
+
+Issue category: {issue.get("category", "")}
+Resolved claim: {issue.get("resolved_claim", "")}
+Original claim_text: {issue.get("claim_text", "")}
+
+Fetched source excerpts:
+{json.dumps(excerpts, ensure_ascii=False, indent=2)}
+
+Return JSON only:
+{{
+  "claim_verdict": "claim_true | claim_false | uncertain",
+  "status": "supports_issue | refutes_issue | insufficient_evidence",
+  "issue_supported": true,
+  "reason": "one or two Korean sentences",
+  "evidence_summary": "short Korean evidence summary"
+}}
+"""
+
+
+def _evidence_recheck_enabled() -> bool:
+    return os.getenv("CLASSIFIED_ISSUE_GROUNDING_EVIDENCE_RECHECK_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _call_evidence_recheck(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    payload: dict[str, Any],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    if not _evidence_recheck_enabled() or payload.get("source_verification_status") != "verified":
+        return {}, _empty_token_usage()
+    prompt = _build_evidence_recheck_prompt(issue, payload, current_date)
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    recheck = _parse_response(text or "", require_sources=False)
+    recheck["provider"] = resolved.get("provider", "")
+    recheck["model"] = model_spec
+    recheck["resolved_model"] = resolved.get("resolved_model", model_spec)
+    return recheck, usage
+
+
+def _call_gemini_search_grounding(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    resolved = _resolve_model_spec(model_spec)
+    model = resolved.get("resolved_model", model_spec)
     prompt = _build_grounding_prompt(issue, current_date)
     contents = [types.Part.from_text(text=prompt)]
-    config = types.GenerateContentConfig(
-        temperature=0.0,
-        max_output_tokens=max_tokens,
-        tools=[types.Tool(google_search=types.GoogleSearch())],
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-    )
+    cfg_kwargs = {
+        "temperature": 0.0,
+        "max_output_tokens": max_tokens,
+        "response_mime_type": "application/json",
+        "tools": [types.Tool(google_search=types.GoogleSearch())],
+        "thinking_config": types.ThinkingConfig(thinking_budget=0),
+    }
     last_exc: Exception | None = None
     for index, (client_name, client) in enumerate(get_gemini_client_sequence()):
         try:
             def call_api():
-                return client.models.generate_content(model=model, contents=contents, config=config)
+                try:
+                    return client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "response_mime_type" not in message and "json" not in message:
+                        raise
+                    fallback_kwargs = dict(cfg_kwargs)
+                    fallback_kwargs.pop("response_mime_type", None)
+                    return client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**fallback_kwargs),
+                    )
 
             resp = api_call_with_retry(call_api)
             payload = _parse_response(resp.text or "")
             payload["model"] = model
-            payload["provider"] = "google"
+            payload["model_spec"] = model_spec
+            payload["provider"] = "gemini"
             payload["client"] = client_name
+            payload["search_mode"] = "gemini_google_search_tool"
             return payload, _usage_from_gemini(resp, model)
         except Exception as exc:
             last_exc = exc
@@ -363,28 +884,197 @@ def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -
         "evidence_sources": [],
         "evidence_summary": "",
         "model": model,
-        "provider": "google",
+        "model_spec": model_spec,
+        "provider": "gemini",
+        "search_mode": "gemini_google_search_tool",
     }, _empty_token_usage()
+
+
+def _call_text_grounding(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    prompt = _build_grounding_json_prompt(issue, current_date)
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max_tokens)
+    payload = _parse_response(text or "")
+    payload["model"] = model_spec
+    payload["resolved_model"] = resolved.get("resolved_model", model_spec)
+    payload["provider"] = resolved.get("provider", "")
+    payload["search_mode"] = "model_reported_sources_no_native_search_tool"
+    return payload, usage
+
+
+def _call_grounding_trial(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    resolved = _resolve_model_spec(model_spec)
+    if resolved.get("provider") == "gemini":
+        payload, usage = _call_gemini_search_grounding(
+            model_spec=model_spec,
+            issue=issue,
+            current_date=current_date,
+            max_tokens=max_tokens,
+        )
+    else:
+        payload, usage = _call_text_grounding(
+            model_spec=model_spec,
+            issue=issue,
+            current_date=current_date,
+            max_tokens=max_tokens,
+        )
+    payload["model_spec"] = model_spec
+    payload["provider"] = payload.get("provider") or resolved.get("provider", "")
+    payload["resolved_model"] = payload.get("resolved_model") or resolved.get("resolved_model", model_spec)
+    payload = _verify_payload_sources(issue, payload)
+    recheck, recheck_usage = _call_evidence_recheck(
+        model_spec=model_spec,
+        issue=issue,
+        payload=payload,
+        current_date=current_date,
+        max_tokens=max_tokens,
+    )
+    _merge_token_usage(usage, recheck_usage)
+    if recheck:
+        payload["evidence_recheck"] = recheck
+        if recheck.get("status") in {"supports_issue", "refutes_issue", "insufficient_evidence"}:
+            payload["pre_evidence_recheck_status"] = payload.get("status")
+            payload["status"] = recheck.get("status")
+            payload["claim_verdict"] = recheck.get("claim_verdict", payload.get("claim_verdict", "uncertain"))
+            payload["issue_supported"] = recheck.get("issue_supported")
+            payload["reason"] = recheck.get("reason", payload.get("reason", ""))
+            payload["evidence_summary"] = recheck.get("evidence_summary", payload.get("evidence_summary", ""))
+    return payload, usage
+
+
+def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, Any]]) -> dict[str, Any]:
+    verified_trials = [
+        trial for trial in trials
+        if trial.get("source_verification_status") == "verified"
+        and trial.get("status") in {"supports_issue", "refutes_issue"}
+    ]
+    support_trials = [trial for trial in verified_trials if trial.get("status") == "supports_issue"]
+    refute_trials = [trial for trial in verified_trials if trial.get("status") == "refutes_issue"]
+    source_urls: list[str] = []
+    for trial in verified_trials:
+        for source in trial.get("verified_sources", []) or []:
+            if not isinstance(source, dict) or not source.get("direct_match"):
+                continue
+            url = str(source.get("url") or "")
+            if url and url not in source_urls:
+                source_urls.append(url)
+
+    if support_trials and refute_trials:
+        status = "insufficient_evidence"
+        claim_verdict = "uncertain"
+        issue_supported = None
+        reason = "모델별 웹 근거 재검증 결과가 충돌하여 보수적으로 근거 부족으로 처리했습니다."
+    elif support_trials:
+        status = "supports_issue"
+        claim_verdict = "claim_false"
+        issue_supported = True
+        reason = support_trials[0].get("reason") or "검증된 웹 본문 근거가 issue를 지지합니다."
+    elif refute_trials:
+        status = "refutes_issue"
+        claim_verdict = "claim_true"
+        issue_supported = False
+        reason = refute_trials[0].get("reason") or "검증된 웹 본문 근거가 issue를 반박합니다."
+    else:
+        status = "insufficient_evidence"
+        claim_verdict = "uncertain"
+        issue_supported = None
+        reason = "모델 응답의 URL을 직접 확인했지만, 본문 근거까지 검증된 supports/refutes 판단이 없습니다."
+
+    status_counts = Counter(_normalize_status(trial.get("status")) for trial in trials)
+    return {
+        "status": status,
+        "claim_verdict": claim_verdict,
+        "issue_supported": issue_supported,
+        "reason": reason,
+        "evidence_sources": source_urls,
+        "evidence_summary": " / ".join(
+            str(trial.get("evidence_summary") or "").strip()
+            for trial in verified_trials
+            if str(trial.get("evidence_summary") or "").strip()
+        )[:1200],
+        "search_queries": {
+            str(trial.get("model_spec") or trial.get("model") or ""): trial.get("search_queries", [])
+            for trial in trials
+        },
+        "trials": trials,
+        "trial_status_counts": dict(status_counts),
+        "source_verification_policy": "supports/refutes requires fetched URL text with directly matched claim passages",
+    }
+
+
+def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -> tuple[dict[str, Any], dict[str, int]]:
+    models = _grounding_model_specs()
+    token_usage = _empty_token_usage()
+    trials: list[dict[str, Any]] = []
+    for model_spec in models:
+        try:
+            payload, usage = _call_grounding_trial(
+                model_spec=model_spec,
+                issue=issue,
+                current_date=current_date,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            payload = {
+                "status": "grounding_unavailable",
+                "claim_verdict": "uncertain",
+                "issue_supported": None,
+                "reason": f"grounding 실패: {exc}",
+                "evidence_sources": [],
+                "evidence_summary": "",
+                "search_queries": [],
+                "model_spec": model_spec,
+                "model": model_spec,
+                "provider": "",
+                "search_mode": "unavailable",
+                "source_verification_status": "no_sources",
+                "verified_sources": [],
+            }
+            usage = _empty_token_usage()
+        trials.append(payload)
+        _merge_token_usage(token_usage, usage)
+    return _aggregate_grounding_trials(issue, trials), token_usage
 
 
 def _should_ground(issue: dict[str, Any], categories: set[str]) -> bool:
     if str(issue.get("category") or "").strip() not in categories:
         return False
-    return _clamp01(issue.get("final_severity_score")) > _rejected_threshold()
+    return True
 
 
 def _apply_grounding_decision(issue: dict[str, Any], payload: dict[str, Any]) -> None:
-    if payload.get("status") != "refutes_issue":
+    if payload.get("status") not in {"refutes_issue", "supports_issue"}:
         return
     original_score = _clamp01(issue.get("final_severity_score"))
-    rejected_score = max(0.0, _rejected_threshold() - 0.001)
     issue["pre_grounding_final_severity_score"] = original_score
     issue["pre_grounding_final_severity_percent"] = round(original_score * 100.0, 2)
     issue["pre_grounding_status"] = _status_from_score(original_score)
-    issue["final_severity_score"] = min(original_score, rejected_score)
-    issue["final_severity_percent"] = round(float(issue["final_severity_score"]) * 100.0, 2)
-    issue["needs_manual_review"] = False
-    issue["rejected_by_web_grounding"] = True
+    if payload.get("status") == "refutes_issue":
+        rejected_score = max(0.0, _rejected_threshold() - 0.001)
+        issue["final_severity_score"] = min(original_score, rejected_score)
+        issue["final_severity_percent"] = round(float(issue["final_severity_score"]) * 100.0, 2)
+        issue["needs_manual_review"] = False
+        issue["rejected_by_web_grounding"] = True
+        return
+
+    if original_score <= _rejected_threshold():
+        issue["final_severity_score"] = max(original_score, _resurrected_score())
+        issue["final_severity_percent"] = round(float(issue["final_severity_score"]) * 100.0, 2)
+        issue["needs_manual_review"] = _status_from_score(float(issue["final_severity_score"])) == "professor_check"
+        issue["resurrected_by_web_grounding"] = True
+    else:
+        issue["confirmed_by_web_grounding"] = True
 
 
 def _refresh_summary(verifier_result: dict[str, Any]) -> None:
@@ -400,6 +1090,9 @@ def _refresh_summary(verifier_result: dict[str, Any]) -> None:
     )
     summary["web_grounding_rejected_count"] = sum(
         1 for issue in issues if isinstance(issue, dict) and bool(issue.get("rejected_by_web_grounding"))
+    )
+    summary["web_grounding_resurrected_count"] = sum(
+        1 for issue in issues if isinstance(issue, dict) and bool(issue.get("resurrected_by_web_grounding"))
     )
 
 
@@ -422,6 +1115,7 @@ def ground_classified_issues(
             "enabled": True,
             "grounded_issue_count": 0,
             "categories": sorted(categories),
+            "models": _grounding_model_specs(),
             "status_counts": {},
             "token_usage": token_usage,
         }
@@ -467,7 +1161,7 @@ def ground_classified_issues(
             if str(issue.get("category") or "").strip() not in categories:
                 reason = "factual_error/temporal_error가 아니어서 web grounding을 실행하지 않음"
             else:
-                reason = "verifier 최종 상태가 rejected라서 web grounding을 실행하지 않음"
+                reason = "web grounding 대상 조건에 맞지 않아 실행하지 않음"
             issue["web_grounding"] = {
                 "status": "not_applicable",
                 "reason": reason,
@@ -479,8 +1173,10 @@ def ground_classified_issues(
         "enabled": True,
         "grounded_issue_count": len(targets),
         "categories": sorted(categories),
+        "models": _grounding_model_specs(),
         "status_counts": dict(status_counts),
         "token_usage": token_usage,
+        "target_policy": "all factual_error/temporal_error candidates, including final rejected candidates",
     }
     verifier_result["summary"]["grounded_issue_count"] = len(targets)
     verifier_result["summary"]["grounding_status_counts"] = dict(status_counts)
@@ -502,6 +1198,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_GROUNDING_CURRENT_DATE", "2026-05-31"))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", "3")))
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")))
+    parser.add_argument(
+        "--models",
+        default="",
+        help="comma/space-separated grounding models. Defaults to CLASSIFIED_ISSUE_GROUNDING_MODELS or gemini,gpt,claude.",
+    )
     return parser
 
 
@@ -509,6 +1210,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     input_path = Path(args.verifier_json)
     output_path = Path(args.output) if args.output else input_path.with_name(input_path.stem + "_grounded.json")
+    if args.models:
+        os.environ["CLASSIFIED_ISSUE_GROUNDING_MODELS"] = args.models
     result = ground_classified_issues(
         _load_json(input_path),
         current_date=args.current_date,
