@@ -818,11 +818,163 @@ def _call_evidence_recheck(
         return {}, _empty_token_usage()
     prompt = _build_evidence_recheck_prompt(issue, payload, current_date)
     text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
-    recheck = _parse_response(text or "", require_sources=False)
+    try:
+        recheck = _parse_response(text or "", require_sources=False)
+    except Exception as exc:
+        recheck = {
+            "status": "insufficient_evidence",
+            "claim_verdict": "uncertain",
+            "issue_supported": None,
+            "reason": f"발췌문 재검증 응답 파싱 실패: {exc}",
+            "evidence_sources": [],
+            "evidence_passages": [],
+            "evidence_summary": "",
+            "search_queries": [],
+            "parse_error": str(exc),
+        }
     recheck["provider"] = resolved.get("provider", "")
     recheck["model"] = model_spec
     recheck["resolved_model"] = resolved.get("resolved_model", model_spec)
     return recheck, usage
+
+
+def _obj_get(obj: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj.get(name)
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _gemini_web_chunk_url(chunk: Any) -> str:
+    web = _obj_get(chunk, "web")
+    uri = _obj_get(web, "uri", "url") if web is not None else None
+    if not uri:
+        uri = _obj_get(chunk, "uri", "url")
+    uri = str(uri or "").strip()
+    return uri if re.match(r"^https?://", uri, flags=re.IGNORECASE) else ""
+
+
+def _gemini_web_chunk_title(chunk: Any) -> str:
+    web = _obj_get(chunk, "web")
+    title = _obj_get(web, "title") if web is not None else None
+    if not title:
+        title = _obj_get(chunk, "title")
+    return str(title or "").strip()
+
+
+def _extract_gemini_grounding(resp: Any) -> dict[str, Any]:
+    """Recover Google Search grounding metadata even when resp.text is not parseable."""
+    queries: list[str] = []
+    sources: list[str] = []
+    evidence_passages: list[dict[str, Any]] = []
+
+    candidates = _as_list(_obj_get(resp, "candidates"))
+    for candidate in candidates:
+        metadata = _obj_get(candidate, "grounding_metadata", "groundingMetadata")
+        if metadata is None:
+            continue
+        for query in _as_list(_obj_get(metadata, "web_search_queries", "webSearchQueries")):
+            query_text = str(query or "").strip()
+            if query_text and query_text not in queries:
+                queries.append(query_text)
+
+        chunks = _as_list(_obj_get(metadata, "grounding_chunks", "groundingChunks"))
+        chunk_urls: list[str] = []
+        chunk_titles: list[str] = []
+        for chunk in chunks:
+            url = _gemini_web_chunk_url(chunk)
+            title = _gemini_web_chunk_title(chunk)
+            chunk_urls.append(url)
+            chunk_titles.append(title)
+            if url and url not in sources:
+                sources.append(url)
+
+        supports = _as_list(_obj_get(metadata, "grounding_supports", "groundingSupports"))
+        for index, support in enumerate(supports, start=1):
+            segment = _obj_get(support, "segment")
+            text = str(_obj_get(segment, "text") or _obj_get(support, "text") or "").strip()
+            indices = _as_list(
+                _obj_get(
+                    support,
+                    "grounding_chunk_indices",
+                    "groundingChunkIndices",
+                    "grounding_chunks",
+                    "groundingChunks",
+                )
+            )
+            if not indices and len(chunk_urls) == 1:
+                indices = [0]
+            for raw_index in indices:
+                try:
+                    chunk_index = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                if chunk_index < 0 or chunk_index >= len(chunk_urls):
+                    continue
+                url = chunk_urls[chunk_index]
+                if not url:
+                    continue
+                evidence_passages.append({
+                    "id": f"G{index}:{chunk_index}",
+                    "url": url,
+                    "quote_or_paragraph": text[:1800],
+                    "key_sentence": text[:800],
+                    "stance": "insufficient_evidence",
+                    "why_relevant": (
+                        f"Gemini grounding support linked this response segment to "
+                        f"{chunk_titles[chunk_index] or url}."
+                    ),
+                })
+
+    return {
+        "search_queries": queries,
+        "evidence_sources": sources,
+        "evidence_passages": evidence_passages,
+    }
+
+
+def _merge_gemini_metadata(payload: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    payload_queries = payload.get("search_queries") if isinstance(payload.get("search_queries"), list) else []
+    for query in metadata.get("search_queries", []) or []:
+        if query not in payload_queries:
+            payload_queries.append(query)
+    payload["search_queries"] = payload_queries
+
+    payload_sources = payload.get("evidence_sources") if isinstance(payload.get("evidence_sources"), list) else []
+    for source in metadata.get("evidence_sources", []) or []:
+        if source not in payload_sources:
+            payload_sources.append(source)
+    payload["evidence_sources"] = payload_sources
+
+    payload_passages = payload.get("evidence_passages") if isinstance(payload.get("evidence_passages"), list) else []
+    seen = {
+        (str(row.get("url") or ""), str(row.get("quote_or_paragraph") or row.get("key_sentence") or ""))
+        for row in payload_passages
+        if isinstance(row, dict)
+    }
+    for passage in metadata.get("evidence_passages", []) or []:
+        key = (str(passage.get("url") or ""), str(passage.get("quote_or_paragraph") or passage.get("key_sentence") or ""))
+        if key not in seen:
+            payload_passages.append(passage)
+            seen.add(key)
+    payload["evidence_passages"] = payload_passages
+
+    if metadata.get("evidence_sources"):
+        payload["gemini_metadata_recovered"] = True
+    return payload
 
 
 def _call_gemini_search_grounding(
@@ -866,12 +1018,37 @@ def _call_gemini_search_grounding(
                     )
 
             resp = api_call_with_retry(call_api)
-            payload = _parse_response(resp.text or "")
+            metadata = _extract_gemini_grounding(resp)
+            try:
+                payload = _parse_response(resp.text or "", require_sources=False)
+            except Exception as parse_exc:
+                payload = {
+                    "status": "insufficient_evidence",
+                    "claim_verdict": "uncertain",
+                    "issue_supported": None,
+                    "reason": f"Gemini 응답 본문 파싱 실패, grounding metadata로 source를 복구했습니다: {parse_exc}",
+                    "evidence_sources": [],
+                    "evidence_passages": [],
+                    "evidence_summary": "",
+                    "search_queries": [],
+                    "parse_error": str(parse_exc),
+                }
+            payload = _merge_gemini_metadata(payload, metadata)
+            if payload.get("status") in {"supports_issue", "refutes_issue"} and not payload.get("evidence_sources"):
+                payload["pre_source_required_status"] = payload.get("status")
+                payload["status"] = "insufficient_evidence"
+                payload["claim_verdict"] = "uncertain"
+                payload["issue_supported"] = None
             payload["model"] = model
             payload["model_spec"] = model_spec
             payload["provider"] = "gemini"
             payload["client"] = client_name
             payload["search_mode"] = "gemini_google_search_tool"
+            payload["gemini_metadata"] = {
+                "search_query_count": len(metadata.get("search_queries", []) or []),
+                "source_count": len(metadata.get("evidence_sources", []) or []),
+                "support_passage_count": len(metadata.get("evidence_passages", []) or []),
+            }
             return payload, _usage_from_gemini(resp, model)
         except Exception as exc:
             last_exc = exc
@@ -943,7 +1120,7 @@ def _call_grounding_trial(
     _merge_token_usage(usage, recheck_usage)
     if recheck:
         payload["evidence_recheck"] = recheck
-        if recheck.get("status") in {"supports_issue", "refutes_issue", "insufficient_evidence"}:
+        if not recheck.get("parse_error") and recheck.get("status") in {"supports_issue", "refutes_issue", "insufficient_evidence"}:
             payload["pre_evidence_recheck_status"] = payload.get("status")
             payload["status"] = recheck.get("status")
             payload["claim_verdict"] = recheck.get("claim_verdict", payload.get("claim_verdict", "uncertain"))
