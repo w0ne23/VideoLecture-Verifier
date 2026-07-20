@@ -151,6 +151,15 @@ def _max_sources_per_trial() -> int:
         return 4
 
 
+def _passage_extraction_enabled() -> bool:
+    return os.getenv("CLASSIFIED_ISSUE_GROUNDING_PASSAGE_EXTRACTION_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _fetch_timeout_sec() -> float:
     return max(1.0, _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_TIMEOUT_SEC"), 8.0))
 
@@ -242,6 +251,8 @@ Current date: {current_date}
 Your task is to check whether external web evidence supports or refutes the issue.
 Only judge externally verifiable facts. Do not overrule lecture-context judgments unless web evidence clearly supports/refutes the factual claim.
 Record the exact search queries you used or would use to find the evidence.
+Use both Korean and English search queries when the lecture claim is Korean. Include at least one high-priority source query and one fallback query for Wikipedia or educational/reference material.
+Record bilingual match terms that connect the Korean lecture claim to likely English source wording.
 For each source URL, include the most relevant sentence or paragraph you relied on. Prefer short passages, but keep enough surrounding context to avoid misleading quote fragments.
 
 Issue category: {issue.get("category", "")}
@@ -271,8 +282,9 @@ If the web evidence only addresses a different unit, region, product, or time pe
 Do not mark a claim false only because a source does not explicitly state it. Use claim_false only when reliable sources directly contradict the claim.
 If the claim can only be supported or rejected by indirect arithmetic, unofficial blogs, screenshots, or mixed sources, use uncertain unless the official source clearly supplies all required values.
 
-Return exactly these seven lines. Do not use JSON or markdown.
+Return exactly these eight lines. Do not use JSON or markdown.
 SEARCH_QUERIES=query1 | query2
+MATCH_TERMS=Korean term | English term | synonym
 CLAIM_VERDICT=claim_true | claim_false | uncertain
 STATUS=supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable
 REASON=one or two Korean sentences explaining the web-grounded judgment
@@ -292,6 +304,7 @@ def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> st
     json_contract = """Return JSON only:
 {
   "search_queries": ["query1", "query2"],
+  "match_terms": ["Korean term", "English term", "synonym"],
   "claim_verdict": "claim_true | claim_false | uncertain",
   "status": "supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable",
   "issue_supported": true,
@@ -310,7 +323,7 @@ def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> st
 }
 """
     return re.sub(
-        r"Return exactly these seven lines\..*?(?=Consistency requirements:)",
+        r"Return exactly these eight lines\..*?(?=Consistency requirements:)",
         json_contract + "\n",
         prompt,
         flags=re.DOTALL,
@@ -415,6 +428,10 @@ def _parse_response(text: str, *, require_sources: bool = True) -> dict[str, Any
         for source in sources
         if re.match(r"^https?://", str(source).strip(), flags=re.IGNORECASE)
     ]
+    match_terms = payload.get("match_terms", payload.get("terms", []))
+    if not isinstance(match_terms, list):
+        match_terms = [part for part in re.split(r"[,|\n]+", str(match_terms or "")) if part.strip()]
+    match_terms = [str(term).strip() for term in match_terms if str(term).strip()]
     search_queries = payload.get("search_queries", payload.get("queries", []))
     if not isinstance(search_queries, list):
         search_queries = [part for part in re.split(r"[|\n]+", str(search_queries or "")) if part.strip()]
@@ -439,12 +456,14 @@ def _parse_response(text: str, *, require_sources: bool = True) -> dict[str, Any
         "evidence_passages": evidence_passages,
         "evidence_summary": evidence_summary,
         "search_queries": search_queries,
+        "match_terms": match_terms[:40],
     }
 
 
 def _parse_line_response(text: str) -> dict[str, Any]:
     fields = {
         "search_queries": [],
+        "match_terms": [],
         "claim_verdict": "",
         "status": "",
         "reason": "",
@@ -454,6 +473,7 @@ def _parse_line_response(text: str) -> dict[str, Any]:
     }
     key_map = {
         "SEARCH_QUERIES": "search_queries",
+        "MATCH_TERMS": "match_terms",
         "CLAIM_VERDICT": "claim_verdict",
         "STATUS": "status",
         "REASON": "reason",
@@ -461,7 +481,7 @@ def _parse_line_response(text: str) -> dict[str, Any]:
         "EVIDENCE_PASSAGES": "evidence_passages",
         "SUMMARY": "evidence_summary",
     }
-    matches = list(re.finditer(r"(?m)^(SEARCH_QUERIES|CLAIM_VERDICT|STATUS|REASON|SOURCES|EVIDENCE_PASSAGES|SUMMARY)\s*=\s*", text))
+    matches = list(re.finditer(r"(?m)^(SEARCH_QUERIES|MATCH_TERMS|CLAIM_VERDICT|STATUS|REASON|SOURCES|EVIDENCE_PASSAGES|SUMMARY)\s*=\s*", text))
     if not matches:
         raise ValueError("grounding response is neither JSON nor key-value lines")
     for index, match in enumerate(matches):
@@ -471,6 +491,8 @@ def _parse_line_response(text: str) -> dict[str, Any]:
         value = text[start:end].strip()
         if key == "search_queries":
             fields[key] = [part.strip() for part in value.split("|") if part.strip()]
+        elif key == "match_terms":
+            fields[key] = [part.strip() for part in re.split(r"[|,]", value) if part.strip()][:40]
         elif key == "evidence_sources":
             lowered = value.lower()
             if lowered in {"", "none", "n/a", "없음"}:
@@ -637,8 +659,11 @@ def _fetch_url_text(url: str) -> dict[str, Any]:
             headers={
                 "User-Agent": os.getenv(
                     "CLASSIFIED_ISSUE_GROUNDING_USER_AGENT",
-                    "VeriLecGrounder/1.0 (+https://example.invalid/verilec)",
-                )
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         )
         with urlopen(req, timeout=_fetch_timeout_sec()) as resp:
@@ -685,6 +710,22 @@ def _claim_terms(issue: dict[str, Any]) -> list[str]:
         seen.add(lowered)
         terms.append(token)
     return terms[:24]
+
+
+def _verification_terms(issue: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in _claim_terms(issue) + [
+        str(value).strip()
+        for value in payload.get("match_terms", []) or []
+        if str(value).strip()
+    ]:
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(term)
+    return terms[:64]
 
 
 def _split_passages(text: str, max_chars: int = 900) -> list[str]:
@@ -797,11 +838,13 @@ def _verify_reported_passages(text: str, passages: list[dict[str, Any]]) -> list
 def _verify_payload_sources(issue: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     sources = payload.get("evidence_sources") if isinstance(payload.get("evidence_sources"), list) else []
     reported_passages = payload.get("evidence_passages") if isinstance(payload.get("evidence_passages"), list) else []
-    terms = _claim_terms(issue)
+    terms = _verification_terms(issue, payload)
     verified_sources = []
     for url in sources[:_max_sources_per_trial()]:
         row = _fetch_url_text(str(url))
         text = str(row.pop("text", "") or "")
+        if text:
+            row["_source_text"] = text
         source_reported = _reported_passages_for_url(reported_passages, str(url))
         row["model_reported_passages"] = source_reported
         row["verified_model_passages"] = _verify_reported_passages(text, source_reported) if text else [
@@ -841,6 +884,165 @@ def _verify_payload_sources(issue: dict[str, Any], payload: dict[str, Any]) -> d
             "모델이 웹 근거를 제시했지만 URL 본문에서 claim과 직접 연결되는 근거 문단을 확인하지 못했습니다."
         )
     return payload
+
+
+def _refresh_source_verification_status(payload: dict[str, Any]) -> None:
+    verified_sources = payload.get("verified_sources") if isinstance(payload.get("verified_sources"), list) else []
+    matched_sources = [row for row in verified_sources if isinstance(row, dict) and row.get("direct_match")]
+    if matched_sources:
+        verification_status = "verified"
+    elif verified_sources:
+        verification_status = "no_direct_passage"
+    else:
+        verification_status = "no_sources"
+    payload["source_verification_status"] = verification_status
+    payload["direct_evidence_count"] = sum(len(row.get("matched_passages") or []) for row in matched_sources)
+
+
+def _source_text_sample(text: str, terms: list[str], max_chars: int = 5000) -> str:
+    if not text:
+        return ""
+    passages = _split_passages(text, max_chars=900)
+    lowered_terms = [term.lower() for term in terms if term]
+    scored: list[tuple[int, int, str]] = []
+    for index, passage in enumerate(passages):
+        lowered = passage.lower()
+        score = sum(1 for term in lowered_terms if term in lowered)
+        scored.append((score, index, passage))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected: list[str] = []
+    total = 0
+    for _, _, passage in scored[:8]:
+        if total + len(passage) + 2 > max_chars:
+            break
+        selected.append(passage)
+        total += len(passage) + 2
+    if selected:
+        return "\n\n---\n\n".join(selected)
+    return text[:max_chars]
+
+
+def _build_passage_extraction_prompt(issue: dict[str, Any], payload: dict[str, Any]) -> str:
+    terms = _verification_terms(issue, payload)
+    sources = []
+    for source in payload.get("verified_sources", []) or []:
+        if not isinstance(source, dict):
+            continue
+        if not source.get("auto_decision_eligible"):
+            continue
+        if _has_verified_model_passage(source):
+            continue
+        if source.get("fetch_status") != "ok":
+            continue
+        text = str(source.get("_source_text") or "")
+        if not text:
+            continue
+        sources.append({
+            "url": source.get("url", ""),
+            "domain": source.get("domain", ""),
+            "trust_level": source.get("trust_level", ""),
+            "source_priority": source.get("source_priority"),
+            "text_excerpt": _source_text_sample(text, terms),
+        })
+    return f"""You are extracting evidence passages from fetched web source text.
+Use only the provided source excerpts. Do not browse, infer from memory, or invent quotes.
+The lecture claim may be Korean while source text may be English; consider translation and synonyms.
+Return only passages that directly help judge whether the claim is true or false. If none are directly relevant, return an empty list.
+
+Resolved claim: {issue.get("resolved_claim", "")}
+Original claim_text: {issue.get("claim_text", "")}
+Match terms and synonyms: {json.dumps(terms, ensure_ascii=False)}
+
+Sources:
+{json.dumps(sources, ensure_ascii=False, indent=2)}
+
+Return JSON only:
+{{
+  "evidence_passages": [
+    {{
+      "url": "source URL",
+      "quote_or_paragraph": "exact sentence or short paragraph copied from the provided excerpt",
+      "key_sentence": "the single most important sentence copied from the provided excerpt",
+      "stance": "supports_issue | refutes_issue | unclear",
+      "why_relevant": "brief Korean explanation"
+    }}
+  ]
+}}
+"""
+
+
+def _has_verified_model_passage(source: dict[str, Any]) -> bool:
+    return any(
+        isinstance(passage, dict) and passage.get("match_status") in {"exact", "fuzzy"}
+        for passage in source.get("verified_model_passages", []) or []
+    )
+
+
+def _call_passage_extraction_fallback(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    payload: dict[str, Any],
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    if not _passage_extraction_enabled():
+        return payload, _empty_token_usage()
+    candidates = [
+        source for source in payload.get("verified_sources", []) or []
+        if isinstance(source, dict)
+        and source.get("auto_decision_eligible")
+        and not _has_verified_model_passage(source)
+        and source.get("fetch_status") == "ok"
+        and source.get("_source_text")
+    ]
+    if not candidates:
+        return payload, _empty_token_usage()
+
+    prompt = _build_passage_extraction_prompt(issue, payload)
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    extraction: dict[str, Any] = {
+        "provider": resolved.get("provider", ""),
+        "model": model_spec,
+        "resolved_model": resolved.get("resolved_model", model_spec),
+        "candidate_source_count": len(candidates),
+        "added_passage_count": 0,
+    }
+    try:
+        data = json.loads(_strip_json_fence(text or ""), strict=False)
+        extracted_passages = _normalize_evidence_passages(data.get("evidence_passages", []))
+    except Exception as exc:
+        extraction["parse_error"] = str(exc)
+        payload["passage_extraction"] = extraction
+        return payload, usage
+
+    added = 0
+    for source in candidates:
+        source_text = str(source.get("_source_text") or "")
+        source_passages = _reported_passages_for_url(extracted_passages, str(source.get("url") or ""))
+        verified = _verify_reported_passages(source_text, source_passages)
+        matched = [
+            {**passage, "selection_method": "llm_passage_extraction"}
+            for passage in verified
+            if passage.get("match_status") in {"exact", "fuzzy"}
+        ]
+        if not matched:
+            continue
+        source["verified_model_passages"] = (source.get("verified_model_passages") or []) + verified
+        source["matched_passages"] = matched + (source.get("matched_passages") or [])
+        source["direct_match"] = True
+        source["priority_eligible"] = bool(source.get("auto_decision_eligible"))
+        added += len(matched)
+    extraction["added_passage_count"] = added
+    extraction["extracted_passage_count"] = len(extracted_passages)
+    payload["passage_extraction"] = extraction
+    _refresh_source_verification_status(payload)
+    return payload, usage
+
+
+def _strip_internal_source_text(payload: dict[str, Any]) -> None:
+    for source in payload.get("verified_sources", []) or []:
+        if isinstance(source, dict):
+            source.pop("_source_text", None)
 
 
 def _build_evidence_recheck_prompt(issue: dict[str, Any], payload: dict[str, Any], current_date: str) -> str:
@@ -1199,6 +1401,13 @@ def _call_grounding_trial(
     payload["provider"] = payload.get("provider") or resolved.get("provider", "")
     payload["resolved_model"] = payload.get("resolved_model") or resolved.get("resolved_model", model_spec)
     payload = _verify_payload_sources(issue, payload)
+    payload, extraction_usage = _call_passage_extraction_fallback(
+        model_spec=model_spec,
+        issue=issue,
+        payload=payload,
+        max_tokens=max_tokens,
+    )
+    _merge_token_usage(usage, extraction_usage)
     recheck, recheck_usage = _call_evidence_recheck(
         model_spec=model_spec,
         issue=issue,
@@ -1216,6 +1425,7 @@ def _call_grounding_trial(
             payload["issue_supported"] = recheck.get("issue_supported")
             payload["reason"] = recheck.get("reason", payload.get("reason", ""))
             payload["evidence_summary"] = recheck.get("evidence_summary", payload.get("evidence_summary", ""))
+    _strip_internal_source_text(payload)
     return payload, usage
 
 
