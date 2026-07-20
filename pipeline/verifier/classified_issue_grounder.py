@@ -47,6 +47,26 @@ GROUNDING_STATUSES = {
     "grounding_unavailable",
     "not_applicable",
 }
+SOURCE_PRIORITY_ORDER = {
+    "official_docs": 1,
+    "standards": 2,
+    "government": 2,
+    "academic": 3,
+    "educational": 4,
+    "encyclopedia": 5,
+}
+SOURCE_PRIORITY_LABELS = {
+    1: "official_docs",
+    2: "standards_or_government",
+    3: "academic",
+    4: "educational",
+    5: "encyclopedia",
+}
+EXCLUDED_SOURCE_LEVELS = {"tutorial", "blog", "forum", "weak_secondary"}
+SOURCE_PRIORITY_POLICY = (
+    "official_docs > standards/government > academic > educational > encyclopedia; "
+    "tutorial/blog/forum sources are fetched and logged but excluded from automatic decisions"
+)
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -244,7 +264,8 @@ Decision rules:
 - insufficient_evidence: web evidence is weak, mixed, irrelevant, or the issue is mainly conceptual/contextual rather than externally searchable.
 - grounding_unavailable: search/tool failed.
 
-Prefer official or primary sources. For brand/product specs, use the relevant region/market when available.
+Prefer evidence in this order: official documentation, standards/government sources, academic sources, educational/reference materials, then Wikipedia. Do not use tutorials, blogs, forums, or Q&A sites for a supports/refutes decision.
+For brand/product specs, use the relevant region/market when available.
 If the lecture claim is a concrete example value whose truth depends on brand, product, region, policy, current price, capacity, weight, version, support status, or statistics, do not rely on generic common knowledge; use web evidence.
 If the web evidence only addresses a different unit, region, product, or time period, mark insufficient_evidence.
 Do not mark a claim false only because a source does not explicitly state it. Use claim_false only when reliable sources directly contradict the claim.
@@ -502,19 +523,80 @@ def _source_trust(url: str) -> dict[str, Any]:
     domain = _domain_from_url(url)
     trust_level = "secondary"
     score = 0.55
-    if domain.endswith((".gov", ".go.kr", ".gov.kr")):
+    official_doc_domains = (
+        "docs.",
+        "developer.",
+        "developers.",
+        "learn.",
+        "support.",
+        "help.",
+        "cloud.",
+        "developer.mozilla.org",
+        "docs.python.org",
+        "kubernetes.io",
+        "docs.docker.com",
+        "docs.github.com",
+        "docs.oracle.com",
+        "docs.aws.amazon.com",
+        "cloud.google.com",
+        "docs.microsoft.com",
+        "learn.microsoft.com",
+    )
+    standards_domains = (
+        "w3.org",
+        "ietf.org",
+        "rfc-editor.org",
+        "iso.org",
+        "ecma-international.org",
+        "ieee.org",
+        "nist.gov",
+    )
+    educational_domains = (
+        "britannica.com",
+        "khanacademy.org",
+        "openstax.org",
+        "opentextbooks.org",
+        "pressbooks.pub",
+    )
+    tutorial_domains = (
+        "tutorialspoint.",
+        "w3schools.",
+        "geeksforgeeks.",
+        "freecodecamp.",
+        "javatpoint.",
+        "programiz.",
+    )
+    forum_domains = ("reddit.", "stackoverflow.", "stackexchange.")
+    blog_domains = ("blog", "medium.", "tistory.", "velog.", "substack.")
+    if any(token in domain for token in tutorial_domains):
+        trust_level, score = "tutorial", 0.20
+    elif any(token in domain for token in forum_domains):
+        trust_level, score = "forum", 0.20
+    elif any(token in domain for token in blog_domains):
+        trust_level, score = "blog", 0.20
+    elif "wikipedia.org" in domain:
+        trust_level, score = "encyclopedia", 0.70
+    elif any(token in domain for token in standards_domains):
+        trust_level, score = "standards", 0.95
+    elif domain.endswith((".gov", ".go.kr", ".gov.kr")):
         trust_level, score = "government", 0.95
     elif domain.endswith((".edu", ".ac.kr")):
         trust_level, score = "academic", 0.85
-    elif any(token in domain for token in ("w3.org", "ietf.org", "rfc-editor.org", "iso.org", "ecma-international.org")):
-        trust_level, score = "standards", 0.95
-    elif any(token in domain for token in ("docs.", "developer.", "learn.", "support.", "help.", "cloud.")):
-        trust_level, score = "official_docs", 0.80
-    elif any(token in domain for token in ("blog", "medium.", "tistory.", "velog.", "reddit.", "stackoverflow.")):
-        trust_level, score = "weak_secondary", 0.30
+    elif any(token in domain for token in official_doc_domains):
+        trust_level, score = "official_docs", 0.90
+    elif any(token in domain for token in educational_domains):
+        trust_level, score = "educational", 0.75
     elif any(token in domain for token in ("news", "reuters.", "apnews.", "bbc.", "nytimes.", "wsj.")):
         trust_level, score = "news", 0.60
-    return {"domain": domain, "trust_level": trust_level, "trust_score": score}
+    priority = SOURCE_PRIORITY_ORDER.get(trust_level)
+    return {
+        "domain": domain,
+        "trust_level": trust_level,
+        "trust_score": score,
+        "source_priority": priority,
+        "source_priority_label": SOURCE_PRIORITY_LABELS.get(priority, ""),
+        "auto_decision_eligible": bool(priority) and trust_level not in EXCLUDED_SOURCE_LEVELS,
+    }
 
 
 def _decode_bytes(data: bytes, content_type: str) -> str:
@@ -736,6 +818,7 @@ def _verify_payload_sources(issue: dict[str, Any], payload: dict[str, Any]) -> d
             passage["match_status"] = "keyword_fallback"
         row["matched_passages"] = matched_model_passages or fallback_passages
         row["direct_match"] = bool(row["matched_passages"])
+        row["priority_eligible"] = bool(row["direct_match"] and row.get("auto_decision_eligible"))
         verified_sources.append(row)
 
     matched_sources = [row for row in verified_sources if row.get("direct_match")]
@@ -765,12 +848,17 @@ def _build_evidence_recheck_prompt(issue: dict[str, Any], payload: dict[str, Any
     for source in payload.get("verified_sources", []) or []:
         if not isinstance(source, dict) or not source.get("direct_match"):
             continue
+        if not source.get("auto_decision_eligible"):
+            continue
         passages = source.get("matched_passages") if isinstance(source.get("matched_passages"), list) else []
         excerpts.append({
             "url": source.get("url", ""),
             "domain": source.get("domain", ""),
             "trust_level": source.get("trust_level", ""),
             "trust_score": source.get("trust_score", 0.0),
+            "source_priority": source.get("source_priority"),
+            "source_priority_label": source.get("source_priority_label", ""),
+            "auto_decision_eligible": source.get("auto_decision_eligible", False),
             "passages": passages[:3],
         })
     return f"""You are rechecking a lecture issue using only fetched source excerpts.
@@ -778,6 +866,7 @@ Current date: {current_date}
 
 Do not use web search, memory, or assumptions. Judge only from the excerpts.
 If the excerpts do not directly prove the claim true or false in the relevant region/time/product context, return uncertain.
+The excerpts have already been filtered to automatic-decision source tiers: official documentation, standards/government, academic, educational/reference, or Wikipedia.
 
 Issue category: {issue.get("category", "")}
 Resolved claim: {issue.get("resolved_claim", "")}
@@ -1130,22 +1219,80 @@ def _call_grounding_trial(
     return payload, usage
 
 
+def _eligible_sources_for_decision(trial: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for source in trial.get("verified_sources", []) or []:
+        if not isinstance(source, dict):
+            continue
+        if not source.get("direct_match") or not source.get("auto_decision_eligible"):
+            continue
+        priority = source.get("source_priority")
+        if not isinstance(priority, int):
+            continue
+        rows.append(source)
+    return rows
+
+
+def _trial_best_source_priority(trial: dict[str, Any]) -> int | None:
+    priorities = [
+        int(source["source_priority"])
+        for source in _eligible_sources_for_decision(trial)
+        if isinstance(source.get("source_priority"), int)
+    ]
+    return min(priorities) if priorities else None
+
+
+def _trial_selected_sources(trial: dict[str, Any], priority: int) -> list[dict[str, Any]]:
+    return [
+        source for source in _eligible_sources_for_decision(trial)
+        if source.get("source_priority") == priority
+    ]
+
+
+def _source_priority_diagnostics(trials: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = Counter()
+    excluded_counts = Counter()
+    for trial in trials:
+        for source in trial.get("verified_sources", []) or []:
+            if not isinstance(source, dict):
+                continue
+            level = str(source.get("trust_level") or "unknown")
+            if source.get("priority_eligible"):
+                counts[level] += 1
+            elif source.get("direct_match"):
+                excluded_counts[level] += 1
+    return {
+        "eligible_direct_source_counts": dict(counts),
+        "excluded_direct_source_counts": dict(excluded_counts),
+    }
+
+
 def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, Any]]) -> dict[str, Any]:
     verified_trials = [
         trial for trial in trials
         if trial.get("source_verification_status") == "verified"
         and trial.get("status") in {"supports_issue", "refutes_issue"}
+        and _trial_best_source_priority(trial) is not None
     ]
-    support_trials = [trial for trial in verified_trials if trial.get("status") == "supports_issue"]
-    refute_trials = [trial for trial in verified_trials if trial.get("status") == "refutes_issue"]
+    best_priority = min(
+        (_trial_best_source_priority(trial) for trial in verified_trials),
+        default=None,
+    )
+    priority_trials = [
+        trial for trial in verified_trials
+        if best_priority is not None and _trial_best_source_priority(trial) == best_priority
+    ]
+    support_trials = [trial for trial in priority_trials if trial.get("status") == "supports_issue"]
+    refute_trials = [trial for trial in priority_trials if trial.get("status") == "refutes_issue"]
     source_urls: list[str] = []
-    for trial in verified_trials:
-        for source in trial.get("verified_sources", []) or []:
-            if not isinstance(source, dict) or not source.get("direct_match"):
-                continue
-            url = str(source.get("url") or "")
-            if url and url not in source_urls:
-                source_urls.append(url)
+    selected_sources: list[dict[str, Any]] = []
+    if best_priority is not None:
+        for trial in priority_trials:
+            for source in _trial_selected_sources(trial, best_priority):
+                selected_sources.append(source)
+                url = str(source.get("url") or "")
+                if url and url not in source_urls:
+                    source_urls.append(url)
 
     if support_trials and refute_trials:
         status = "insufficient_evidence"
@@ -1166,9 +1313,13 @@ def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, An
         status = "insufficient_evidence"
         claim_verdict = "uncertain"
         issue_supported = None
-        reason = "모델 응답의 URL을 직접 확인했지만, 본문 근거까지 검증된 supports/refutes 판단이 없습니다."
+        reason = (
+            "모델 응답의 URL을 직접 확인했지만, 자동판정에 허용된 출처 등급의 직접 본문 근거가 있는 "
+            "supports/refutes 판단이 없습니다."
+        )
 
     status_counts = Counter(_normalize_status(trial.get("status")) for trial in trials)
+    priority_diagnostics = _source_priority_diagnostics(trials)
     return {
         "status": status,
         "claim_verdict": claim_verdict,
@@ -1177,7 +1328,7 @@ def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, An
         "evidence_sources": source_urls,
         "evidence_summary": " / ".join(
             str(trial.get("evidence_summary") or "").strip()
-            for trial in verified_trials
+            for trial in priority_trials
             if str(trial.get("evidence_summary") or "").strip()
         )[:1200],
         "search_queries": {
@@ -1186,7 +1337,13 @@ def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, An
         },
         "trials": trials,
         "trial_status_counts": dict(status_counts),
+        "selected_source_priority": best_priority,
+        "selected_source_priority_label": SOURCE_PRIORITY_LABELS.get(best_priority, "") if best_priority else "",
+        "selected_source_count": len(selected_sources),
+        "source_priority_diagnostics": priority_diagnostics,
         "source_verification_policy": "supports/refutes requires fetched URL text with directly matched claim passages",
+        "source_priority_policy": SOURCE_PRIORITY_POLICY,
+        "excluded_source_levels": sorted(EXCLUDED_SOURCE_LEVELS),
     }
 
 
