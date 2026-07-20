@@ -160,6 +160,22 @@ def _passage_extraction_enabled() -> bool:
     }
 
 
+def _source_repair_enabled() -> bool:
+    return os.getenv("CLASSIFIED_ISSUE_GROUNDING_SOURCE_REPAIR_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _max_source_repair_urls() -> int:
+    try:
+        return max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_SOURCE_REPAIR_MAX_URLS", "3")))
+    except ValueError:
+        return 3
+
+
 def _fetch_timeout_sec() -> float:
     return max(1.0, _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_TIMEOUT_SEC"), 8.0))
 
@@ -835,34 +851,38 @@ def _verify_reported_passages(text: str, passages: list[dict[str, Any]]) -> list
     return verified
 
 
+def _verify_source_url(url: str, reported_passages: list[dict[str, Any]], terms: list[str]) -> dict[str, Any]:
+    row = _fetch_url_text(str(url))
+    text = str(row.pop("text", "") or "")
+    if text:
+        row["_source_text"] = text
+    source_reported = _reported_passages_for_url(reported_passages, str(url))
+    row["model_reported_passages"] = source_reported
+    row["verified_model_passages"] = _verify_reported_passages(text, source_reported) if text else [
+        {**passage, "match_status": "unverified_fetch_failed", "match_score": 0.0, "matched_text": ""}
+        for passage in source_reported
+    ]
+    matched_model_passages = [
+        passage for passage in row["verified_model_passages"]
+        if passage.get("match_status") in {"exact", "fuzzy"}
+    ]
+    fallback_passages = [] if matched_model_passages else _match_passages(text, terms)
+    for passage in fallback_passages:
+        passage["selection_method"] = "keyword_fallback"
+        passage["match_status"] = "keyword_fallback"
+    row["matched_passages"] = matched_model_passages or fallback_passages
+    row["direct_match"] = bool(row["matched_passages"])
+    row["priority_eligible"] = bool(row["direct_match"] and row.get("auto_decision_eligible"))
+    return row
+
+
 def _verify_payload_sources(issue: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     sources = payload.get("evidence_sources") if isinstance(payload.get("evidence_sources"), list) else []
     reported_passages = payload.get("evidence_passages") if isinstance(payload.get("evidence_passages"), list) else []
     terms = _verification_terms(issue, payload)
     verified_sources = []
     for url in sources[:_max_sources_per_trial()]:
-        row = _fetch_url_text(str(url))
-        text = str(row.pop("text", "") or "")
-        if text:
-            row["_source_text"] = text
-        source_reported = _reported_passages_for_url(reported_passages, str(url))
-        row["model_reported_passages"] = source_reported
-        row["verified_model_passages"] = _verify_reported_passages(text, source_reported) if text else [
-            {**passage, "match_status": "unverified_fetch_failed", "match_score": 0.0, "matched_text": ""}
-            for passage in source_reported
-        ]
-        matched_model_passages = [
-            passage for passage in row["verified_model_passages"]
-            if passage.get("match_status") in {"exact", "fuzzy"}
-        ]
-        fallback_passages = [] if matched_model_passages else _match_passages(text, terms)
-        for passage in fallback_passages:
-            passage["selection_method"] = "keyword_fallback"
-            passage["match_status"] = "keyword_fallback"
-        row["matched_passages"] = matched_model_passages or fallback_passages
-        row["direct_match"] = bool(row["matched_passages"])
-        row["priority_eligible"] = bool(row["direct_match"] and row.get("auto_decision_eligible"))
-        verified_sources.append(row)
+        verified_sources.append(_verify_source_url(str(url), reported_passages, terms))
 
     matched_sources = [row for row in verified_sources if row.get("direct_match")]
     if matched_sources:
@@ -897,6 +917,198 @@ def _refresh_source_verification_status(payload: dict[str, Any]) -> None:
         verification_status = "no_sources"
     payload["source_verification_status"] = verification_status
     payload["direct_evidence_count"] = sum(len(row.get("matched_passages") or []) for row in matched_sources)
+
+
+def _directional_status_before_repair(payload: dict[str, Any]) -> str:
+    for key in ("status", "pre_source_verification_status", "pre_evidence_recheck_status"):
+        status = str(payload.get(key) or "")
+        if status in {"supports_issue", "refutes_issue"}:
+            return status
+    return ""
+
+
+def _best_eligible_priority(payload: dict[str, Any]) -> int | None:
+    priorities = [
+        source.get("source_priority")
+        for source in payload.get("verified_sources", []) or []
+        if isinstance(source, dict)
+        and source.get("direct_match")
+        and source.get("auto_decision_eligible")
+        and isinstance(source.get("source_priority"), int)
+    ]
+    return min(priorities) if priorities else None
+
+
+def _restore_directional_status(payload: dict[str, Any], status: str) -> None:
+    if status not in {"supports_issue", "refutes_issue"}:
+        return
+    payload["status"] = status
+    if status == "supports_issue":
+        payload["claim_verdict"] = "claim_false"
+        payload["issue_supported"] = True
+    else:
+        payload["claim_verdict"] = "claim_true"
+        payload["issue_supported"] = False
+
+
+def _needs_source_repair(payload: dict[str, Any]) -> bool:
+    best_priority = _best_eligible_priority(payload)
+    if best_priority is not None and best_priority <= SOURCE_PRIORITY_ORDER["government"]:
+        return False
+    if _directional_status_before_repair(payload):
+        return True
+    for source in payload.get("verified_sources", []) or []:
+        if not isinstance(source, dict):
+            continue
+        priority = source.get("source_priority")
+        if isinstance(priority, int) and priority <= SOURCE_PRIORITY_ORDER["government"]:
+            if source.get("fetch_status") != "ok" or not source.get("direct_match"):
+                return True
+    return payload.get("source_verification_status") in {"no_sources", "no_direct_passage"}
+
+
+def _build_source_repair_prompt(issue: dict[str, Any], payload: dict[str, Any], current_date: str) -> str:
+    existing_sources = []
+    for source in payload.get("verified_sources", []) or []:
+        if not isinstance(source, dict):
+            continue
+        existing_sources.append({
+            "url": source.get("url", ""),
+            "domain": source.get("domain", ""),
+            "trust_level": source.get("trust_level", ""),
+            "source_priority": source.get("source_priority"),
+            "fetch_status": source.get("fetch_status", ""),
+            "error": source.get("error", ""),
+            "direct_match": source.get("direct_match", False),
+            "auto_decision_eligible": source.get("auto_decision_eligible", False),
+            "matched_passage_count": len(source.get("matched_passages") or []),
+        })
+    return f"""You are repairing web evidence sources for a lecture issue verifier.
+Current date: {current_date}
+
+The previous source set either failed to fetch, was too broad, or only produced low-priority evidence.
+Find replacement URLs that are more specific and more authoritative.
+
+Priority order:
+1. Official product/vendor/API/reference documentation
+2. Standards or government sources
+3. Academic sources
+4. Educational/reference materials
+5. Wikipedia only as fallback
+
+Do not return tutorials, blogs, forums, StackOverflow, or Q&A sites.
+Prefer concrete reference/API pages over broad overview pages.
+If the claim is about application file I/O, direct disk access, operating-system mediation, or system calls, prefer individual OS API/reference pages such as Microsoft Learn CreateFile, WriteFile, ReadFile, Windows file handles, or POSIX open/write references.
+If a Microsoft Learn overview URL failed or was too broad, drill down to the individual function/reference pages.
+Do not return a broad function index/listing page as the only official source; include the specific reference pages for the named API/function when possible.
+
+Resolved claim: {issue.get("resolved_claim", "")}
+Original claim_text: {issue.get("claim_text", "")}
+Current model status before repair: {_directional_status_before_repair(payload) or payload.get("status", "")}
+Existing search queries: {json.dumps(payload.get("search_queries", []), ensure_ascii=False)}
+Existing sources and failures:
+{json.dumps(existing_sources, ensure_ascii=False, indent=2)}
+
+Return JSON only:
+{{
+  "search_queries": ["specific repair query 1", "specific repair query 2"],
+  "match_terms": ["Korean term", "English term", "API/function name"],
+  "evidence_sources": ["https://official-or-reference-url-1", "https://official-or-reference-url-2"],
+  "evidence_passages": [
+    {{
+      "url": "https://source-url",
+      "quote_or_paragraph": "known relevant sentence or paragraph if available",
+      "key_sentence": "most important sentence if available",
+      "stance": "supports_issue | refutes_issue | unclear",
+      "why_relevant": "brief Korean explanation"
+    }}
+  ],
+  "repair_reason": "brief Korean explanation of why these URLs are better"
+}}
+"""
+
+
+def _call_source_repair_fallback(
+    *,
+    model_spec: str,
+    issue: dict[str, Any],
+    payload: dict[str, Any],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    if not _source_repair_enabled() or not _needs_source_repair(payload):
+        return payload, _empty_token_usage()
+    directional_status = _directional_status_before_repair(payload)
+    prompt = _build_source_repair_prompt(issue, payload, current_date)
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    repair: dict[str, Any] = {
+        "provider": resolved.get("provider", ""),
+        "model": model_spec,
+        "resolved_model": resolved.get("resolved_model", model_spec),
+        "trigger_best_priority": _best_eligible_priority(payload),
+        "added_source_count": 0,
+        "direct_source_count": 0,
+        "eligible_direct_source_count": 0,
+    }
+    try:
+        repaired = _parse_response(text or "", require_sources=False)
+    except Exception as exc:
+        repair["parse_error"] = str(exc)
+        payload["source_repair"] = repair
+        return payload, usage
+
+    existing_urls = {
+        str(source.get("url") or "")
+        for source in payload.get("verified_sources", []) or []
+        if isinstance(source, dict)
+    }
+    payload_sources = payload.get("evidence_sources") if isinstance(payload.get("evidence_sources"), list) else []
+    payload_queries = payload.get("search_queries") if isinstance(payload.get("search_queries"), list) else []
+    payload_terms = payload.get("match_terms") if isinstance(payload.get("match_terms"), list) else []
+    for query in repaired.get("search_queries", []) or []:
+        if query not in payload_queries:
+            payload_queries.append(query)
+    for term in repaired.get("match_terms", []) or []:
+        if term not in payload_terms:
+            payload_terms.append(term)
+    payload["search_queries"] = payload_queries
+    payload["match_terms"] = payload_terms[:64]
+
+    repair_sources = [
+        str(url).strip()
+        for url in repaired.get("evidence_sources", []) or []
+        if re.match(r"^https?://", str(url).strip(), flags=re.IGNORECASE)
+    ]
+    repair_passages = repaired.get("evidence_passages") if isinstance(repaired.get("evidence_passages"), list) else []
+    terms = _verification_terms(issue, payload)
+    verified_sources = payload.get("verified_sources") if isinstance(payload.get("verified_sources"), list) else []
+    for url in repair_sources:
+        if url in existing_urls:
+            continue
+        if repair["added_source_count"] >= _max_source_repair_urls():
+            break
+        row = _verify_source_url(url, repair_passages, terms)
+        row["source_added_by_repair"] = True
+        verified_sources.append(row)
+        existing_urls.add(url)
+        if url not in payload_sources:
+            payload_sources.append(url)
+        repair["added_source_count"] += 1
+    payload["verified_sources"] = verified_sources
+    payload["evidence_sources"] = payload_sources
+    _refresh_source_verification_status(payload)
+    repair["direct_source_count"] = sum(
+        1 for source in verified_sources if isinstance(source, dict) and source.get("direct_match")
+    )
+    repair["eligible_direct_source_count"] = sum(
+        1 for source in verified_sources if isinstance(source, dict) and source.get("priority_eligible")
+    )
+    repair["best_priority_after_repair"] = _best_eligible_priority(payload)
+    repair["repair_reason"] = repaired.get("repair_reason", "")
+    payload["source_repair"] = repair
+    if payload.get("source_verification_status") == "verified" and directional_status:
+        _restore_directional_status(payload, directional_status)
+    return payload, usage
 
 
 def _source_text_sample(text: str, terms: list[str], max_chars: int = 5000) -> str:
@@ -1069,6 +1281,8 @@ Current date: {current_date}
 Do not use web search, memory, or assumptions. Judge only from the excerpts.
 If the excerpts do not directly prove the claim true or false in the relevant region/time/product context, return uncertain.
 The excerpts have already been filtered to automatic-decision source tiers: official documentation, standards/government, academic, educational/reference, or Wikipedia.
+If the lecture uses a named application/product merely as an example of a general software class, and the claim is about the general operating-system mechanism for that class, do not require product-specific vendor documentation. General OS/API/reference evidence may be sufficient.
+Pay close attention to the actor/subject of the claim. If the claim says a resource/object itself performs an action, but the excerpts attribute that action to an operating system, manager, API, or other component, treat that as a contradiction rather than confirmation.
 
 Issue category: {issue.get("category", "")}
 Resolved claim: {issue.get("resolved_claim", "")}
@@ -1401,6 +1615,14 @@ def _call_grounding_trial(
     payload["provider"] = payload.get("provider") or resolved.get("provider", "")
     payload["resolved_model"] = payload.get("resolved_model") or resolved.get("resolved_model", model_spec)
     payload = _verify_payload_sources(issue, payload)
+    payload, repair_usage = _call_source_repair_fallback(
+        model_spec=model_spec,
+        issue=issue,
+        payload=payload,
+        current_date=current_date,
+        max_tokens=max_tokens,
+    )
+    _merge_token_usage(usage, repair_usage)
     payload, extraction_usage = _call_passage_extraction_fallback(
         model_spec=model_spec,
         issue=issue,
