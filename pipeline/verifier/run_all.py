@@ -928,6 +928,7 @@ def _format_classified_issue_report(content_view: dict) -> str:
             "factual_error": "사실 오류",
             "temporal_error": "오래된 내용",
             "scope_overclaim": "과도한 일반화",
+            "confusing_explanation": "혼동 가능 설명",
         }
         parts = [f"{labels.get(key, key)} {value}건" for key, value in breakdown.items()]
         lines.append(f"유형별: {', '.join(parts)}")

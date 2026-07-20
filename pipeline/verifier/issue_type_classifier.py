@@ -21,13 +21,12 @@ DEFAULT_MODELS = (
     "claude",
     "grok",
 )
-# LLM이 확률을 내는 5유형. downstream import 호환을 위해 ISSUE_TYPES 이름 유지.
+# LLM이 확률을 내는 4유형. ambiguous_issue는 별도 routing 결과로 유지한다.
 ISSUE_TYPES = (
     "temporal_error",
     "scope_overclaim",
     "factual_error",
-    "bad_analogy_example",
-    "source_citation_error",
+    "confusing_explanation",
 )
 AMBIGUOUS_ISSUE_TYPE = "ambiguous_issue"
 ALL_ISSUE_TYPES = ISSUE_TYPES + (AMBIGUOUS_ISSUE_TYPE,)
@@ -47,16 +46,14 @@ ISSUE_TYPE_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
-    "bad_analogy_example": "비유/예시 부적절",
-    "source_citation_error": "출처/인용 오류",
+    "confusing_explanation": "혼동 가능 설명",
     AMBIGUOUS_ISSUE_TYPE: "분류 불명확",
 }
 ISSUE_TYPE_SHORT_LABELS = {
     "factual_error": "factual",
     "temporal_error": "temporal",
     "scope_overclaim": "scope",
-    "bad_analogy_example": "analogy",
-    "source_citation_error": "source",
+    "confusing_explanation": "confusing",
 }
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
@@ -175,28 +172,21 @@ def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _probabilities_template_json() -> str:
-    entries = ",\n        ".join(f'"{issue_type}": 0.0' for issue_type in ISSUE_TYPES)
-    return f"{{\n        {entries}\n      }}"
-
-
 def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
     rows = [_issue_brief(item) for item in items]
-    probabilities_template = _probabilities_template_json()
-    return f"""당신은 강의 verifier가 선별한 issue 후보를 5가지 유형으로 재분류하는 심사자입니다.
+    return f"""당신은 강의 verifier가 선별한 issue 후보를 4가지 유형으로 재분류하는 심사자입니다.
 
 기준일: {current_date}
 
-각 입력 issue에 대해 아래 다섯 유형에 해당할 가능성을 확률 분포로 평가하세요.
-확률은 다섯 유형 전체 합이 1.0이 되도록 작성하세요.
+각 입력 issue에 대해 아래 네 유형에 해당할 가능성을 확률 분포로 평가하세요.
+확률은 네 유형 전체 합이 1.0이 되도록 작성하세요.
 애매한 경우에는 가장 그럴듯한 한 유형에만 몰지 말고, 가능한 유형들에 확률을 나누어 주세요.
 
 분류:
 - factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
 - temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 부족하거나, 더 이상 맞지 않는 정보인 경우.
+- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
 - scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
-- bad_analogy_example: 비유, 예시, 은유가 개념 이해를 왜곡하거나 잘못된 명제를 학습자에게 심을 수 있는 경우. 단순히 비유가 거칠거나 교육적 취향 차이인 경우는 제외.
-- source_citation_error: 논문, 규격, 서적, 기관, 인물, 통계 등 출처·인용·근거 제시가 명시된 claim에서 attribution이 틀린 경우.
 
 판단 기준:
 - resolved_claim만 근거로 판단하세요.
@@ -206,17 +196,15 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 중요:
 - 단순히 날짜나 시점 표현이 들어갔다고 temporal_error가 아니다. 제시된 시점에서도 틀린 정의/원리/관계/메커니즘 오류는 factual_error로 본다.
 - factual_error와 temporal_error가 모두 가능하면, 그 정보가 과거에는 맞았거나 당시에는 합리적이었지만 현재 기준으로 낡은 경우 temporal_error에 더 높은 확률을 주세요. 제시된 시점이나 과거 기준에서도 틀린 명제라면 factual_error에 더 높은 확률을 주세요.
+- 단순히 더 자세한 설명이 가능하다는 이유만으로 confusing_explanation을 선택하지 마세요.
 - "항상", "모든", "오직", "유일한" 같은 단어가 있다는 이유만으로 scope_overclaim로 올리지 마세요.
 - factual_error와 scope_overclaim이 모두 가능하면, 제한 표현이나 범위 단정만 완화하면 대체로 맞는 문장이 되는 경우 scope_overclaim에 더 높은 확률을 주세요. 명제의 핵심 내용 자체가 틀리면 factual_error에 더 높은 확률을 주세요.
-- factual_error와 scope_overclaim이 모두 가능하면, 일반화의 오류가 더 강하다면 scope_overclaim에 더 높은 확률을 주세요.
 - temporal_error와 scope_overclaim이 모두 가능하면, 현재 기술 생태계 변화로 인해 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
-- factual_error와 source_citation_error가 모두 가능하면, 출처·인용·근거 제시가 claim의 핵심이면 source_citation_error에 더 높은 확률을 주세요. 출처 없이 내용만 틀리면 factual_error에 더 높은 확률을 주세요.
-- factual_error와 bad_analogy_example이 모두 가능하면, 예시·비유 프레임 자체가 오개념의 핵심이면 bad_analogy_example에 더 높은 확률을 주세요. 예시 속 사실 전제가 틀린 것이 핵심이면 factual_error에 더 높은 확률을 주세요.
 
 
 응답은 JSON만 출력하세요.
 모든 입력 id에 대해 classifications 항목을 하나씩 포함하세요.
-각 probabilities 객체는 다섯 키를 모두 포함해야 하며, 값은 0.0 이상 1.0 이하 숫자여야 합니다.
+각 probabilities 객체는 네 키를 모두 포함해야 하며, 값은 0.0 이상 1.0 이하 숫자여야 합니다.
 probabilities의 합은 1.0이 되도록 하세요.
 confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도입니다.
 
@@ -225,7 +213,12 @@ confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도�
   "classifications": [
     {{
       "id": "입력 id",
-      "probabilities": {probabilities_template},
+      "probabilities": {{
+        "factual_error": 0.0,
+        "temporal_error": 0.0,
+        "confusing_explanation": 0.0,
+        "scope_overclaim": 0.0
+      }},
       "reason": "한두 문장 근거",
       "confidence": 0.0
     }}
@@ -1541,7 +1534,7 @@ def _default_next_input_path(output_path: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Classify issue-judge selected issues into 3 issue types with ambiguous routing.",
+        description="Classify issue-judge selected issues into 4 issue types with ambiguous routing.",
     )
     parser.add_argument("input_json", help="verifier issue judge JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
@@ -1553,7 +1546,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Default: ISSUE_TYPE_CLASSIFIER_MODELS or 4-model preset",
+        help="comma/space separated model list. Default: ISSUE_TYPE_CLASSIFIER_MODELS or preset",
     )
     parser.add_argument(
         "--issue-list-keys",
