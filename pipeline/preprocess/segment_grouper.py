@@ -12,12 +12,20 @@
 """
 
 import json
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from google.genai import types
 
 from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 from .utils import api_call_with_retry
+
+
+CONTEXT_PARALLEL_REQUESTS = max(
+    1,
+    int(os.getenv("VERILEC_CONTEXT_PARALLEL_REQUESTS", "12")),
+)
 
 
 # 문장 종결로 볼 문장부호 (한국어·영어·공백 제거 후 끝)
@@ -580,15 +588,52 @@ def group_segments_by_scene_and_context(
                 scene_idx = scene_ranges[-1]["scene_index"]
         seg_to_scene.append(scene_idx)
 
+    # Scene별 의미 경계 판단은 서로 독립적인 Gemini 호출이므로 병렬 실행한다.
+    # 결과는 scene_ranges 순서로 다시 조립해 기존 JSON 순서를 유지한다.
+    scene_entries = []
+    for r in scene_ranges:
+        sidx = r["scene_index"]
+        indices_in_scene = [i for i in range(len(segments)) if seg_to_scene[i] == sidx]
+        initial_groups = []
+        for i in indices_in_scene:
+            seg = segments[i]
+            initial_groups.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": (seg.get("text") or "").strip(),
+                "segment_indices": [i],
+            })
+        scene_entries.append({"range": r, "initial_groups": initial_groups})
+
+    break_after_by_entry: dict[int, set[int]] = {}
+    llm_jobs = [
+        (entry_index, entry["initial_groups"])
+        for entry_index, entry in enumerate(scene_entries)
+        if use_llm_merge and len(entry["initial_groups"]) > 1
+    ]
+    if llm_jobs:
+        worker_count = min(CONTEXT_PARALLEL_REQUESTS, len(llm_jobs))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(decide_context_breaks, groups): entry_index
+                for entry_index, groups in llm_jobs
+            }
+            for future in as_completed(future_map):
+                entry_index = future_map[future]
+                try:
+                    break_after_by_entry[entry_index] = set(future.result() or set())
+                except Exception:
+                    break_after_by_entry[entry_index] = set()
+
     scenes_structure = []
     groups_flat = []
-
-    for r in scene_ranges:
+    for entry_index, entry in enumerate(scene_entries):
+        r = entry["range"]
         sidx = r["scene_index"]
         start_sec = r["start_sec"]
         end_sec = r["end_sec"]
-        indices_in_scene = [i for i in range(len(segments)) if seg_to_scene[i] == sidx]
-        if not indices_in_scene:
+        initial_groups = entry["initial_groups"]
+        if not initial_groups:
             scenes_structure.append({
                 "scene_id": f"scene/{int(sidx):04d}",
                 "scene_index": sidx,
@@ -603,20 +648,7 @@ def group_segments_by_scene_and_context(
             })
             continue
 
-        scene_segments = [segments[i] for i in indices_in_scene]
-        initial_groups = []
-        for k, i in enumerate(indices_in_scene):
-            seg = segments[i]
-            initial_groups.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": (seg.get("text") or "").strip(),
-                "segment_indices": [i],
-            })
-
-        break_after: set[int] = set()
-        if use_llm_merge and len(initial_groups) > 1:
-            break_after = decide_context_breaks(initial_groups)
+        break_after = break_after_by_entry.get(entry_index, set())
 
         # 수업 운영/감사/짧은 전환 멘트는 본 설명 context와 섞이지 않도록 앞뒤를 끊는다.
         for j, g in enumerate(initial_groups):

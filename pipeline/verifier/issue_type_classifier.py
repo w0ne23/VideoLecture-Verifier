@@ -1387,19 +1387,40 @@ def classify_issues(
 
         print(
             f"\n  ── issue type ensemble 분류 시작 "
-            f"({len(refs)}건, {len(models)}모델, batch_size={batch_size}, workers={max_workers}) ──",
+            f"({len(refs)}건, {len(models)}모델, batch_size={batch_size}, "
+            f"workers_per_model={max_workers}) ──",
             flush=True,
         )
         failed_batch_args: list[tuple] = []
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(worker_args) or 1)) as executor:
-            future_map = {executor.submit(_batch_worker, args): args for args in worker_args}
-            for future in as_completed(future_map):
-                args = future_map[future]
-                model = args[0]
-                try:
-                    result = future.result()
+        # ``max_workers``는 전체 한도가 아니라 모델당 한도다. 공급자별
+        # executor를 분리해 한 모델의 대기/제한이 다른 모델의 슬롯을 막지 않는다.
+        worker_args_by_model: dict[str, list[tuple]] = defaultdict(list)
+        for args in worker_args:
+            worker_args_by_model[args[0]].append(args)
+
+        def _run_model_batches(model: str, model_args: list[tuple]) -> tuple[str, list[tuple], list[tuple[tuple, Exception]]]:
+            completed: list[tuple] = []
+            failed: list[tuple[tuple, Exception]] = []
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(model_args))) as executor:
+                future_map = {executor.submit(_batch_worker, args): args for args in model_args}
+                for future in as_completed(future_map):
+                    args = future_map[future]
+                    try:
+                        completed.append(future.result())
+                    except Exception as exc:
+                        failed.append((args, exc))
+            return model, completed, failed
+
+        with ThreadPoolExecutor(max_workers=max(1, len(worker_args_by_model))) as model_executor:
+            model_futures = {
+                model_executor.submit(_run_model_batches, model, model_args): model
+                for model, model_args in worker_args_by_model.items()
+            }
+            for model_future in as_completed(model_futures):
+                model, completed, failed = model_future.result()
+                for result in completed:
                     _append_batch_result(model_results, result)
-                except Exception as exc:
+                for args, exc in failed:
                     print(f"  ✗ [{model}] batch 작업 실패: {exc}", flush=True)
                     _append_batch_error(model_results, args, exc)
                     failed_batch_args.append(args)

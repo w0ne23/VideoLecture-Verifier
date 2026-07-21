@@ -9,7 +9,7 @@ main.py
          P2B transcribe_audio          — 전체 전사 (scene 매핑용)
   [병렬] P3A analyze_annotation        — 필기 강조 분석
          P3B process_audio             — 오디오 후처리
-                     text_processor    — 2-pass 교정 + 침묵 구간 저장
+                     text_processor    — 3-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
   [직렬] V1  build_analyzer_input      — 검증 입력 데이터 구성
   [직렬] V2  run_verifier              — claim 추출 → issue 판단/분류 → 멀티 LLM 검증
@@ -370,7 +370,7 @@ def process_audio(
     transcript_raw_path: Optional[str] = None,
     on_contexts_ready: Optional[Callable[[dict], None]] = None,
 ) -> dict:
-    from .text_processor import correct_segments_two_pass
+    from .text_processor import correct_segments_three_pass
     from .segment_grouper import (
         load_slide_ranges,
         group_segments_by_context,
@@ -517,11 +517,11 @@ def process_audio(
         detected_silences = transcribe_result.get("silences", [])
         print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
 
-    # [3B-2] 2-pass 텍스트 교정 (text_processor 내부 엔진)
-    print("  [3B-2] 텍스트 교정 (2-pass)...")
+    # [3B-2] 3-pass 텍스트 교정 (Gemini 후보 → GPT 보강 → GPT 적용 판정)
+    print("  [3B-2] 텍스트 교정 (3-pass)...")
     t0 = time.time()
     textualized_dir = Path(textualized_path).parent if textualized_path else output_dir
-    segments = correct_segments_two_pass(
+    segments = correct_segments_three_pass(
         segments=segments_raw,
         metadata=metadata,
         textualized_data=textualized_data,
