@@ -72,8 +72,10 @@ def run_preprocess_pipeline(
     print(f"\n  ✓ P2 textualize_transcribe 완료 — 슬라이드 텍스트화 + 전체 전사  ({timings['P2 textualize_transcribe total — 텍스트화 + 전사 총합']:.1f}초)")
     print("─" * 70)
 
-    helpers._banner("P3 build_audio_context — 오디오 context 후처리")
+    helpers._banner("P3 enrich_audio_annotation — 필기 강조 분석 + 오디오 후처리")
     t_parallel = time.time()
+    audio_result: dict = {}
+    annotation_result: dict = {}
     notify_stage("preprocess_enrich_audio_annotation", "run")
 
     transcript_raw_path = transcript_result.get(
@@ -81,20 +83,29 @@ def run_preprocess_pipeline(
         str(output_dir / f"{stem}_transcript_raw.json"),
     )
 
-    audio_result = helpers.process_audio(
-        args,
-        meta_path,
-        textualized_path,
-        duration,
-        output_dir,
-        transcript_raw_path,
-    )
-    timings["P3 process_audio — 오디오 context 후처리"] = audio_result.get("elapsed", 0.0)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_a = executor.submit(helpers.analyze_slide_annotations, args, slides_dir, output_dir)
+        future_b = executor.submit(
+            helpers.process_audio,
+            args,
+            meta_path,
+            textualized_path,
+            duration,
+            output_dir,
+            transcript_raw_path,
+        )
+        for future in as_completed([future_a, future_b]):
+            if future is future_a:
+                annotation_result = future.result()
+                timings["P3A analyze_annotation — 필기 강조 분석"] = annotation_result["elapsed"]
+            else:
+                audio_result = future.result()
+                timings["P3B process_audio — 오디오 후처리"] = audio_result.get("elapsed", 0.0)
 
-    timings["P3 build_audio_context total — 오디오 context 후처리 총합"] = time.time() - t_parallel
+    timings["P3 enrich_audio_annotation total — 보강 분석 총합"] = time.time() - t_parallel
     notify_stage("preprocess_enrich_audio_annotation", "done")
 
-    print(f"\n  ✓ P3 build_audio_context 완료 — 오디오 context 후처리  ({timings['P3 build_audio_context total — 오디오 context 후처리 총합']:.1f}초)")
+    print(f"\n  ✓ P3 enrich_audio_annotation 완료 — 필기 강조 분석 + 오디오 후처리  ({timings['P3 enrich_audio_annotation total — 보강 분석 총합']:.1f}초)")
     print("─" * 70)
 
     preprocess_result = {
@@ -103,6 +114,8 @@ def run_preprocess_pipeline(
         "textualized_path": textualized_path,
         "transcript_result": transcript_result,
         "transcript_raw_path": transcript_raw_path,
+        "annotation_result": annotation_result,
+        "annotation_path": annotation_result.get("annotation_path", str(paths["annotation"])),
         "audio_result": audio_result,
     }
     save_preprocess_manifest(stem, output_dir, preprocess_result, helpers=helpers)
@@ -112,6 +125,7 @@ def run_preprocess_pipeline(
 def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dict, *, helpers) -> Path:
     """Persist the in-memory preprocess payload so graph_upload can resume later."""
     audio_result = preprocess_result.get("audio_result") or {}
+    annotation_result = preprocess_result.get("annotation_result") or {}
     transcript_result = preprocess_result.get("transcript_result") or {}
     manifest = {
         "schema_version": 1,
@@ -123,9 +137,14 @@ def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dic
             "transcript_raw_path": transcript_result.get("transcript_raw_path"),
         },
         "transcript_raw_path": preprocess_result.get("transcript_raw_path"),
+        "annotation_result": {
+            "annotation_path": annotation_result.get("annotation_path") or preprocess_result.get("annotation_path"),
+        },
+        "annotation_path": preprocess_result.get("annotation_path"),
         "audio_result": {
             "segments_path": audio_result.get("segments_path"),
             "silences_path": audio_result.get("silences_path"),
+            "emphasis_path": audio_result.get("emphasis_path"),
             "annotated_segments": audio_result.get("annotated_segments") or [],
             "annotated_groups": audio_result.get("annotated_groups") or [],
             "scenes_structure": audio_result.get("scenes_structure"),
@@ -150,6 +169,7 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
         manifest = json.load(f)
 
     audio_result = manifest.get("audio_result") or {}
+    annotation_result = manifest.get("annotation_result") or {}
     transcript_result = manifest.get("transcript_result") or {}
 
     restored = {
@@ -169,9 +189,23 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
             or transcript_result.get("transcript_raw_path")
             or str(output_dir / f"{stem}_transcript_raw.json")
         ),
+        "annotation_result": {
+            "annotation_path": (
+                annotation_result.get("annotation_path")
+                or manifest.get("annotation_path")
+                or str(paths["annotation"])
+            ),
+            "elapsed": 0.0,
+        },
+        "annotation_path": (
+            manifest.get("annotation_path")
+            or annotation_result.get("annotation_path")
+            or str(paths["annotation"])
+        ),
         "audio_result": {
             "segments_path": audio_result.get("segments_path") or str(paths["segments"]),
             "silences_path": audio_result.get("silences_path") or str(paths["silences"]),
+            "emphasis_path": audio_result.get("emphasis_path") or str(paths["emphasis"]),
             "annotated_segments": audio_result.get("annotated_segments") or [],
             "annotated_groups": audio_result.get("annotated_groups") or [],
             "scenes_structure": audio_result.get("scenes_structure"),
@@ -183,8 +217,10 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
     required_paths = [
         ("metadata", restored["meta_path"]),
         ("textualized", restored["textualized_path"]),
+        ("annotation", restored["annotation_path"]),
         ("segments", restored["audio_result"]["segments_path"]),
         ("silences", restored["audio_result"]["silences_path"]),
+        ("emphasis", restored["audio_result"]["emphasis_path"]),
     ]
     missing = [f"{label}: {path}" for label, path in required_paths if not path or not Path(path).exists()]
     if missing:
@@ -192,3 +228,4 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
             "graph_upload 실행에 필요한 preprocess 산출물이 없습니다:\n" + "\n".join(missing)
         )
     return restored
+

@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import CORS_ORIGINS, LOCAL_STORAGE_DIR
 from app.lifecycle import lifespan
-from app.routers import files, health, jobs, lectures, ocr, results
+from app.routers import files, health, jobs, lectures, results
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,4 +30,3 @@ app.include_router(jobs.router)
 app.include_router(lectures.router)
 app.include_router(results.router)
 app.include_router(files.router)
-app.include_router(ocr.router)

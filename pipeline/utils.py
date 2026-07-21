@@ -18,7 +18,7 @@ def resolve_backend_root() -> Path:
     로컬 `.../app/backend` 는 `pipeline/` 과 `app/main.py` 를 동시에 가지므로,
     monorepo 판별을 Docker 평면 레이아웃보다 먼저 수행한다.
     """
-    env_root = os.getenv("VERILEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
     if env_root:
         return Path(env_root).resolve()
     here = Path(__file__).resolve().parent  # pipeline/

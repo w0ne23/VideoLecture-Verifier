@@ -21,7 +21,7 @@ from app.models import (
     normalize_job_type,
 )
 from app.services import lecture_service
-from app.services.storage_service import save_upload, storage_relpath
+from app.services.storage_service import save_upload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/jobs')
@@ -58,9 +58,8 @@ async def create_job(
         id=lecture_id,
         title=final_title,
         description=description,
-        # 컨테이너/호스트 어디서든 해석 가능하도록 LOCAL_STORAGE_DIR 상대경로로 저장
-        video_path=storage_relpath(input_path),
-        output_dir=storage_relpath(output_dir),
+        video_path=str(input_path),
+        output_dir=str(output_dir),
     )
     job = ProcessingJob(id=uuid.uuid4(), lecture_id=lecture_id, job_type=job_type, status='pending')
     db.add(lecture)

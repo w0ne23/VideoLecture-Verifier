@@ -11,8 +11,14 @@ main.py
          P3B process_audio             — 오디오 후처리
                      text_processor    — 2-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
-  [직렬] V1  build_analyzer_input      — 검증 입력 데이터 구성
-  [직렬] V2  run_verifier              — claim 추출 → issue 판단/분류 → 멀티 LLM 검증
+  [병렬] G1A classify_slides           — 슬라이드 역할 분류
+         G1B save_scene_structure      — scene 구조 저장 (P3B 결과 기반)
+  [직렬] G2  fusion                    — 최종 통합
+  [직렬] G3  graph_triples             — 그래프 Parquet 생성
+  [직렬] G4  lance_index               — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
+  [직렬] G5  graphrag_index            — fused → GraphRAG parquet workspace
+  [직렬] G6  metadata                  — 강의 메타데이터 생성
+  [직렬] G7  recommender_index         — 추천 인덱스 생성
 
 Usage:
     python main.py --input lecture.mp4
@@ -22,18 +28,25 @@ Usage:
     python main.py --input lecture.mp4 --force
 """
 
+try:
+    import lzma
+except ImportError:
+    from backports import lzma  # lzma가 없으면 backports.lzma를 사용
+
 import json
 import os
+import shutil
 import sys
 import time
 import argparse
 import logging
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import librosa
-from .utils import resolve_pipeline_package_root
+from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +55,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+REPO_ROOT = resolve_backend_root()
+DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
+    "GRAPHLEC_METADATA_DIR",
+    "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
+)
+DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
+    "RECOMMENDER_DB_DIR",
+    "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
+)
 JOB_TYPE_LEGACY_FULL = "legacy_full"
 JOB_TYPE_VERIFY = "verify"
 JOB_TYPE_UPLOAD = "upload"
@@ -88,6 +110,19 @@ logging.getLogger("google.genai").setLevel(logging.WARNING)
 # ──────────────────────────────────────────────────────────────
 # 출력 헬퍼
 # ──────────────────────────────────────────────────────────────
+
+def _pipeline_root_dir() -> Path:
+    env_root = os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    return Path(__file__).resolve().parents[3]
+
+
+def _analyzer_run_module() -> str:
+    package_name = (__package__ or "").strip()
+    if package_name:
+        return f"{package_name}.analyzer.run_all"
+    return "app.backend.pipeline.analyzer.run_all"
 
 def _banner(title: str):
     print("\n" + "═" * 70)
@@ -658,6 +693,228 @@ def process_audio(
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .slide_classifier 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def classify_slides(
+    args, textualized_path: str, meta_path: str, silences_path: str, output_dir: Path
+) -> dict:
+    from .slide_classifier import classify_slides
+
+    stem = Path(args.input).stem
+    classified_path = output_dir / f"{stem}_slide_classified.json"
+
+    if _is_done(classified_path, "G1A classify_slides — 슬라이드 분류", args.force):
+        return {"classified_path": str(classified_path), "elapsed": 0.0}
+
+    _banner("G1A classify_slides — 슬라이드 분류  (slide_classifier)")
+    t0 = time.time()
+    classified = classify_slides(
+        textualized_path=textualized_path,
+        metadata_path=meta_path,
+        silences_path=silences_path,
+        output_path=str(classified_path),
+    )
+    elapsed = time.time() - t0
+    _done(f"슬라이드 {len(classified)}개 분류", elapsed)
+    return {"classified_path": str(classified_path), "elapsed": elapsed}
+
+
+def save_scene_structure(args, audio_result: dict, output_dir: Path) -> dict:
+    from .segment_grouper import group_segments_by_scene_and_context
+
+    stem = Path(args.input).stem
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
+
+    scenes_structure = audio_result.get("scenes_structure")
+    annotated_segments = audio_result.get("annotated_segments", [])
+    annotated_groups = audio_result.get("annotated_groups", [])
+    slide_ranges = audio_result.get("slide_ranges", [])
+    duration = audio_result.get("duration", 0.0)
+
+    def _has_emphasis_schema(path: Path) -> bool:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            for scene in payload.get("scenes", []):
+                for ctx in scene.get("contexts", []):
+                    if "audio_emphasis" not in ctx:
+                        return False
+            return True
+        except Exception:
+            return False
+
+    def _to_public_scene_entry(scene: dict) -> dict:
+        clean = json.loads(json.dumps(scene))
+        if clean.get("scene_id") is None and clean.get("scene_index") is not None:
+            clean["scene_id"] = f"scene/{int(clean['scene_index']):04d}"
+        return clean
+
+    def _scene_payload(scenes: list[dict]) -> dict:
+        public_scenes = [_to_public_scene_entry(scene) for scene in scenes]
+        slide_numbers = {
+            scene.get("slide_number")
+            for scene in public_scenes
+            if scene.get("slide_number") is not None
+        }
+        return {
+            "unit": "scene",
+            "scene_count": len(public_scenes),
+            "slide_count": len(slide_numbers),
+            "scenes": public_scenes,
+        }
+
+    if not slide_ranges:
+        if by_scene_path.exists() and by_scene_path.stat().st_size > 0 and _has_emphasis_schema(by_scene_path):
+            return {
+                "by_scene_path": str(by_scene_path),
+                "elapsed": 0.0,
+            }
+        raise RuntimeError("G1B save_scene_structure — scene 구조 저장 실패: slide_ranges가 비어 있습니다.")
+
+    if not scenes_structure and annotated_segments:
+        log.warning("G1B save_scene_structure — scene 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
+        try:
+            _, scenes_structure = group_segments_by_scene_and_context(
+                annotated_segments,
+                slide_ranges,
+                duration,
+                use_pause_sentence=False,
+                use_llm_merge=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"G1B save_scene_structure — scene 구조 재구성 실패: {exc}") from exc
+
+    if not scenes_structure:
+        raise RuntimeError(
+            "G1B save_scene_structure — scene 구조 저장 실패: scenes_structure가 비어 있습니다. "
+            "P3B process_audio — 오디오 후처리 결과를 확인해주세요."
+        )
+
+    if _is_done(by_scene_path, "G1B save_scene_structure — scene 구조 저장", args.force):
+        return {
+            "by_scene_path": str(by_scene_path),
+            "elapsed": 0.0,
+        }
+
+    _banner("G1B save_scene_structure — scene 구조 저장")
+    t0 = time.time()
+
+    scenes_with_emphasis = json.loads(json.dumps(scenes_structure))
+    annot_by_start = {g.get("start"): g for g in annotated_groups}
+    empty_audio_emphasis = {
+        "audio": {
+            "std_based_score": 0.0,
+            "audio_signal_score": 0,
+            "volume_score": 0.0,
+            "pitch_score": 0.0,
+            "volume_metric": 0.0,
+            "pitch_metric": 0.0,
+            "volume_rank": None,
+            "pitch_rank": None,
+            "volume_ratio": 0.0,
+            "pitch_variation": 0.0,
+        },
+        "importance_keywords": {
+            "score": 0,
+            "category_scores": {"exam": 0, "strong": 0, "summary": 0},
+            "matched_categories": [],
+            "matched_keywords": {"exam": [], "strong": [], "summary": []},
+        },
+        "topic": {
+            "keywords": [],
+            "keyword_scores": {},
+            "topic_keyword_score": 0,
+            "audio_topic_total_count_sum": 0,
+        },
+    }
+    for scene in scenes_with_emphasis:
+        new_contexts = []
+        for ctx in scene.get("contexts", []):
+            ann = annot_by_start.get(ctx.get("start"))
+            ordered_ctx = {
+                "context_index": ctx.get("context_index"),
+                "start": ctx.get("start"),
+                "end": ctx.get("end"),
+                "text": ctx.get("text"),
+            }
+            audio_emphasis = ann.get("audio_emphasis") if ann else None
+            ordered_ctx["audio_emphasis"] = audio_emphasis or empty_audio_emphasis
+
+            if ann:
+                ordered_ctx["emphasis_methods"] = ann.get("emphasis_methods", [])
+                ordered_ctx["detection_count"] = int(ann.get("detection_count", 0) or 0)
+                ordered_ctx["emphasis_detail"] = _format_emphasis_reason(ann)
+            else:
+                ordered_ctx["emphasis_methods"] = []
+                ordered_ctx["detection_count"] = 0
+                ordered_ctx["emphasis_detail"] = {}
+            ordered_ctx["segment_indices"] = ctx.get("segment_indices", [])
+            ordered_ctx["segments"] = ctx.get("segments", [])
+            new_contexts.append(ordered_ctx)
+        scene["contexts"] = new_contexts
+    _save_json(by_scene_path, _scene_payload(scenes_with_emphasis))
+
+    elapsed = time.time() - t0
+    _done("by_scene 구조 저장", elapsed)
+    return {
+        "by_scene_path": str(by_scene_path),
+        "elapsed": elapsed,
+    }
+
+
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .fusion 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def fuse_preprocessed_data(
+    args,
+    textualized_path: str,
+    annotation_path: str,
+    audio_result: dict,
+    output_dir: Path,
+) -> dict:
+    from .fusion import Config as FusionConfig, run_fusion
+
+    stem = Path(args.input).stem
+    fused_path = output_dir / f"{stem}_fused.json"
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
+
+    if _is_done(fused_path, "G2 fusion — 데이터 퓨전", args.force):
+        return {"fused_path": str(fused_path), "elapsed": 0.0}
+
+    _banner("G2 fusion — 데이터 퓨전  (fusion)")
+    t0 = time.time()
+
+    cfg = FusionConfig(
+        stem=stem,
+        output_dir=output_dir,
+        slides_dir=Path(args.slides),
+        audio_path=by_scene_path,
+        classified_path=output_dir / f"{stem}_slide_classified.json",
+        annotation_path=Path(annotation_path),
+        output_path=fused_path,
+    )
+    fused_output = run_fusion(cfg)
+    fused_scenes = fused_output.get("scenes", [])
+    fused_slides = fused_output.get("slides", [])
+    logical_slide_count = len(fused_slides)
+
+    # run_fusion 반환 스키마를 메인 파이프라인 출력 형식에 맞게 감싼다.
+    _save_json(
+        fused_path,
+        {
+            "video_path": args.input,
+            "description": "영상(scene+slide+annotation) + 오디오 퓨전 결과",
+            "scene_count": len(fused_scenes),
+            "slide_count": logical_slide_count,
+            "fusion_metadata": fused_output.get("metadata", {}),
+            "slides": fused_slides,
+            "scenes": fused_scenes,
+        },
+    )
+    elapsed = time.time() - t0
+    _done(f"scene {len(fused_scenes)}개 / slide {logical_slide_count}개 퓨전", elapsed)
+    return {"fused_path": str(fused_path), "elapsed": elapsed}
+
+
 def build_analyzer_input(
     args,
     meta_path: str,
@@ -1176,6 +1433,420 @@ def run_verifier(
     }
 
 
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .json_to_graph_triples 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def generate_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
+    from .json_to_graph_triples import Config as TripleConfig, GraphPipeline
+
+    stem = Path(args.input).stem
+    triples_parquet = output_dir / f"{stem}_graph_triples.parquet"
+    nodes_parquet = output_dir / f"{stem}_nodes.parquet"
+    edges_parquet = output_dir / f"{stem}_edges.parquet"
+
+    if _is_done(triples_parquet, "G3 graph_triples — 그래프 트리플 생성", args.force):
+        return {
+            "triples_parquet": str(triples_parquet),
+            "nodes_parquet": str(nodes_parquet),
+            "edges_parquet": str(edges_parquet),
+            "elapsed": 0.0,
+        }
+
+    _banner("G3 graph_triples — 그래프 트리플 생성  (json_to_graph_triples)")
+    t0 = time.time()
+
+    cfg = TripleConfig(
+        stem=stem,
+        output_dir=output_dir,
+        slides_dir=slides_dir,
+        lecture_title=(getattr(args, "title", "") or "").strip() or stem,
+    )
+    GraphPipeline(cfg).run()
+
+    elapsed = time.time() - t0
+    _done("그래프 트리플 생성", elapsed)
+    return {
+        "triples_parquet": str(triples_parquet),
+        "nodes_parquet": str(nodes_parquet),
+        "edges_parquet": str(edges_parquet),
+        "elapsed": elapsed,
+    }
+
+
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .lance_ingest 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def build_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
+    """fused.json → 청크 임베딩 → Parquet + LanceDB (단일 테이블, stem 필터)."""
+    from .lance_ingest import default_lance_root, ingest_stem_to_lance
+
+    stem = Path(args.input).stem
+    from .config import output_paths
+
+    paths = output_paths(stem, output_dir, slides_dir)
+    fused_path = paths["fused"]
+    lance_root = Path(args.lance_root) if getattr(args, "lance_root", None) else default_lance_root()
+    parquet_path = output_dir / f"{stem}_chunks_lance.parquet"
+
+    if _is_done(parquet_path, "G4 lance_index — Lance 인덱스 생성", args.force):
+        return {"elapsed": 0.0, "parquet_path": str(parquet_path), "skipped": True}
+
+    if not fused_path.exists():
+        raise FileNotFoundError(f"G4 lance_index — fused 파일 없음. G2 fusion — 데이터 퓨전이 필요합니다: {fused_path}")
+
+    _banner("G4 lance_index — LanceDB 인덱스  (Gemini 임베딩 + lance_ingest)")
+    t0 = time.time()
+    result = ingest_stem_to_lance(
+        stem=stem,
+        fused_path=fused_path,
+        output_dir=output_dir,
+        lance_root=lance_root,
+    )
+    elapsed = time.time() - t0
+    cnt = result.get("count", 0)
+    _done(f"Lance 인덱스 ({cnt}청크)", elapsed)
+    return {"elapsed": elapsed, **result}
+
+
+def _find_graphrag_executable() -> Optional[str]:
+    configured = os.getenv("GRAPHRAG_BIN")
+    if configured and Path(configured).exists():
+        return configured
+    return shutil.which("graphrag")
+
+
+def _write_graphrag_env(workspace_dir: Path, api_key: str) -> None:
+    env_path = workspace_dir / ".env"
+    existing: list[str] = []
+    if env_path.exists():
+        existing = [
+            line
+            for line in env_path.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("GRAPHRAG_API_KEY=")
+        ]
+    existing.append(f"GRAPHRAG_API_KEY={api_key}")
+    env_path.write_text("\n".join(existing).strip() + "\n", encoding="utf-8")
+
+
+def _patch_graphrag_extract_prompt(workspace_dir: Path) -> None:
+    """Keep bilingual lecture terms on one canonical GraphRAG entity."""
+    prompt_path = workspace_dir / "prompts" / "extract_graph.txt"
+    if not prompt_path.exists():
+        return
+
+    text = prompt_path.read_text(encoding="utf-8")
+    original = text
+    marker = "-GraphLec Entity Canonicalization Rules-"
+    rules = f"""
+
+{marker}
+- The lecture content is primarily Korean and may include English terms in parentheses.
+- Use the dominant Korean lecture term as the canonical entity name when Korean and English refer to the same concept.
+- Treat parenthesized English terms, acronyms, capitalization variants, and translations as aliases, not separate entities.
+- Do not emit separate entities for bilingual variants, parenthesized aliases, acronyms, casing variants, or direct translations of the same concept; emit one canonical entity and mention aliases in the description.
+- If a concept appears only in English and no Korean equivalent is present in the text, keep the English name.
+- Apply the same canonical entity name consistently in relationships.
+"""
+
+    anchor = "Format each entity as (\"entity\"<|><entity_name><|><entity_type><|><entity_description>)"
+    if marker not in text and anchor in text:
+        text = text.replace(anchor, anchor + rules, 1)
+
+    text = text.replace(
+        "3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.",
+        "3. Return output in the dominant lecture language as a single list of all the entities and relationships identified in steps 1 and 2. For Korean lectures, use Korean canonical entity names and descriptions. Use **##** as the list delimiter.",
+    )
+
+    if text != original:
+        prompt_path.write_text(text, encoding="utf-8")
+
+
+def _patch_graphrag_settings(workspace_dir: Path, concurrent_requests: int) -> None:
+    """Apply GraphLec runtime defaults to the generated GraphRAG config."""
+    settings_path = workspace_dir / "settings.yaml"
+    if not settings_path.exists():
+        return
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("G5 graphrag_index — settings.yaml 수정을 위해 PyYAML이 필요합니다.") from exc
+
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    data["concurrent_requests"] = max(1, int(concurrent_requests))
+    data.setdefault("async_mode", "threaded")
+    settings_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _run_graphrag_index_with_retry(cmd: list[str], env: dict[str, str], retries: int, wait_sec: float) -> None:
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(cmd, check=True, env=env)
+            return
+        except subprocess.CalledProcessError:
+            if attempt >= attempts:
+                raise
+            print(
+                f"  GraphRAG index failed; retrying after {wait_sec:.0f}s "
+                f"({attempt}/{attempts - 1})"
+            )
+            time.sleep(max(0.0, wait_sec))
+
+
+def _graphrag_workspace_dir(args, output_dir: Path, stem: str) -> Path:
+    root = getattr(args, "graphrag_root", None)
+    if root:
+        return Path(root) / stem
+    return output_dir / "graphrag"
+
+
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .fused_to_graphrag_text 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def build_graphrag_index(args, output_dir: Path) -> dict:
+    """fused.json → GraphRAG workspace parquet."""
+    from .config import output_paths
+    from .fused_to_graphrag_text import fused_to_graphrag_text
+
+    stem = Path(args.input).stem
+    paths = output_paths(stem, output_dir, Path(args.slides))
+    fused_path = paths["fused"]
+    workspace_dir = _graphrag_workspace_dir(args, output_dir, stem)
+    input_dir = workspace_dir / "input"
+    output_graph_dir = workspace_dir / "output"
+    entities_path = output_graph_dir / "entities.parquet"
+    relationships_path = output_graph_dir / "relationships.parquet"
+    input_path = input_dir / f"{stem}.txt"
+    metrics_path = workspace_dir / "graphrag_index_metrics.json"
+    model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4-mini")
+    embedding_model = os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small")
+    method_name = getattr(args, "graphrag_method", "standard")
+    concurrent_requests = int(os.getenv("GRAPHLEC_GRAPHRAG_CONCURRENT_REQUESTS", "50"))
+    index_retries = int(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRIES", "1"))
+    index_retry_wait_sec = _safe_float(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRY_WAIT_SEC", "30"), 30.0)
+
+    if (
+        not args.force
+        and entities_path.exists()
+        and entities_path.stat().st_size > 0
+        and relationships_path.exists()
+        and relationships_path.stat().st_size > 0
+    ):
+        print("\n  ⏭  G5 graphrag_index — GraphRAG parquet 출력 파일 존재, 스킵")
+        print(f"     {output_graph_dir}")
+        print("─" * 70)
+        return {
+            "elapsed": 0.0,
+            "skipped": True,
+            "workspace_dir": str(workspace_dir),
+            "input_path": str(input_path),
+            "entities_parquet": str(entities_path),
+            "relationships_parquet": str(relationships_path),
+        }
+
+    if not fused_path.exists():
+        raise FileNotFoundError(f"G5 graphrag_index — fused 파일 없음. G2 fusion — 데이터 퓨전이 필요합니다: {fused_path}")
+
+    graphrag_bin = _find_graphrag_executable()
+    if not graphrag_bin:
+        raise RuntimeError("G5 graphrag_index — graphrag CLI를 찾을 수 없습니다. requirements 설치 후 다시 실행하세요.")
+
+    api_key = os.getenv("GRAPHRAG_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("G5 graphrag_index — GRAPHRAG_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다.")
+
+    _banner("G5 graphrag_index — GraphRAG 인덱스  (fused → parquet workspace)")
+    t0 = time.time()
+
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    with open(fused_path, "r", encoding="utf-8") as f:
+        fused = json.load(f)
+    input_path.write_text(fused_to_graphrag_text(fused, stem=stem), encoding="utf-8")
+
+    env = os.environ.copy()
+    env["GRAPHRAG_API_KEY"] = api_key
+    env["PYTHONUNBUFFERED"] = "1"
+    _write_graphrag_env(workspace_dir, api_key)
+
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "running",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "concurrent_requests": concurrent_requests,
+                "index_retries": index_retries,
+                "index_retry_wait_sec": index_retry_wait_sec,
+                "started_at_epoch": t0,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    settings_path = workspace_dir / "settings.yaml"
+    if not settings_path.exists():
+        subprocess.run(
+            [
+                graphrag_bin,
+                "init",
+                "--root",
+                str(workspace_dir),
+                "--model",
+                model_name,
+                "--embedding",
+                embedding_model,
+            ],
+            check=True,
+            env=env,
+        )
+        _write_graphrag_env(workspace_dir, api_key)
+
+    _patch_graphrag_settings(workspace_dir, concurrent_requests)
+    _patch_graphrag_extract_prompt(workspace_dir)
+
+    if args.force and output_graph_dir.exists():
+        shutil.rmtree(output_graph_dir)
+
+    _run_graphrag_index_with_retry(
+        [
+            graphrag_bin,
+            "index",
+            "--root",
+            str(workspace_dir),
+            "--method",
+            method_name,
+        ],
+        env=env,
+        retries=index_retries,
+        wait_sec=index_retry_wait_sec,
+    )
+
+    elapsed = time.time() - t0
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "done",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "concurrent_requests": concurrent_requests,
+                "index_retries": index_retries,
+                "index_retry_wait_sec": index_retry_wait_sec,
+                "started_at_epoch": t0,
+                "finished_at_epoch": time.time(),
+                "elapsed": elapsed,
+                "elapsed_sec": elapsed,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+                "entities_parquet": str(entities_path),
+                "relationships_parquet": str(relationships_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    _done("GraphRAG 인덱스 생성", elapsed)
+    return {
+        "elapsed": elapsed,
+        "workspace_dir": str(workspace_dir),
+        "input_path": str(input_path),
+        "entities_parquet": str(entities_path),
+        "relationships_parquet": str(relationships_path),
+        "metrics_path": str(metrics_path),
+    }
+
+
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 미포함 모듈 .generate_metadata / .metadata_db 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
+    """G6 metadata: 강의 메타데이터 생성."""
+    from .generate_metadata import generate_metadata
+    from .metadata_db import load_metadata_json, upsert_lecture_metadata_sync
+
+    stem         = Path(args.input).stem
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
+    output_path  = metadata_dir / f"{stem}_metadata.json"
+    lecture_id   = getattr(args, "lecture_id", None)
+
+    def sync_metadata_to_db(elapsed: float, skipped: bool = False) -> dict:
+        db_synced = False
+        if output_path.exists():
+            try:
+                metadata = load_metadata_json(output_path)
+                db_synced = upsert_lecture_metadata_sync(
+                    lecture_id=lecture_id,
+                    metadata=metadata,
+                    metadata_uri=str(output_path),
+                )
+                if db_synced:
+                    print(f"  ✓ lecture_metadata DB 저장 완료: {lecture_id}")
+            except Exception as exc:
+                print(f"  ⚠ lecture_metadata DB 저장 실패 (non-fatal): {exc}")
+        return {
+            "metadata_path": str(output_path),
+            "elapsed": elapsed,
+            "db_synced": db_synced,
+            "skipped": skipped,
+        }
+
+    if _is_done(output_path, "G6 metadata — 메타데이터 생성", args.force):
+        return sync_metadata_to_db(elapsed=0.0, skipped=True)
+
+    _banner("G6 metadata — 메타데이터 생성  (generate_metadata)")
+    t0 = time.time()
+
+    generate_metadata(
+        stem          = stem,
+        title         = getattr(args, "title", ""),
+        instructor_id = getattr(args, "instructor", ""),
+        output_dir    = output_dir,
+        metadata_dir  = metadata_dir,
+        uploaded_at   = getattr(args, "uploaded_at", None),
+    )
+
+    elapsed = time.time() - t0
+    result = sync_metadata_to_db(elapsed=elapsed)
+    _done("메타데이터 생성", elapsed)
+    return result
+
+
+# [GRAPH-REMNANT] 원본 프로젝트 그래프 파이프라인 잔재 — 레포에 없는 recommender/ 디렉터리 참조.
+#   verify workflow(orchestration/workflows.py)에서는 호출되지 않음. 추후 제거 예정.
+def build_recommender_index(args) -> dict:
+    """G7 recommender_index: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
+    recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
+    script_path = recommender_dir / "build_index.py"
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
+    db_dir = Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))
+
+    _banner("G7 recommender_index — 추천 인덱스 생성  (build_index)")
+    t0 = time.time()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--metadata_dir",
+        str(metadata_dir),
+        "--db_dir",
+        str(db_dir),
+    ]
+    subprocess.run(cmd, check=True)
+
+    elapsed = time.time() - t0
+    _done("추천 인덱스 생성", elapsed)
+    return {"elapsed": elapsed, "db_dir": str(db_dir)}
+
+
 # ──────────────────────────────────────────────────────────────
 # 메인 파이프라인
 # ──────────────────────────────────────────────────────────────
@@ -1245,6 +1916,22 @@ def run_verifier_pipeline(
         helpers=sys.modules[__name__],
     )
 
+def run_graph_pipeline(
+    args,
+    *,
+    preprocess_result: dict,
+    output_dir: Path,
+    slides_dir: Path,
+    paths: dict,
+    timings: dict[str, float],
+    stage_status: dict[str, str],
+    notify_stage,
+    write_timings,
+    record_timing,
+) -> dict:
+    """Run graph/search/recommendation artifacts after shared preprocessing and verifier start."""
+    raise RuntimeError('Graph pipeline is not included in VeriLec')
+
 def _print_generated_files(output_files: list[str]) -> None:
     print("\n  생성된 파일:")
     for path_str in output_files:
@@ -1277,6 +1964,9 @@ def get_parser():
   python main.py --input input/lecture.mp4 --skip-extract
   python main.py --input input/lecture.mp4 --debug --masks
   python main.py --input input/lecture.mp4 --force
+  python main.py --input input/lecture.mp4 --skip-lance-index
+  python main.py --input input/lecture.mp4 --skip-graphrag-index
+  python main.py --input input/lecture.mp4 --skip-neo4j
         """,
     )
     parser.add_argument("--input",  "-i", default="input/lecture.mp4", help="입력 강의 영상 경로 (.mp4)")
@@ -1294,13 +1984,13 @@ def get_parser():
     parser.add_argument(
         "--slide-decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
-        default=os.getenv("VERILEC_SLIDE_DECODE_BACKEND", "auto"),
+        default=os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto"),
         help="P1A extract_slides 프레임 디코드 백엔드 (default: auto)",
     )
     parser.add_argument(
         "--slide-extract-workers",
         type=int,
-        default=int(os.getenv("VERILEC_SLIDE_EXTRACT_WORKERS", "0")),
+        default=int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0")),
         help="P1A extract_slides 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
     )
     parser.add_argument("--masks", action="store_true", help="P3A analyze_annotation diff 마스크 이미지 저장")
@@ -1314,8 +2004,42 @@ def get_parser():
                         help=argparse.SUPPRESS)
     parser.add_argument("--no-batch", dest="per_annot_mode", action="store_true",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--skip-graph-triples", action="store_true",
+                        help="G3 graph_triples 그래프 Parquet(triples/nodes/edges) 생성 스킵")
+    parser.add_argument(
+        "--skip-neo4j",
+        action="store_true",
+        help="호환성 유지용 옵션입니다. Neo4j 적재는 강의 시청 화면 진입 시 수행됩니다.",
+    )
+    parser.add_argument("--skip-lance-index", action="store_true",
+                        help="G4 lance_index LanceDB+Parquet 인덱스 스킵")
+    parser.add_argument(
+        "--lance-root",
+        default=None,
+        help="LanceDB 저장 경로 (기본: 환경변수 GRAPHLEC_LANCE_ROOT 또는 data/lancedb)",
+    )
+    parser.add_argument("--skip-graphrag-index", action="store_true",
+                        help="G5 graphrag_index GraphRAG parquet 인덱스 생성 스킵")
+    parser.add_argument(
+        "--graphrag-root",
+        default=None,
+        help="GraphRAG workspace root override. 기본값은 output_dir/graphrag",
+    )
+    parser.add_argument(
+        "--graphrag-method",
+        default=os.getenv("GRAPHLEC_GRAPHRAG_METHOD", "standard"),
+        choices=["standard", "fast", "standard-update", "fast-update"],
+        help="GraphRAG index method (default: standard)",
+    )
+    parser.add_argument("--skip-metadata", action="store_true",
+                        help="G6 metadata 메타데이터 생성 스킵")
     parser.add_argument("--skip-analyzer", action="store_true",
                         help="V2 verifier 실행 스킵")
+    parser.add_argument(
+        "--stop-after-verifier-start",
+        action="store_true",
+        help="P3B process_audio context 기반 analyzer 입력 생성 및 verifier 시작 후 종료",
+    )
     parser.add_argument(
         "--stop-after-claim-extract",
         action="store_true",
@@ -1332,7 +2056,15 @@ def get_parser():
         default=None,
         help="1차 issue judge 후보 저장 confidence 기준. 기본값은 환경변수 또는 0.8",
     )
+    parser.add_argument("--skip-recommender-index", action="store_true",
+                        help="G7 recommender_index 추천 인덱스 생성(build_index) 스킵")
+    parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
+                        help=f"메타데이터 저장 디렉토리 (default: {DEFAULT_RECOMMENDER_METADATA_DIR})")
+    parser.add_argument("--recommender-db-dir", dest="recommender_db_dir", default=DEFAULT_RECOMMENDER_DB_DIR,
+                        help=f"추천 인덱스 LanceDB 경로 (default: {DEFAULT_RECOMMENDER_DB_DIR})")
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
+    parser.add_argument("--instructor", default="", help="교수자명")
+    parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
     parser.add_argument("--lecture-id", dest="lecture_id", default=None,
                         help="lecture_metadata DB 저장 대상 lectures.id")
     parser.add_argument("--uploaded-at", dest="uploaded_at", default=None,

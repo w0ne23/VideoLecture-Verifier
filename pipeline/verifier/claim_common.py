@@ -41,9 +41,6 @@ def _resolve_stage_model(stage: str) -> str:
     extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
     judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
     slide_error_model = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", VERIFIER_SLIDE_ERROR_MODEL).strip()
-    slide_error_transcribe_model = os.getenv(
-        "VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL", VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL
-    ).strip()
     strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
@@ -52,11 +49,6 @@ def _resolve_stage_model(stage: str) -> str:
         return strong
     if stage == "slide_error":
         return slide_error_model or strong
-    if stage == "slide_error_transcribe":
-        # 판단이 아니라 "보이는 그대로 옮겨 적기"만 하는 작업이라 저렴한 모델로도 충분합니다.
-        # 기본값을 gpt-5.4-mini로 둬서, 모든 슬라이드에 대해 무조건 돌려도 비용 부담이
-        # slide_error 본 판단 호출보다 훨씬 작게 유지되도록 합니다.
-        return slide_error_transcribe_model or "gpt-5.4-mini"
     return base
 
 
@@ -733,7 +725,6 @@ VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
 VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
 VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
 VERIFIER_SLIDE_ERROR_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", "")
-VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {
     "factual_error": "사실 오류",

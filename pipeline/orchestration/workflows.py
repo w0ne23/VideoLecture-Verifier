@@ -40,7 +40,7 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     def write_timings(current_stage: str | None = None) -> None:
         payload = {
             'stem': stem,
-            'status': 'done' if current_stage == 'pipeline_done' else 'running',
+            'status': 'running',
             'current_stage': current_stage,
             'started_at_epoch': total_start,
             'updated_at_epoch': time.time(),
@@ -86,6 +86,8 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     output_files = [
         audio_result.get('segments_path', ''),
         audio_result.get('silences_path', ''),
+        audio_result.get('emphasis_path', ''),
+        preprocess_result.get('annotation_path', ''),
         preprocess_result.get('textualized_path', ''),
         r9.get('merged_clean_path', str(output_dir / f'{stem}_analyzer' / f'{stem}_merged_clean.json')),
         r10.get('claim_output', ''),

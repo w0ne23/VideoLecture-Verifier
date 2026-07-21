@@ -22,8 +22,8 @@ from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 load_dotenv()
 
 GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
-IMAGE_PROVIDER = os.getenv("VERILEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "gemini").strip().lower()
-IMAGE_MODEL = os.getenv("VERILEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
+IMAGE_PROVIDER = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "gemini").strip().lower()
+IMAGE_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "50"))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
@@ -130,10 +130,10 @@ def _call_openai_image_correction(prompt: str, image_bytes: bytes):
 
 def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int | None = None):
     if max_retries is None:
-        max_retries = int(os.getenv("VERILEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
+        max_retries = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
     if initial_wait is None:
-        initial_wait = int(os.getenv("VERILEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
-    max_wait = float(os.getenv("VERILEC_API_RETRY_MAX_WAIT_SEC", "60"))
+        initial_wait = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
+    max_wait = float(os.getenv("GRAPHLEC_API_RETRY_MAX_WAIT_SEC", "60"))
     infinite = max_retries <= 0
     attempt = 0
     while infinite or attempt < max_retries:
@@ -365,7 +365,7 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
 def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     scene_meta: dict[int, dict] = {}
     for entry in metadata:
-        if entry.get("capture_type") != "base":
+        if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
             continue
         scene_idx = entry.get("scene_index")
         if not isinstance(scene_idx, int) or scene_idx in scene_meta:

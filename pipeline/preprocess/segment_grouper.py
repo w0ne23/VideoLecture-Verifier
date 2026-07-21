@@ -496,11 +496,7 @@ def load_slide_ranges(metadata_path: str, duration_sec: float) -> list[dict]:
     """
     with open(metadata_path, "r", encoding="utf-8") as f:
         items = json.load(f)
-    bases = [
-        x for x in items
-        if x.get("capture_type") == "base"
-        or (x.get("annot_index") == 0 and x.get("capture_type") not in {"build", "annotation", "annot"})
-    ]
+    bases = [x for x in items if x.get("annot_index") == 0 or x.get("capture_type") == "base"]
 
     def _scene_index(item: dict):
         return item.get("scene_index") if item.get("scene_index") is not None else item.get("slide_index")

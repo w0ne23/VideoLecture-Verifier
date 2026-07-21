@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -33,24 +32,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
 @dataclass
 class ProbeConfig:
     sample_every: int = 2
     resize_width: int = 768
-    # Hold a candidate longer so a slide-build animation can settle before
-    # the first frame is committed as the scene base.
-    delay_sec: float = _env_float("GRAPHLEC_SCENE_BASE_DELAY_SEC", 2.0)
-    max_pending_sec: float = _env_float("GRAPHLEC_SCENE_BASE_MAX_PENDING_SEC", 5.0)
+    delay_sec: float = 0.8
+    max_pending_sec: float = 2.0
     stable_mse: float = 80.0
     stable_hash: int = 4
     stable_prev_mse: float = 40.0

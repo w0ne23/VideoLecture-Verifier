@@ -1,3 +1,3 @@
-from . import files, health, jobs, lectures, ocr, results
+from . import files, health, jobs, lectures, results
 
-__all__ = ['files', 'health', 'jobs', 'lectures', 'ocr', 'results']
+__all__ = ['files', 'health', 'jobs', 'lectures', 'results']

@@ -3,7 +3,7 @@
 export const PIPELINE_NODES = [
   { id: 'data_extract', label: '데이터 추출', stageKey: 'preprocess_extract_media', stageLabel: '슬라이드 추출 및 오디오 품질 분석' },
   { id: 'content_extract', label: '텍스트화', stageKey: 'preprocess_textualize_transcribe', stageLabel: '슬라이드 텍스트화 및 전체 전사' },
-  { id: 'context_analysis', label: '맥락 구성', stageKey: 'preprocess_enrich_audio_annotation', stageLabel: '오디오 맥락 후처리' },
+  { id: 'context_analysis', label: '맥락 신호 분석', stageKey: 'preprocess_enrich_audio_annotation', stageLabel: '필기 강조 및 오디오 후처리' },
   { id: 'verifier_data', label: '검증 데이터 구성', stageKey: 'verifier_build_analyzer_input', stageLabel: '검증 입력 데이터 구성' },
   { id: 'claim_extraction', label: '주장 추출', stageKey: 'verifier_claim_extraction', stageLabel: '주장 후보 추출' },
   { id: 'issue_judge', label: '이슈 후보 판단', stageKey: 'verifier_issue_judge', stageLabel: '이슈 후보 판단' },

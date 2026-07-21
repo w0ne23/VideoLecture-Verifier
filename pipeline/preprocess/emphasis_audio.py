@@ -2,12 +2,8 @@
 오디오 신호 기반 강조 구간 감지 (볼륨 + 피치 표준편차)
 """
 
+import librosa
 import numpy as np
-
-try:
-    import librosa
-except ModuleNotFoundError:
-    librosa = None
 
 
 def _rank_scores(indices_and_values: list[tuple[int, float]]) -> dict[int, dict]:
@@ -35,35 +31,6 @@ def detect_emphasis_by_std(y, sr, segments: list[dict]) -> list[dict]:
     - audio_signal_score: volume_score + pitch_score
     """
     print("  [오디오 랭킹 기반] 분석 중...")
-    if librosa is None:
-        print("    -> librosa 없음: 오디오 신호 강조 분석을 건너뜁니다.")
-        return [
-            {
-                'start': seg.get('start', 0),
-                'end': seg.get('end', seg.get('start', 0)),
-                'text': seg.get('text', ''),
-                'emphasis_score': 0.0,
-                'std_based_score': 0.0,
-                'audio_signal_score': 0,
-                'volume_score': 0,
-                'pitch_score': 0,
-                'volume_metric': 0.0,
-                'pitch_metric': 0.0,
-                'volume_mean': 0.0,
-                'pitch_mean': 0.0,
-                'volume_rank': None,
-                'pitch_rank': None,
-                'volume_ratio': 0.0,
-                'pitch_variation': 0.0,
-                'detected': False,
-                'score_method': 'skipped_no_librosa',
-                'detection_method': 'std_based',
-            }
-            for seg in segments
-        ]
-
-    if isinstance(y, (str, bytes)):
-        y, sr = librosa.load(y, sr=sr)
 
     # RMS 에너지 계산
     rms = librosa.feature.rms(y=y, hop_length=512)[0]

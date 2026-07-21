@@ -25,12 +25,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean, median
-from typing import Iterable, Iterator
+from typing import Iterable
 
 import cv2
 import imagehash
@@ -38,10 +36,10 @@ import numpy as np
 from PIL import Image
 
 try:
-    from .sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
+    from .sample_cache import iter_sample_cache, load_sample_cache
     from .person_masks import load_person_mask, masked_pair
 except ImportError:  # pragma: no cover - allows direct script execution
-    from sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
+    from sample_cache import iter_sample_cache, load_sample_cache
     from person_masks import load_person_mask, masked_pair
 
 
@@ -52,34 +50,10 @@ log = logging.getLogger(__name__)
 SEGMENTS_FILENAME = "timeline_segments.json"
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        log.warning("invalid integer env %s=%r; using default=%s", name, value, default)
-        return default
-
-
 @dataclass
 class RegionClassifierConfig:
     window_sec: float = 4.0
     min_segment_sec: float = 12.0
-
-    # Step 1 parallel motion-metric settings.
-    #
-    # motion metrics are the expensive part of this stage:
-    # each sampled frame is decoded from sampled_frames.avi, masked, converted to
-    # a decision frame, and compared with the previous sampled frame.
-    #
-    # The dependency is only one previous sample, so chunked workers can safely
-    # use a small guard overlap. Defaults target long lecture videos on a large
-    # CPU machine without overwhelming sampled_frames.avi random access.
-    motion_workers: int = _env_int("GRAPHLEC_REGION_WORKERS", 8)
-    motion_chunk_samples: int = _env_int("GRAPHLEC_REGION_CHUNK_SAMPLES", 2000)
-    motion_guard_samples: int = _env_int("GRAPHLEC_REGION_GUARD_SAMPLES", 1)
 
     # Per-sample coarse thresholds, based on sampled-cache prev_* metrics.
     active_mse: float = 90.0
@@ -167,233 +141,37 @@ def _phash_distance(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
 
 
-def iter_sample_cache_range(
-    cache_dir: str | Path,
-    start_pos: int,
-    end_pos: int,
-) -> Iterator[tuple[int, dict, np.ndarray]]:
-    """Yield sampled-cache frames by 0-based video-frame position.
-
-    This is intentionally separate from iter_sample_cache(), which always reads
-    sampled_frames.avi from the beginning. Step 1 parallel workers need true
-    range reads so that multiple workers do not all scan the full cache.
-
-    Parameters
-    ----------
-    cache_dir:
-        Sample cache directory containing sampled_manifest.json and
-        sampled_frames.avi.
-    start_pos:
-        0-based inclusive frame position in sampled_frames.avi / manifest frames.
-    end_pos:
-        0-based exclusive frame position.
-    """
-
-    yield from _cache_range(cache_dir, start_pos, end_pos)
-
-
-def _motion_metric_for_sample(
-    cache_dir: str | Path,
-    cfg: RegionClassifierConfig,
-    frame_info: dict,
-    frame: np.ndarray,
-    prev_decision: np.ndarray | None,
-    prev_mask: np.ndarray | None,
-) -> tuple[dict, np.ndarray, np.ndarray | None]:
-    decision = _decision_frame(frame, cfg)
-    mask = _decision_mask(load_person_mask(cache_dir, frame_info), cfg)
-
-    if prev_decision is None:
-        metric = {
-            "changed_ratio": None,
-            "motion_mse": None,
-            "motion_hash_dist": None,
-            "pixel_motion": False,
-            "strong_pixel_motion": False,
-        }
-    else:
-        masked_prev, masked_curr = masked_pair(prev_decision, prev_mask, decision, mask)
-        changed = _changed_ratio(masked_prev, masked_curr, cfg.diff_threshold)
-        motion_mse = _mse(masked_prev, masked_curr)
-        motion_hash_dist = _phash_distance(_phash_int(masked_prev), _phash_int(masked_curr))
-        metric = {
-            "changed_ratio": round(changed, 6),
-            "motion_mse": round(motion_mse, 6),
-            "motion_hash_dist": motion_hash_dist,
-            "pixel_motion": changed >= cfg.motion_ratio,
-            "strong_pixel_motion": changed >= cfg.strong_motion_ratio,
-        }
-
-    return metric, decision, mask
-
-
-def _sample_motion_metrics(
-    cache_dir: str | Path,
-    cfg: RegionClassifierConfig,
-    total_samples: int | None = None,
-) -> dict[int, dict]:
+def _sample_motion_metrics(cache_dir: str | Path, cfg: RegionClassifierConfig) -> dict[int, dict]:
     metrics: dict[int, dict] = {}
     prev_decision = None
     prev_mask = None
-    processed = 0
     for frame_info, frame in iter_sample_cache(cache_dir):
         sample_index = int(frame_info["sample_index"])
-        processed += 1
-
-        metric, prev_decision, prev_mask = _motion_metric_for_sample(
-            cache_dir,
-            cfg,
-            frame_info,
-            frame,
-            prev_decision,
-            prev_mask,
-        )
-        metrics[sample_index] = metric
-
-        if processed == 1 or processed % 1000 == 0 or (total_samples is not None and processed == total_samples):
-            timestamp = float(frame_info.get("timestamp_sec", 0.0) or 0.0)
-            if total_samples:
-                log.info(
-                    "region motion metrics: processed=%s/%s %.1f%% ts=%.1fs",
-                    processed,
-                    total_samples,
-                    (processed / total_samples) * 100.0,
-                    timestamp,
-                )
-            else:
-                log.info("region motion metrics: processed=%s ts=%.1fs", processed, timestamp)
+        decision = _decision_frame(frame, cfg)
+        mask = _decision_mask(load_person_mask(cache_dir, frame_info), cfg)
+        if prev_decision is None:
+            metrics[sample_index] = {
+                "changed_ratio": None,
+                "motion_mse": None,
+                "motion_hash_dist": None,
+                "pixel_motion": False,
+                "strong_pixel_motion": False,
+            }
+        else:
+            masked_prev, masked_curr = masked_pair(prev_decision, prev_mask, decision, mask)
+            changed = _changed_ratio(masked_prev, masked_curr, cfg.diff_threshold)
+            motion_mse = _mse(masked_prev, masked_curr)
+            motion_hash_dist = _phash_distance(_phash_int(masked_prev), _phash_int(masked_curr))
+            metrics[sample_index] = {
+                "changed_ratio": round(changed, 6),
+                "motion_mse": round(motion_mse, 6),
+                "motion_hash_dist": motion_hash_dist,
+                "pixel_motion": changed >= cfg.motion_ratio,
+                "strong_pixel_motion": changed >= cfg.strong_motion_ratio,
+            }
+        prev_decision = decision
+        prev_mask = mask
     return metrics
-
-
-def _sample_motion_metrics_range(
-    cache_dir: str | Path,
-    cfg: RegionClassifierConfig,
-    read_start_pos: int,
-    core_start_pos: int,
-    core_end_pos: int,
-) -> dict[int, dict]:
-    """Compute motion metrics for one core range.
-
-    read_start_pos may be earlier than core_start_pos. Frames before
-    core_start_pos are guard frames used only to seed prev_decision/prev_mask.
-    Returned metrics include only positions in [core_start_pos, core_end_pos).
-    """
-
-    metrics: dict[int, dict] = {}
-    prev_decision = None
-    prev_mask = None
-
-    for pos, frame_info, frame in iter_sample_cache_range(cache_dir, read_start_pos, core_end_pos):
-        sample_index = int(frame_info["sample_index"])
-
-        metric, prev_decision, prev_mask = _motion_metric_for_sample(
-            cache_dir,
-            cfg,
-            frame_info,
-            frame,
-            prev_decision,
-            prev_mask,
-        )
-
-        if core_start_pos <= pos < core_end_pos:
-            metrics[sample_index] = metric
-
-    return metrics
-
-
-def _motion_metric_ranges(total_samples: int, chunk_samples: int, guard_samples: int) -> list[tuple[int, int, int]]:
-    chunk_samples = max(1, int(chunk_samples))
-    guard_samples = max(0, int(guard_samples))
-
-    ranges: list[tuple[int, int, int]] = []
-    for core_start in range(0, total_samples, chunk_samples):
-        core_end = min(total_samples, core_start + chunk_samples)
-        read_start = max(0, core_start - guard_samples)
-        ranges.append((read_start, core_start, core_end))
-    return ranges
-
-
-def _sample_motion_metrics_parallel(
-    cache_dir: str | Path,
-    cfg: RegionClassifierConfig,
-    total_samples: int,
-) -> dict[int, dict]:
-    workers = max(1, int(cfg.motion_workers))
-    chunk_samples = max(1, int(cfg.motion_chunk_samples))
-    guard_samples = max(0, int(cfg.motion_guard_samples))
-
-    if workers <= 1 or total_samples <= chunk_samples:
-        log.info(
-            "region motion metrics sequential path: workers=%s total_samples=%s chunk_samples=%s",
-            workers,
-            total_samples,
-            chunk_samples,
-        )
-        return _sample_motion_metrics(cache_dir, cfg, total_samples=total_samples)
-
-    ranges = _motion_metric_ranges(total_samples, chunk_samples, guard_samples)
-    if len(ranges) <= 1:
-        return _sample_motion_metrics(cache_dir, cfg, total_samples=total_samples)
-
-    workers = min(workers, len(ranges))
-    log.info(
-        "region motion metrics parallel start: samples=%s chunk_samples=%s guard_samples=%s workers=%s chunks=%s",
-        total_samples,
-        chunk_samples,
-        guard_samples,
-        workers,
-        len(ranges),
-    )
-
-    merged: dict[int, dict] = {}
-    completed = 0
-
-    # ProcessPool is used because pHash, masking, cv2 diff, and image conversion
-    # are CPU-heavy enough to benefit from process-level parallelism. Each worker
-    # opens its own VideoCapture to avoid sharing decoder state.
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        future_map = {
-            executor.submit(
-                _sample_motion_metrics_range,
-                str(cache_dir),
-                cfg,
-                read_start,
-                core_start,
-                core_end,
-            ): (idx, read_start, core_start, core_end)
-            for idx, (read_start, core_start, core_end) in enumerate(ranges, start=1)
-        }
-
-        for future in as_completed(future_map):
-            idx, read_start, core_start, core_end = future_map[future]
-            chunk_metrics = future.result()
-            merged.update(chunk_metrics)
-            completed += 1
-            log.info(
-                "region motion chunk done %s/%s | idx=%s read=%s:%s core=%s:%s metrics=%s",
-                completed,
-                len(ranges),
-                idx,
-                read_start,
-                core_end,
-                core_start,
-                core_end,
-                len(chunk_metrics),
-            )
-
-    expected = total_samples
-    if len(merged) != expected:
-        missing = expected - len(merged)
-        log.warning(
-            "region motion metrics count mismatch: expected=%s actual=%s missing_delta=%s",
-            expected,
-            len(merged),
-            missing,
-        )
-
-    ordered = {sample_index: merged[sample_index] for sample_index in sorted(merged)}
-    log.info("region motion metrics parallel done: metrics=%s", len(ordered))
-    return ordered
 
 
 def _window_metrics(frames: list[dict], motion_metrics: dict[int, dict], cfg: RegionClassifierConfig) -> dict:
@@ -659,42 +437,18 @@ def classify_regions(
     output_dir: str,
     cfg: RegionClassifierConfig | None = None,
 ) -> dict:
-    import time
-
     cfg = cfg or RegionClassifierConfig()
-    t0 = time.perf_counter()
     manifest = load_sample_cache(cache_dir)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("segment_*.jpg"):
         stale.unlink(missing_ok=True)
 
-    frame_count = len(manifest.get("frames", []))
-    log.info(
-        "region classification start: samples=%s window_sec=%.1f motion_workers=%s chunk_samples=%s guard_samples=%s",
-        frame_count,
-        cfg.window_sec,
-        cfg.motion_workers,
-        cfg.motion_chunk_samples,
-        cfg.motion_guard_samples,
-    )
-
-    motion_t0 = time.perf_counter()
-    motion_metrics = _sample_motion_metrics_parallel(cache_dir, cfg, total_samples=frame_count)
-    log.info("region classification motion metrics done: elapsed=%.1fs", time.perf_counter() - motion_t0)
-
-    windows_t0 = time.perf_counter()
+    motion_metrics = _sample_motion_metrics(cache_dir, cfg)
     windows = _window_records(manifest, motion_metrics, cfg)
-    log.info("region classification windows done: windows=%s elapsed=%.1fs", len(windows), time.perf_counter() - windows_t0)
-
-    merge_t0 = time.perf_counter()
     groups = _merge_short_groups(_merge_windows(windows), cfg)
     segments = [_flatten_segment(seg, idx) for idx, seg in enumerate(groups, start=1)]
-    log.info("region classification merge done: groups=%s segments=%s elapsed=%.1fs", len(groups), len(segments), time.perf_counter() - merge_t0)
-
-    preview_t0 = time.perf_counter()
     _save_segment_previews(cache_dir, out_dir, segments)
-    log.info("region classification previews done: elapsed=%.1fs", time.perf_counter() - preview_t0)
 
     summary: dict[str, dict] = {}
     for seg in segments:
@@ -716,7 +470,7 @@ def classify_regions(
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    log.info("region classification done: segments=%s output=%s elapsed=%.1fs", len(segments), out_path, time.perf_counter() - t0)
+    log.info("region classification done: segments=%s output=%s", len(segments), out_path)
     for region_type, info in sorted(summary.items()):
         log.info("  %-8s count=%s duration=%.1fs", region_type, info["count"], info["duration_sec"])
     return result
@@ -728,9 +482,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Output directory")
     parser.add_argument("--window-sec", type=float, default=RegionClassifierConfig.window_sec)
     parser.add_argument("--min-segment-sec", type=float, default=RegionClassifierConfig.min_segment_sec)
-    parser.add_argument("--motion-workers", type=int, default=RegionClassifierConfig.motion_workers)
-    parser.add_argument("--motion-chunk-samples", type=int, default=RegionClassifierConfig.motion_chunk_samples)
-    parser.add_argument("--motion-guard-samples", type=int, default=RegionClassifierConfig.motion_guard_samples)
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -743,9 +494,6 @@ def main() -> None:
     cfg = RegionClassifierConfig(
         window_sec=args.window_sec,
         min_segment_sec=args.min_segment_sec,
-        motion_workers=args.motion_workers,
-        motion_chunk_samples=args.motion_chunk_samples,
-        motion_guard_samples=args.motion_guard_samples,
     )
     classify_regions(args.cache, args.output, cfg)
 

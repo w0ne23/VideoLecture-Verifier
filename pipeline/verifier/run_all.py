@@ -64,7 +64,7 @@ def _load_json_file(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 12)
+DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 6)
 CLAIM_EXTRACT_BATCH_SIZE = _env_int(
     "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
     _env_int("VERIFIER_BATCH_SIZE", 4),

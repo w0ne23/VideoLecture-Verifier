@@ -14,43 +14,12 @@ def lecture_output_dir(lecture_id: uuid.UUID | str) -> Path:
     return LOCAL_STORAGE_DIR / 'results' / str(lecture_id)
 
 
-def storage_relpath(path: str | Path) -> str:
-    """LOCAL_STORAGE_DIR 기준 상대경로 문자열. DB에는 이 형태로 저장한다."""
-    raw = Path(path)
-    if not raw.is_absolute():
-        return str(raw)
-    return str(raw.resolve().relative_to(LOCAL_STORAGE_DIR.resolve()))
-
-
-def resolve_storage_path(path_value: str | Path | None) -> Path | None:
-    """DB에 저장된 스토리지 경로를 현재 환경의 절대경로로 해석한다.
-
-    - 상대경로('inputs/…' 등)는 LOCAL_STORAGE_DIR 기준으로 결합
-    - 절대경로인데 파일이 없으면(다른 호스트/컨테이너에서 저장된 레거시 행)
-      'storage/' 뒤쪽을 LOCAL_STORAGE_DIR로 rebase해서 재시도
-    """
-    if not path_value:
-        return None
-    raw = Path(path_value)
-    if not raw.is_absolute():
-        return LOCAL_STORAGE_DIR / raw
-    if raw.exists():
-        return raw
-    parts = raw.parts
-    if 'storage' in parts:
-        suffix = parts[parts.index('storage') + 1:]
-        rebased = LOCAL_STORAGE_DIR.joinpath(*suffix)
-        if rebased.exists():
-            return rebased
-    return raw
-
-
 def make_file_url(path: str | Path | None) -> str:
     if not path:
         return ''
-    resolved = resolve_storage_path(path)
+    raw = Path(path)
     try:
-        rel = resolved.resolve().relative_to(LOCAL_STORAGE_DIR.resolve())
+        rel = raw.resolve().relative_to(LOCAL_STORAGE_DIR.resolve())
     except Exception:
         return ''
     return '/files/' + '/'.join(rel.parts)
