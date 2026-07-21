@@ -32,7 +32,6 @@ def _issue_judge_batch_max_workers() -> int:
 def _claim_id(claim: dict) -> str:
     return str(
         claim.get("claim_id")
-        or claim.get("claim_fingerprint")
         or claim.get("context_id")
         or ""
     ).strip()
@@ -94,7 +93,6 @@ def _build_issue_candidate_prompt(
     min_confidence = issue_judge_min_confidence()
     claim_lines = []
     for i, c in enumerate(claims, 1):
-        approx = " [근사치]" if c.get("is_approximate") else ""
         claim_id = _claim_id(c) or f"claim_{i}"
         context_id = _context_id(c)
         claim_text = str(c.get("claim_text") or "").strip()
@@ -102,16 +100,17 @@ def _build_issue_candidate_prompt(
         lines = [
             f"{i}. claim_id: {claim_id}",
             f"   context_id: {context_id}",
-            f"   claim_type: {c.get('claim_type', '?')}{approx}",
+            f"   claim_type: {c.get('claim_type', '?')}",
+            f"   resolution_status: {c.get('resolution_status', '?')}",
             f"   resolved_claim: {resolved or claim_text}",
             f"   claim_text: {claim_text}",
         ]
-        if c.get("context_ids"):
-            lines.append(f"   context_ids: {', '.join(str(x) for x in c.get('context_ids') or [])}")
         if c.get("antecedent_context_ids"):
             lines.append(
                 f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
             )
+        if c.get("context_note"):
+            lines.append(f"   context_note: {c.get('context_note')}")
         claim_lines.append("\n".join(lines))
 
     return f"""당신은 강의 claim 목록에서 1차 issue 후보만 선별하는 판정자입니다.
@@ -173,13 +172,7 @@ target context 안의 수치, 단위, 용어, 관계 오류를 낮게 평가하�
 - 단정을 하였지만, 일반적으로 통용하는 표현이거나, LLM 자신의 일반 도메인 지식으로 보았을 때 충분히 맞는 말로 보이는 경우
 - 약/대략/정도/조금 같은 근사 표현이 있고, 수치가 보조 예시나 감각적 환산으로 쓰였으며 일반적으로 통용되는 근사이면 출력하지 마세요.
 
-confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후, LLM 자신의 일반 도메인 지식 기준으로 판단했을 때, 해당 claim이 틀렸거나 확인할 가치가 있어 보이는 정도를 0.0~1.0 사이의 숫자로 표현한 것입니다. 일반적으로 0.6 이상이면 후속 검증이 충분히 가치 있다고 판단한 경우입니다.
-
-- 0.00~0.19: 일반적으로 통용되는 설명이며 후속 검증 후보로 보기 어렵습니다.
-- 0.20~0.39: 대체로 맞는 설명이고, 표현 개선이나 엄밀성 보충 수준입니다.
-- 0.40~0.59: 일반적으로 사용될 수 있으나 예외나 조건이 있어 약한 검증 후보입니다.
-- 0.60~0.79: 표현이 애매하거나 예외/조건이 명확해 후속 검증할 가치가 있습니다.
-- 0.80~1.00: LLM 자신의 일반 도메인 지식 기준으로 일반적으로 맞지 않는 말에 가깝습니다.
+confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후, LLM 자신의 일반 도메인 지식 기준으로 판단했을 때, 해당 claim이 틀렸거나 확인할 가치가 있어 보이는 정도를 0.0~1.0 사이의 숫자로 표현한 것입니다. 일반적으로 0.8 이상이면 후속 검증이 충분히 가치 있다고 판단한 경우입니다.
 
 ### 응답 (JSON만)
 

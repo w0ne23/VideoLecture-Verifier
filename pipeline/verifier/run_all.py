@@ -38,22 +38,6 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
-def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
-    try:
-        value = float(os.getenv(name, str(default)) or default)
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, min(maximum, value))
-
-
-def _clamp01(value: object, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(0.0, min(1.0, number))
-
-
 def _json_file_exists(path: Path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
 
@@ -220,76 +204,6 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
         except ValueError:
             continue
     return _bounded(default)
-
-
-def _issue_judge_disagreement_reject_delta() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_REJECT_DELTA", 0.40)
-
-
-def _issue_judge_disagreement_keep_confidence() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_KEEP_CONFIDENCE", 0.90)
-
-
-def _issue_judge_score_lookup(
-    *,
-    models: list[str],
-    judge_results: dict[str, dict],
-) -> dict[str, dict[str, float]]:
-    scores_by_claim: dict[str, dict[str, float]] = {}
-    for model in models:
-        result = judge_results.get(model, {}) or {}
-        if result.get("ok") is False:
-            continue
-        for score in result.get("claim_scores", []) or []:
-            if not isinstance(score, dict):
-                continue
-            claim_id = str(score.get("claim_id", "") or "").strip()
-            if not claim_id:
-                continue
-            scores_by_claim.setdefault(claim_id, {})[model] = _clamp01(score.get("confidence", 0))
-    return scores_by_claim
-
-
-def _issue_judge_family_scores(claim_scores: dict[str, float]) -> dict[str, float]:
-    family_scores: dict[str, float] = {}
-    for model, score in claim_scores.items():
-        if _is_openai_model(model):
-            family_scores["gpt"] = score
-        elif _is_anthropic_model(model):
-            family_scores["claude"] = score
-    return family_scores
-
-
-def _issue_judge_disagreement_rejection(
-    claim_id: str,
-    scores_by_claim: dict[str, dict[str, float]],
-    *,
-    threshold: float | None = None,
-    keep_confidence: float | None = None,
-) -> dict | None:
-    threshold = _issue_judge_disagreement_reject_delta() if threshold is None else threshold
-    keep_confidence = (
-        _issue_judge_disagreement_keep_confidence()
-        if keep_confidence is None
-        else keep_confidence
-    )
-    family_scores = _issue_judge_family_scores(scores_by_claim.get(claim_id, {}) or {})
-    if "gpt" not in family_scores or "claude" not in family_scores:
-        return None
-    max_score = max(float(family_scores["gpt"]), float(family_scores["claude"]))
-    if max_score >= keep_confidence:
-        return None
-    delta = abs(float(family_scores["gpt"]) - float(family_scores["claude"]))
-    if delta < threshold:
-        return None
-    return {
-        "claim_id": claim_id,
-        "gpt_confidence": round(float(family_scores["gpt"]), 6),
-        "claude_confidence": round(float(family_scores["claude"]), 6),
-        "confidence_delta": round(delta, 6),
-        "reject_delta": round(threshold, 6),
-        "strong_keep_confidence": round(keep_confidence, 6),
-    }
 
 
 def _missing_provider_key(model: str) -> str | None:
@@ -513,8 +427,6 @@ def _build_issue_judge_comparison(
     evaluated_models = [model for model in models if model not in failed_models]
     issue_counts = {model: len(judge_results.get(model, {}).get("issues", []) or []) for model in models}
     issues_by_model_claim: dict[str, dict[str, list[dict]]] = {}
-    scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
 
     for model in models:
         grouped: dict[str, list[dict]] = {}
@@ -528,7 +440,6 @@ def _build_issue_judge_comparison(
     single_model_only_count = 0
     no_issue_claim_count = 0
     disagreement_count = 0
-    rejected_by_disagreement_count = 0
     union_issue_claim_ids = set()
 
     for claim in claims:
@@ -564,16 +475,8 @@ def _build_issue_judge_comparison(
                 model_rows[model] = {"status": "ok", "has_issue": False}
 
         evaluated_count = len(evaluated_models)
-        disagreement_rejection = _issue_judge_disagreement_rejection(
-            claim_id,
-            scores_by_claim,
-            threshold=disagreement_reject_delta,
-        )
         if evaluated_count == 0:
             status = "all_models_failed"
-        elif issue_models and disagreement_rejection:
-            status = "rejected_model_disagreement"
-            rejected_by_disagreement_count += 1
         elif not issue_models:
             status = "no_issue"
             no_issue_claim_count += 1
@@ -602,7 +505,6 @@ def _build_issue_judge_comparison(
                 "status": status,
                 "issue_model_count": len(issue_models),
                 "issue_models": issue_models,
-                "model_disagreement_rejection": disagreement_rejection or {},
             },
         })
 
@@ -621,8 +523,6 @@ def _build_issue_judge_comparison(
             "all_models_agreed_count": all_model_agreed_count,
             "partial_agreement_count": disagreement_count,
             "single_model_only_count": single_model_only_count,
-            "rejected_by_model_disagreement_count": rejected_by_disagreement_count,
-            "model_disagreement_reject_delta": disagreement_reject_delta,
             "no_issue_claim_count": no_issue_claim_count,
         },
         "exclusive_by_model": exclusive_by_model,
@@ -643,9 +543,6 @@ def _write_issue_judge_merged_output(
     seen_by_claim: dict[str, dict] = {}
     duplicate_claim_ids: list[str] = []
     skipped_without_claim_id = 0
-    scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
-    rejected_by_disagreement: dict[str, dict] = {}
 
     for model in models:
         result = judge_results.get(model, {}) or {}
@@ -657,14 +554,6 @@ def _write_issue_judge_merged_output(
             claim_id = str(issue.get("claim_id", "") or "").strip()
             if not claim_id:
                 skipped_without_claim_id += 1
-                continue
-            disagreement_rejection = _issue_judge_disagreement_rejection(
-                claim_id,
-                scores_by_claim,
-                threshold=disagreement_reject_delta,
-            )
-            if disagreement_rejection:
-                rejected_by_disagreement.setdefault(claim_id, disagreement_rejection)
                 continue
 
             source_summary = {
@@ -718,8 +607,6 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "duplicate_claim_count": len(set(duplicate_claim_ids)),
         "skipped_without_claim_id": skipped_without_claim_id,
-        "rejected_by_model_disagreement_count": len(rejected_by_disagreement),
-        "model_disagreement_reject_delta": disagreement_reject_delta,
     }
     payload = {
         "schema_version": "issue_judge_merged.v1",
@@ -730,7 +617,6 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "summary": summary,
         "issues": merged_issues,
-        "rejected_by_model_disagreement": list(rejected_by_disagreement.values()),
     }
     path = output_dir / f"{base_stem}_issue_judge.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -738,8 +624,6 @@ def _write_issue_judge_merged_output(
 
 
 def _claim_key(payload: dict) -> str:
-    if payload.get("claim_fingerprint"):
-        return str(payload.get("claim_fingerprint"))
     if payload.get("claim_id"):
         return str(payload.get("claim_id"))
     cid = str(payload.get("context_id", "") or "")
@@ -1043,8 +927,8 @@ def _format_classified_issue_report(content_view: dict) -> str:
         labels = {
             "factual_error": "사실 오류",
             "temporal_error": "오래된 내용",
-            "confusing_explanation": "혼동 가능 설명",
             "scope_overclaim": "과도한 일반화",
+            "confusing_explanation": "혼동 가능 설명",
         }
         parts = [f"{labels.get(key, key)} {value}건" for key, value in breakdown.items()]
         lines.append(f"유형별: {', '.join(parts)}")

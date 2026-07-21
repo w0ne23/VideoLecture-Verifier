@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .issue_type_classifier import (
+    AMBIGUOUS_ISSUE_TYPE,
     ISSUE_TYPES,
     TOKEN_USAGE_FIELDS,
     _aggregate_token_usage,
@@ -47,8 +48,8 @@ JUDGMENTS = {
 CATEGORY_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
-    "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "과도한 일반화",
+    "confusing_explanation": "혼동 가능 설명",
 }
 
 
@@ -271,11 +272,16 @@ def _issue_context_ids(issue: dict[str, Any]) -> list[str]:
     return [single] if single else []
 
 
-def _flatten_issues(payload: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
+def _flatten_issues(
+    payload: dict[str, Any],
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    standard_refs: list[dict[str, Any]] = []
+    ambiguous_refs: list[dict[str, Any]] = []
     issues_by_type = payload.get("issues_by_type") or {}
     if not isinstance(issues_by_type, dict):
-        return refs
+        return standard_refs, ambiguous_refs
     for category in ISSUE_TYPES:
         rows = issues_by_type.get(category) or []
         if not isinstance(rows, list):
@@ -283,16 +289,115 @@ def _flatten_issues(payload: dict[str, Any], *, limit: int | None = None) -> lis
         for index, issue in enumerate(rows):
             if not isinstance(issue, dict):
                 continue
-            refs.append({
+            standard_refs.append({
                 "id": str(issue.get("issue_id") or f"{category}:{index + 1}"),
                 "category": category,
                 "category_label": CATEGORY_LABELS.get(category, category),
                 "index": index,
                 "issue": issue,
             })
+    ambiguous_rows = issues_by_type.get(AMBIGUOUS_ISSUE_TYPE) or []
+    if isinstance(ambiguous_rows, list):
+        for index, issue in enumerate(ambiguous_rows):
+            if not isinstance(issue, dict):
+                continue
+            ambiguous_refs.append({
+                "id": str(issue.get("issue_id") or f"{AMBIGUOUS_ISSUE_TYPE}:{index + 1}"),
+                "category": AMBIGUOUS_ISSUE_TYPE,
+                "category_label": "분류 불명확",
+                "index": index,
+                "issue": issue,
+            })
     if limit is not None:
-        return refs[: max(0, limit)]
-    return refs
+        cap = max(0, limit)
+        return standard_refs[:cap], ambiguous_refs[: max(0, cap - len(standard_refs))]
+    return standard_refs, ambiguous_refs
+
+
+def _ambiguous_candidate_categories(issue: dict[str, Any]) -> list[str]:
+    reasons = set(issue.get("routing_reasons") or [])
+    candidates: set[str] = set()
+    weighted_scores = issue.get("weighted_scores") or {}
+    if "low_margin" in reasons:
+        sorted_types = sorted(
+            ISSUE_TYPES,
+            key=lambda issue_type: float(weighted_scores.get(issue_type, 0.0) or 0.0),
+            reverse=True,
+        )
+        for issue_type in sorted_types[:2]:
+            if float(weighted_scores.get(issue_type, 0.0) or 0.0) > 0.0:
+                candidates.add(issue_type)
+    if "model_disagreement" in reasons:
+        for verdict in issue.get("model_classifications") or []:
+            if not isinstance(verdict, dict):
+                continue
+            top = str(verdict.get("top_issue_type") or "").strip()
+            if top in ISSUE_TYPES:
+                candidates.add(top)
+    if not candidates:
+        if weighted_scores:
+            candidates.add(
+                max(ISSUE_TYPES, key=lambda issue_type: float(weighted_scores.get(issue_type, 0.0) or 0.0))
+            )
+        else:
+            candidates.add(ISSUE_TYPES[0])
+    return [issue_type for issue_type in ISSUE_TYPES if issue_type in candidates]
+
+
+def _candidate_bundle_id(base_id: str, category: str) -> str:
+    return f"{base_id}::{category}"
+
+
+def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
+    return {
+        "id": _candidate_bundle_id(ref["id"], category),
+        "category": category,
+        "category_label": CATEGORY_LABELS.get(category, category),
+        "index": ref.get("index"),
+        "issue": ref["issue"],
+        "ambiguous_base_id": ref["id"],
+    }
+
+
+def _merge_ambiguous_verification(
+    ref: dict[str, Any],
+    candidate_categories: list[str],
+    candidate_records: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    selected_category = max(
+        candidate_categories,
+        key=lambda category: (
+            float(candidate_records[category].get("final_severity_score") or 0.0),
+            -ISSUE_TYPES.index(category),
+        ),
+    )
+    selected = dict(candidate_records[selected_category])
+    issue = ref["issue"]
+    selected.update({
+        "original_final_issue_type": AMBIGUOUS_ISSUE_TYPE,
+        "original_final_issue_type_label": "분류 불명확",
+        "routing_reasons": issue.get("routing_reasons", []),
+        "ambiguous_candidate_categories": list(candidate_categories),
+        "candidate_verifications": dict(candidate_records),
+        "selected_issue_type": selected_category,
+        "selected_issue_type_label": CATEGORY_LABELS.get(selected_category, selected_category),
+        "selected_from_ambiguous": True,
+        "category": selected_category,
+        "category_label": CATEGORY_LABELS.get(selected_category, selected_category),
+        "id": ref["id"],
+    })
+    previous = dict(selected.get("previous_classification") or {})
+    previous.update({
+        "final_issue_type": issue.get("final_issue_type", AMBIGUOUS_ISSUE_TYPE),
+        "routing_reasons": issue.get("routing_reasons", []),
+        "routed_to_ambiguous": True,
+        "weighted_scores": issue.get("weighted_scores", {}),
+        "ensemble_confidence": issue.get("ensemble_confidence", 0.0),
+        "low_margin": bool(issue.get("low_margin")),
+        "margin": issue.get("margin", 0.0),
+    })
+    selected["previous_classification"] = previous
+    return selected
 
 
 def _build_slide_lookup(*payloads: dict[str, Any]) -> dict[int, dict[str, Any]]:
@@ -964,6 +1069,7 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
     return {
         "total_issue_count": len(records),
         "breakdown_by_type": {category: by_type.get(category, 0) for category in ISSUE_TYPES},
+        "ambiguous_resolved_count": sum(1 for record in records if record.get("selected_from_ambiguous")),
         "high_severity_count": high_count,
         "needs_manual_review_count": manual_review_count,
         "model_breakdown": {
@@ -1133,6 +1239,22 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "average_category_severity",
                 0.0,
             )
+        if issue.get("selected_from_ambiguous"):
+            feedback_items[-1]["classified_issue_verifier"]["selected_from_ambiguous"] = True
+            feedback_items[-1]["classified_issue_verifier"]["original_final_issue_type"] = issue.get(
+                "original_final_issue_type",
+                AMBIGUOUS_ISSUE_TYPE,
+            )
+            feedback_items[-1]["classified_issue_verifier"]["routing_reasons"] = issue.get("routing_reasons", [])
+            feedback_items[-1]["classified_issue_verifier"]["ambiguous_candidate_categories"] = issue.get(
+                "ambiguous_candidate_categories",
+                [],
+            )
+            feedback_items[-1]["classified_issue_verifier"]["candidate_verifications"] = issue.get(
+                "candidate_verifications",
+                {},
+            )
+            feedback_items[-1]["classified_issue_verifier"]["selected_issue_type"] = issue.get("selected_issue_type", "")
 
     confirmed = [item for item in feedback_items if item.get("status") == "confirmed"]
     review = [item for item in feedback_items if item.get("status") == "professor_check"]
@@ -1193,24 +1315,44 @@ def judge_classified_issues(
     model_weights_spec: str | None = None,
 ) -> dict[str, Any]:
     _load_env()
-    refs = _flatten_issues(payload, limit=limit)
+    standard_refs, ambiguous_refs = _flatten_issues(payload, limit=limit)
     merged_payload = _load_json(merged_clean_path)
     slide_lookup = _build_slide_lookup(merged_payload)
     context_by_id, contexts_by_slide = _build_context_lookup(merged_payload)
     domain = str(merged_payload.get("domain") or "")
     subdomain = str(merged_payload.get("subdomain") or "")
-    bundles = [
-        _build_context_bundle(
-            ref,
-            domain=domain,
-            subdomain=subdomain,
-            slide_lookup=slide_lookup,
-            context_by_id=context_by_id,
-            contexts_by_slide=contexts_by_slide,
-            context_window=context_window,
+
+    def _make_bundles(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            _build_context_bundle(
+                ref,
+                domain=domain,
+                subdomain=subdomain,
+                slide_lookup=slide_lookup,
+                context_by_id=context_by_id,
+                contexts_by_slide=contexts_by_slide,
+                context_window=context_window,
+            )
+            for ref in refs
+        ]
+
+    standard_bundles = _make_bundles(standard_refs)
+    ambiguous_plans: list[tuple[dict[str, Any], list[str], list[dict[str, Any]]]] = []
+    ambiguous_candidate_bundles: list[dict[str, Any]] = []
+    for ref in ambiguous_refs:
+        candidate_categories = _ambiguous_candidate_categories(ref["issue"])
+        candidate_refs = [_build_candidate_ref(ref, category) for category in candidate_categories]
+        candidate_bundles = _make_bundles(candidate_refs)
+        ambiguous_plans.append((ref, candidate_categories, candidate_bundles))
+        ambiguous_candidate_bundles.extend(candidate_bundles)
+
+    bundles = standard_bundles + ambiguous_candidate_bundles
+    if ambiguous_refs:
+        print(
+            f"  ambiguous issue {len(ambiguous_refs)}건 → "
+            f"후보 검증 {len(ambiguous_candidate_bundles)}건",
+            flush=True,
         )
-        for ref in refs
-    ]
 
     model_results: dict[str, dict[str, Any]]
     if dry_run:
@@ -1281,8 +1423,18 @@ def judge_classified_issues(
 
     records = [
         _issue_result_record(bundle, verdicts_by_id.get(bundle["id"], []), model_weights=model_weights)
-        for bundle in bundles
+        for bundle in standard_bundles
     ]
+    for ref, candidate_categories, candidate_bundles in ambiguous_plans:
+        candidate_records = {
+            bundle["category"]: _issue_result_record(
+                bundle,
+                verdicts_by_id.get(bundle["id"], []),
+                model_weights=model_weights,
+            )
+            for bundle in candidate_bundles
+        }
+        records.append(_merge_ambiguous_verification(ref, candidate_categories, candidate_records))
     grouped = _group_issue_results(records)
     token_usage = Counter()
     for result in model_results.values():
