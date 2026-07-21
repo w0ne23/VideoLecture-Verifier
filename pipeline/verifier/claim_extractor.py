@@ -61,7 +61,7 @@ def _claim_extract_batch_size(default: int | None = None) -> int:
 def _claim_extract_max_workers(default: int | None = None) -> int:
     if default is not None:
         return max(1, int(default))
-    return _read_int_env("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 4, minimum=1)
+    return _read_int_env("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 12, minimum=1)
 
 
 def _claim_extract_prompt_profile() -> str:

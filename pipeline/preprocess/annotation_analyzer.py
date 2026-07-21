@@ -80,6 +80,7 @@ def _parse_json_safe(raw: str) -> dict:
 
 
 _LEGACY_EVENT_KEYS = (
+    "scene_index",
     "slide_number",
     "annot_index",
     "timestamp_sec",
@@ -158,10 +159,17 @@ class Config:
 # ──────────────────────────────────────────────
 def load_slide_pairs(slides_dir: str) -> list[dict]:
     """
-    output_slides/ 디렉토리에서 (base, [annot_01, annot_02, ...]) 쌍을 구성합니다.
+    output_slides/ 디렉토리에서 materialized scene 방문 단위의
+    (base, [annot_01, annot_02, ...]) 쌍을 구성합니다.
+
+    연속 same-slide build는 slide_extractor 단계에서 이미 하나의 scene으로
+    collapse되어 있어야 한다. 여기서는 logical slide 전체를 다시 합치지 않고
+    최종 materialized scene 기준으로만 annot 연쇄를 본다.
+
     반환 형식:
         [
           {
+            "scene_index": 1,
             "slide_number": 1,
             "base_path": "...",
             "annot_paths": ["...", "..."]
@@ -202,8 +210,9 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
                 continue
 
             pair = pairs.setdefault(
-                logical_slide_no,
+                scene_idx,
                 {
+                    "scene_index": scene_idx,
                     "slide_number": logical_slide_no,
                     "scene_indices": [],
                     "base_path": None,
@@ -227,6 +236,12 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
                 last_path_by_scene[scene_idx] = full_path
                 continue
 
+            if capture_type == "build":
+                # A handwritten annotation after a build must be diffed from
+                # that build state, not from the original base.
+                last_path_by_scene[scene_idx] = full_path
+                continue
+
             if capture_type not in ("annot", "annotation"):
                 if annot_idx == 0 and pair["base_path"] is None:
                     pair["base_path"] = full_path
@@ -241,12 +256,17 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
             pair["annot_timestamps"].append(float(entry.get("timestamp_sec", 0.0) or 0.0))
             pair["annot_prev_paths"].append(prev_path)
             pair["annot_indices"].append(
-                int(entry.get("slide_annot_index", len(pair["annot_paths"])) or len(pair["annot_paths"]))
+                int(
+                    entry.get(
+                        "scene_annot_index",
+                        entry.get("annot_index", len(pair["annot_paths"])),
+                    ) or len(pair["annot_paths"])
+                )
             )
             last_path_by_scene[scene_idx] = full_path
 
         result = [v for v in pairs.values() if v["base_path"] is not None]
-        result.sort(key=lambda x: x["slide_number"])
+        result.sort(key=lambda x: (x.get("scene_index", 0), x["slide_number"]))
     else:
         # metadata 없을 경우 파일명 패턴으로 폴백
         log.warning("metadata.json 없음 - 파일명 패턴으로 쌍 구성")
@@ -266,8 +286,12 @@ def _load_pairs_by_filename(slides_path: Path) -> list[dict]:
     pairs = []
     for base in bases:
         idx = int(base.name.split("_")[1])
-        annots = sorted(slides_path.glob(f"scene_{idx:03d}_annot_*.jpg"))
+        annots = sorted(
+            list(slides_path.glob(f"scene_{idx:03d}_annot_*.jpg"))
+            + list(slides_path.glob(f"scene_{idx:03d}_build_*.jpg"))
+        )
         pairs.append({
+            "scene_index": idx,
             "slide_number": idx,
             "base_path": str(base),
             "original_base_path": str(base),
@@ -843,6 +867,7 @@ def analyze_annotation_pair(
     slide_number: int,
     annot_index: int,
     timestamp_sec: float = 0.0,
+    scene_index: Optional[int] = None,
 ) -> dict:
     """
     (base, annot, diff_mask) 세 장과 필기 영역 bbox 목록을 VLM에게 전달하여
@@ -887,6 +912,8 @@ def analyze_annotation_pair(
         )
         raw = _sanitize_raw(raw)
         result = _parse_json_safe(raw)
+        if scene_index is not None:
+            result["scene_index"] = scene_index
         result["slide_number"]   = slide_number
         result["annot_index"]    = annot_index
         result["timestamp_sec"]  = timestamp_sec
@@ -898,6 +925,7 @@ def analyze_annotation_pair(
     except json.JSONDecodeError as e:
         log.warning(f"  JSON 파싱 실패 (slide {slide_number}, annot {annot_index}): {e}")
         return {
+            "scene_index": scene_index,
             "slide_number":  slide_number,
             "annot_index":   annot_index,
             "timestamp_sec": timestamp_sec,
@@ -912,6 +940,7 @@ def analyze_annotation_pair(
     except Exception as e:
         log.error(f"  VLM API 오류 (slide {slide_number}, annot {annot_index}): {e}")
         return {
+            "scene_index": scene_index,
             "slide_number":  slide_number,
             "annot_index":   annot_index,
             "timestamp_sec": timestamp_sec,
@@ -935,6 +964,7 @@ def analyze_slide_change_tracks(
     cfg: Config,
     save_masks: bool = False,
     mask_dir: Optional[Path] = None,
+    scene_index: Optional[int] = None,
 ) -> list[dict]:
     """
     한 슬라이드의 모든 어노테이션을 change track 기준으로 통합 분석합니다.
@@ -975,6 +1005,7 @@ def analyze_slide_change_tracks(
             per_step_data=per_step_data,
             change_tracks=[],
             slide_number=slide_number,
+            scene_index=scene_index,
             error="No local change tracks detected",
         )
 
@@ -1002,6 +1033,7 @@ def analyze_slide_change_tracks(
             slide_number=slide_number,
             base_path=base_path,
             change_tracks=change_tracks,
+            scene_index=scene_index,
         )
 
     except json.JSONDecodeError as e:
@@ -1013,6 +1045,7 @@ def analyze_slide_change_tracks(
             per_step_data=per_step_data,
             change_tracks=change_tracks,
             slide_number=slide_number,
+            scene_index=scene_index,
             error=f"Track analysis JSON parse error: {e}",
         )
     except Exception as e:
@@ -1025,6 +1058,7 @@ def analyze_slide_change_tracks(
             per_step_data=per_step_data,
             change_tracks=change_tracks,
             slide_number=slide_number,
+            scene_index=scene_index,
             error=err_msg,
         )
 
@@ -1178,6 +1212,7 @@ def _build_results_from_track_analysis(
     slide_number: int,
     base_path: str,
     change_tracks: list[dict],
+    scene_index: Optional[int] = None,
 ) -> list[dict]:
     """
     change-track 통합 분석 응답의 flat annotations[]를 로컬 change track과 결합하여
@@ -1228,6 +1263,7 @@ def _build_results_from_track_analysis(
             if track["first_seen_annot_index"] == annot_idx
         ]
         results.append({
+            "scene_index": scene_index,
             "slide_number":  slide_number,
             "annot_index":   annot_idx,
             "timestamp_sec": step["timestamp_sec"],
@@ -1246,6 +1282,7 @@ def _build_local_track_results(
     per_step_data: list[dict],
     change_tracks: list[dict],
     slide_number: int,
+    scene_index: Optional[int] = None,
     error: Optional[str] = None,
 ) -> list[dict]:
     results = []
@@ -1265,6 +1302,7 @@ def _build_local_track_results(
             if track["first_seen_annot_index"] == annot_idx
         ]
         payload = {
+            "scene_index": scene_index,
             "slide_number": slide_number,
             "annot_index": annot_idx,
             "timestamp_sec": step["timestamp_sec"],
@@ -1379,6 +1417,7 @@ def analyze_all(
         mask_dir.mkdir(exist_ok=True)
 
     for pair in pairs:
+        scene_index = pair.get("scene_index")
         slide_no = pair["slide_number"]
         base_path = pair["base_path"]
         scene_indices = pair.get("scene_indices", [])
@@ -1420,7 +1459,7 @@ def analyze_all(
 
                 result = analyze_annotation_pair(
                     prev_path, annot_path, diff_mask, region_bboxes,
-                    slide_no, annot_idx, timestamp_sec=ts
+                    slide_no, annot_idx, timestamp_sec=ts, scene_index=scene_index
                 )
                 results.append(result)
         else:
@@ -1432,6 +1471,7 @@ def analyze_all(
                 pair.get("annot_prev_paths"),
                 pair.get("annot_indices"),
                 slide_no, cfg, save_masks, mask_dir,
+                scene_index=scene_index,
             )
             results.extend(track_analysis_results)
 

@@ -6,7 +6,7 @@ Groq Whisper 음성 전사 (무음 구간 사전 감지 기반 청크 분할)
 - 1.5초 이상 무음에서 청크를 자르고 무음 자체는 API에 보내지 않음
   → Whisper의 무음 구간 환각(repetition loop, "감사합니다", "다음 영상에서 만나요" 등) 차단
 - 무음을 제거한 발화 조각들을 다시 3분 단위로 이어붙여 Whisper에 전송
-- 0.6초 이상 무음은 silences로 별도 반환 (slide_classifier 호환)
+- 0.6초 이상 무음은 silences로 별도 반환
 
 환경변수:
 - TRANSCRIBE_SILENCE_DB           (default: -35)  silencedetect noise 임계값(dB)

@@ -6,3 +6,5 @@ python-multipart
 python-dotenv
 openai>=1.0.0
 anthropic>=0.49.0
+rapidocr>=3.9.0
+onnxruntime>=1.16.0

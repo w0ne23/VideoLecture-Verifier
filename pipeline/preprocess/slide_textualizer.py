@@ -32,6 +32,7 @@ import json
 import base64
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,6 +47,10 @@ from .emphasis_keyword import (
     summarize_topic_keyword_counts_for_text,
     topic_keyword_count_items,
 )
+try:
+    from .ocr_hint import get_slide_ocr_hint, ocr_enabled
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from ocr_hint import get_slide_ocr_hint, ocr_enabled
 
 try:
     from json_repair import repair_json
@@ -75,20 +80,59 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    provider: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
+    provider: str = os.getenv("VERILEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
     model: str = os.getenv(
-        "GRAPHLEC_SLIDE_TEXTUALIZER_MODEL",
-        os.getenv("GRAPHLEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
+        "VERILEC_SLIDE_TEXTUALIZER_MODEL",
+        os.getenv("VERILEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
     )
     gemini_model: str = GEMINI_GENERATIVE_MODEL
     max_retries: int = 3
     retry_delay: float = 5.0
+    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "1"))
+    ocr_provider: str = os.getenv("GRAPHLEC_SLIDE_OCR_PROVIDER", "none")
+    ocr_model_dir: str = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "")
+    ocr_lang: str = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual")
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
 
-# annot 없는 슬라이드 (이미지 1장): t1 + slide_emphasis 동시 추출
+# Post-video verifier input is intentionally base-only. Teacher annotations are not textualized.
+T1_BASE_ONLY_EXTRACTION_PROMPT = """
+이 슬라이드 BASE 이미지에서 인쇄된 슬라이드 원본 텍스트와 구조만 추출하라.
+교수 필기, 손글씨, 밑줄, 화살표, 강조 표시는 모두 무시한다. 설명 없이 JSON만 출력.
+
+출력 형식:
+{
+  "slide_type": "text" | "image_only" | "mixed",
+  "title": "슬라이드 제목 (없으면 빈 문자열)",
+  "raw_text": "인쇄된 텍스트 전체 (위→아래, 좌→우 순서, 줄바꿈은 \n)",
+  "structure": "표/다이어그램/화살표 관계를 텍스트로 기술",
+  "visual_assets": [
+    {
+      "asset_type": "table" | "diagram" | "figure" | "list" | "chart" | "image" | "other",
+      "title": "시각자료 제목/캡션",
+      "description": "시각자료가 전달하는 내용",
+      "raw_text": "시각자료 내부의 인쇄된 텍스트",
+      "visual_elements": [],
+      "visual_relations": [],
+      "layout": {},
+      "bbox": null
+    }
+  ]
+}
+
+규칙:
+- 제목, 본문, 불릿, 표 셀, 다이어그램 레이블을 포함한다.
+- 교수 필기/손글씨/강조 표시는 절대 추출하지 않는다.
+- structure와 visual_assets는 인쇄된 슬라이드 구조만 설명한다.
+- 시각자료가 없으면 visual_assets는 []로 둔다.
+"""
+
+"""Legacy annotation-aware prompts retained below temporarily for reference.
+
+They are not used by the base-only post-video textualization path.
+"""
 T1_EXTRACTION_PROMPT = """
 이 슬라이드 이미지에서 슬라이드 유형을 판별하고, 텍스트와 구조 정보, 시각적 강조 요소를 추출하라.
 설명 없이 JSON만 출력.
@@ -348,7 +392,10 @@ class SlideLoader:
                 continue
             if entry.get("capture_type") == "base":
                 base_entries[idx] = entry
-            elif entry.get("capture_type") in ("annot", "annotation"):
+            elif (
+                entry.get("capture_type") in ("annot", "annotation", "build")
+                or entry.get("capture_subtype") == "build"
+            ):
                 annot_entries.setdefault(idx, []).append(entry)
 
         scene_records = []
@@ -357,21 +404,17 @@ class SlideLoader:
             annots = annot_entries.get(scene_num, [])
             scene_type = base.get("scene_type", "slide")
 
-            if annots:
-                last_annot = max(
-                    annots,
-                    key=lambda x: (
-                        int(x.get("annot_index", 0) or 0),
-                        float(x.get("timestamp_sec", 0.0) or 0.0),
-                    ),
-                )
-                target = last_annot
-                source = f"last_annot (annot_index={last_annot.get('annot_index')})"
-                text_image_has_annot = True
-            else:
-                target = base
-                source = "base"
-                text_image_has_annot = False
+            # Build/annotation frames carry the fully revealed slide state and
+            # are sent alongside the clean base to T1 structure extraction.
+            target = sorted(
+                annots,
+                key=lambda entry: (
+                    float(entry.get("timestamp_sec", 0.0) or 0.0),
+                    int(entry.get("frame_no", 0) or 0),
+                ),
+            )[-1] if annots else base
+            source = "build" if target.get("capture_type") == "build" else ("annotation" if annots else "base")
+            text_image_has_annot = bool(annots)
 
             canonical = (
                 base.get("slide_canonical_index")
@@ -406,7 +449,6 @@ class SlideLoader:
             canonical = record["slide_canonical_number"]
             current = canonical_representatives.get(canonical)
             score = (
-                1 if record["text_image_has_annot"] else 0,
                 float(record["timestamp"]),
                 int(record["scene_number"]),
             )
@@ -458,13 +500,8 @@ class SlideLoader:
 
             image_path = self.slides_dir / rep["target_entry"]["filename"]
             if not image_path.exists():
-                logger.warning(f"파일 없음: {image_path}, base로 재시도")
-                image_path = self.slides_dir / rep["base_entry"]["filename"]
-                if not image_path.exists():
-                    logger.warning(f"base도 없음: {image_path}, 스킵")
-                    continue
-                record["text_source"] = "base (fallback)"
-
+                logger.warning(f"T1 대상 파일 없음: {image_path}, 스킵")
+                continue
             base_image_path = self.slides_dir / rep["base_entry"]["filename"]
 
             slides.append({
@@ -479,7 +516,7 @@ class SlideLoader:
                 "timestamp":      record["timestamp"],  # 타임스탬프는 현재 scene 기준
                 "image_path":     str(image_path),
                 "image":          Image.open(image_path).convert("RGB"),
-                "base_image":     Image.open(base_image_path).convert("RGB"),
+                "base_image":     Image.open(base_image_path).convert("RGB") if base_image_path.exists() else None,
                 "has_annot":      record["has_annot"],
                 "has_teacher_annotation": record["has_teacher_annotation"],
                 "text_image_has_annot": rep["text_image_has_annot"],
@@ -487,12 +524,11 @@ class SlideLoader:
             })
 
         slides.sort(key=lambda x: x["scene_number"])
-        last_annot_count = sum(1 for s in slides if "annot" in s["text_source"])
-        base_count = len(slides) - last_annot_count
+        annot_present_count = sum(1 for s in slides if s["has_teacher_annotation"])
         logger.info(
             f"✓ Loaded {len(slides)} scenes from metadata.json "
             f"(unique slides: {len(canonical_representatives)}, "
-            f"last_annot: {last_annot_count}, base: {base_count})"
+            f"base_input: {len(slides)}, annot_present: {annot_present_count})"
         )
         return slides
 
@@ -546,15 +582,9 @@ class SlideLoader:
             base_path = base_files[slide_num]
             annots = annot_files.get(slide_num, [])
 
-            if annots:
-                last_annot_path = max(annots, key=lambda x: x[0])[1]
-                target_path = last_annot_path
-                source = f"last_annot"
-                text_image_has_annot = True
-            else:
-                target_path = base_path
-                source = "base"
-                text_image_has_annot = False
+            target_path = base_path
+            source = "base"
+            text_image_has_annot = False
 
             slides.append({
                 "scene_number": slide_num,
@@ -568,7 +598,7 @@ class SlideLoader:
                 "timestamp":    0.0,
                 "image_path":   str(target_path),
                 "image":        Image.open(target_path).convert("RGB"),
-                "base_image":   Image.open(base_path).convert("RGB"),
+                "base_image":   None,
                 "has_annot":    bool(annots),
                 "has_teacher_annotation": bool(annots),
                 "text_image_has_annot": text_image_has_annot,
@@ -608,28 +638,30 @@ class T1Extractor:
             logger.info(f"✓ Gemini initialized for t1 extraction: {self.config.gemini_model}")
 
     @staticmethod
+    def _compose_prompt_with_ocr(prompt: str, ocr_hint: str) -> str:
+        hint = str(ocr_hint or "").strip()
+        if not hint:
+            return prompt
+        return (
+            f"{prompt}\n\n"
+            "[Pre-extracted OCR hint - use only as a hint, trust the image if they conflict]\n"
+            f"{hint}\n"
+        )
+
+    @staticmethod
     def _image_to_data_url(image: Image.Image) -> str:
         buf = BytesIO()
         image.save(buf, format="JPEG", quality=90)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64}"
 
-    def _call_openai(self, image: Image.Image, base_image: Image.Image = None) -> str:
+    def _call_openai(self, image: Image.Image, base_image: Image.Image = None, ocr_hint: str = "") -> str:
+        template = T1_EXTRACTION_PROMPT_WITH_ANNOT if base_image is not None else T1_BASE_ONLY_EXTRACTION_PROMPT
+        prompt = self._compose_prompt_with_ocr(template, ocr_hint)
+        content = [{"type": "text", "text": prompt}]
         if base_image is not None:
-            prompt = T1_EXTRACTION_PROMPT_WITH_ANNOT
-            content = [
-                {"type": "text", "text": "Image 1 (BASE):"},
-                {"type": "image_url", "image_url": {"url": self._image_to_data_url(base_image), "detail": "high"}},
-                {"type": "text", "text": "Image 2 (LAST_ANNOT):"},
-                {"type": "image_url", "image_url": {"url": self._image_to_data_url(image), "detail": "high"}},
-                {"type": "text", "text": prompt},
-            ]
-        else:
-            prompt = T1_EXTRACTION_PROMPT
-            content = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": self._image_to_data_url(image), "detail": "high"}},
-            ]
+            content.append({"type": "image_url", "image_url": {"url": self._image_to_data_url(base_image), "detail": "high"}})
+        content.append({"type": "image_url", "image_url": {"url": self._image_to_data_url(image), "detail": "high"}})
 
         last_exc = None
         for attempt in range(self.config.max_retries):
@@ -664,63 +696,6 @@ class T1Extractor:
                 if attempt < self.config.max_retries - 1:
                     time.sleep(self.config.retry_delay * (attempt + 1))
         raise last_exc
-
-    @staticmethod
-    def _filter_emphasis(emphasis_list: List[Dict]) -> List[Dict]:
-        """
-        slide_emphasis 후처리:
-          1. 순번 단독 항목 제거
-             - "1" / "2." / "3)" 처럼 숫자 + 구두점/공백만 남는 경우 제거
-             - "1. 운영체제의 목적"(뒤에 내용 있음), "256GB"(단위 혼합)는 유지
-          2. 동일 텍스트 중복 병합
-             - 같은 text(정규화 기준)가 여러 항목으로 등장하면 하나로 합침
-             - type은 리스트로 수집 후 중복 제거: ["bold", "box"]
-             - bbox는 첫 번째 항목 기준 유지
-        """
-        # 순번 단독 패턴: "1" / "2." / "3)" / "10. " 등
-        _standalone_num = re.compile(r'^\d+[\.\)]*\s*$')
-
-        # ── 1단계: 순번 제거 + 텍스트별 버킷으로 수집 ──────────────────────── #
-        buckets: Dict[str, Dict] = {}
-        for item in emphasis_list:
-            text = item.get("text", "").strip()
-            if not text:
-                continue
-            if _standalone_num.match(text):
-                logger.debug(f"  [emphasis filter] 순번 단독 제거: '{text}'")
-                continue
-
-            key = " ".join(text.lower().split())
-            t   = item.get("type", "other") or "other"
-
-            if key not in buckets:
-                buckets[key] = {
-                    "text":   text,
-                    "types":  [t],
-                    "color":  item.get("color"),
-                    "bbox":   item.get("bbox"),
-                }
-            else:
-                if t not in buckets[key]["types"]:
-                    buckets[key]["types"].append(t)
-                # color가 있으면 채움 (첫 항목에 없을 수도 있으므로)
-                if not buckets[key]["color"] and item.get("color"):
-                    buckets[key]["color"] = item.get("color")
-
-        # ── 2단계: 최종 리스트 생성 ────────────────────────────────────────── #
-        filtered = []
-        for bucket in buckets.values():
-            types = bucket["types"]
-            type_val = types[0] if len(types) == 1 else types  # 단일이면 str, 복수면 list
-
-            filtered.append({
-                "text":  bucket["text"],
-                "type":  type_val,
-                "color": bucket["color"],
-                "bbox":  bucket["bbox"],
-            })
-
-        return filtered
 
     @classmethod
     def _normalize_visual_elements(cls, elements: Any) -> List[Dict]:
@@ -886,25 +861,16 @@ class T1Extractor:
             )
         return normalized
 
-    def _call_gemini(self, image: Image.Image, base_image: Image.Image = None) -> str:
-        """재시도 로직 포함 Gemini Vision 호출.
-
-        base_image가 주어지면 annot 있는 슬라이드 — 2장 프롬프트 사용:
-          Image 1 (BASE)      → slide_emphasis 추출
-          Image 2 (LAST_ANNOT)→ t1 텍스트 추출
-        base_image가 없으면 단일 이미지 프롬프트 사용.
-        """
+    def _call_gemini(self, image: Image.Image, base_image: Image.Image = None, ocr_hint: str = "") -> str:
+        """재시도 로직을 포함한 base 이미지 1장 Gemini Vision 호출."""
         if self.provider == "openai":
-            return self._call_openai(image, base_image=base_image)
+            return self._call_openai(image, base_image=base_image, ocr_hint=ocr_hint)
 
+        template = T1_EXTRACTION_PROMPT_WITH_ANNOT if base_image is not None else T1_BASE_ONLY_EXTRACTION_PROMPT
+        contents = [self._compose_prompt_with_ocr(template, ocr_hint)]
         if base_image is not None:
-            contents = [
-                "Image 1 (BASE):", base_image,
-                "Image 2 (LAST_ANNOT):", image,
-                T1_EXTRACTION_PROMPT_WITH_ANNOT,
-            ]
-        else:
-            contents = [T1_EXTRACTION_PROMPT, image]
+            contents.append(base_image)
+        contents.append(image)
 
         last_exc = None
         for attempt in range(self.config.max_retries):
@@ -925,7 +891,7 @@ class T1Extractor:
                         model=self.config.gemini_model,
                         response=response,
                         image_count=2 if base_image is not None else 1,
-                        prompt_chars=len(T1_EXTRACTION_PROMPT_WITH_ANNOT if base_image is not None else T1_EXTRACTION_PROMPT),
+                        prompt_chars=len(template),
                     )
                 except Exception:
                     pass
@@ -941,12 +907,13 @@ class T1Extractor:
         raise last_exc
 
     def extract(self, slide: Dict) -> Dict:
-        """단일 슬라이드에서 t1, t1_structure, slide_emphasis 추출"""
+        """단일 base 슬라이드에서 t1과 t1_structure를 추출한다."""
         slide.setdefault("title", f"Slide {slide['slide_number']}")
         slide.setdefault("t1", "")
         slide.setdefault("t1_structure", "")
         slide.setdefault("visual_assets", [])
         slide.setdefault("slide_emphasis", [])
+        slide.setdefault("ocr_text", "")
         if slide.get("scene_type") == "video":
             slide["title"] = slide.get("title") or "영상 구간"
             slide["slide_type"] = "video"
@@ -955,12 +922,21 @@ class T1Extractor:
             slide["text_source"] = "video"
             return slide
 
-        # 텍스트 추출 대상이 annot 이미지일 때만 base + annot 2장 전달.
-        text_image_has_annot = slide.get("text_image_has_annot", slide.get("has_annot", False))
-        base_image = slide.get("base_image") if text_image_has_annot else None
+        # Post-video verifier textualization is base-only.
+        slide["text_image_has_annot"] = False
+        slide["text_source"] = "base"
+        base_image = slide.get("base_image")
+        ocr_hint = ""
+        if ocr_enabled():
+            try:
+                ocr_hint = get_slide_ocr_hint(slide.get("image_path") or "")
+            except Exception as exc:
+                logger.warning("  ⚠ OCR hint failed for slide %s: %s", slide.get("slide_number"), exc)
+                ocr_hint = ""
+        slide["ocr_text"] = ocr_hint
 
         try:
-            raw_text = self._call_gemini(slide["image"], base_image=base_image)
+            raw_text = self._call_gemini(slide["image"], base_image=base_image, ocr_hint=ocr_hint)
 
             # 코드펜스 제거
             if "```json" in raw_text:
@@ -993,9 +969,7 @@ class T1Extractor:
             slide["visual_assets"]  = self._normalize_visual_assets(
                 result.get("visual_assets", [])
             )
-            slide["slide_emphasis"] = self._filter_emphasis(
-                result.get("slide_emphasis", [])
-            )
+            slide["slide_emphasis"] = []
 
         except Exception as e:
             logger.error(
@@ -1006,12 +980,52 @@ class T1Extractor:
 
     def extract_batch(self, slides: List[Dict]) -> List[Dict]:
         unique_slides = len({s.get("slide_canonical_number", s["slide_number"]) for s in slides})
+        workers = max(1, min(self.config.workers, unique_slides))
         logger.info(
             f"Extracting t1 from {len(slides)} scenes "
-            f"(unique slides: {unique_slides})..."
+            f"(unique slides: {unique_slides}, workers: {workers})..."
         )
 
-        cache: Dict[int, Dict] = {}
+        # One base-image request per canonical slide. Repeated scenes share its result.
+        canonical_representatives: Dict[int, Dict] = {}
+        for slide in slides:
+            if slide.get("scene_type") == "video":
+                continue
+            cache_key = int(slide.get("slide_canonical_number", slide["slide_number"]))
+            canonical_representatives.setdefault(cache_key, slide)
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="t1") as executor:
+            futures = {
+                executor.submit(self.extract, slide): cache_key
+                for cache_key, slide in canonical_representatives.items()
+            }
+            for future in as_completed(futures):
+                cache_key = futures[future]
+                future.result()
+                slide = canonical_representatives[cache_key]
+                logger.info(
+                    "  [t1 complete] Scene %s (slide %s): t1=%s chars, structure=%s chars, visual_assets=%s개",
+                    slide["scene_number"],
+                    cache_key,
+                    len(slide["t1"]),
+                    len(slide["t1_structure"]),
+                    len(slide.get("visual_assets", [])),
+                )
+
+        cache: Dict[int, Dict] = {
+            cache_key: {
+                "title": slide["title"],
+                "t1": slide["t1"],
+                "t1_structure": slide["t1_structure"],
+                "slide_type": slide.get("slide_type", "text"),
+                "visual_assets": list(slide.get("visual_assets", [])),
+                "slide_emphasis": [],
+                "ocr_text": slide.get("ocr_text", ""),
+                "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
+            }
+            for cache_key, slide in canonical_representatives.items()
+        }
+
         for i, slide in enumerate(slides):
             if slide.get("scene_type") == "video":
                 self.extract(slide)
@@ -1022,39 +1036,19 @@ class T1Extractor:
                 continue
 
             cache_key = int(slide.get("slide_canonical_number", slide["slide_number"]))
-            if cache_key in cache:
-                cached = cache[cache_key]
-                slide["title"] = cached["title"]
-                slide["t1"] = cached["t1"]
-                slide["t1_structure"] = cached["t1_structure"]
-                slide["slide_type"] = cached["slide_type"]
-                slide["visual_assets"] = list(cached.get("visual_assets", []))
-                slide["slide_emphasis"] = list(cached["slide_emphasis"])
+            cached = cache[cache_key]
+            slide["title"] = cached["title"]
+            slide["t1"] = cached["t1"]
+            slide["t1_structure"] = cached["t1_structure"]
+            slide["slide_type"] = cached["slide_type"]
+            slide["visual_assets"] = list(cached.get("visual_assets", []))
+            slide["slide_emphasis"] = []
+            slide["ocr_text"] = cached.get("ocr_text", "")
+            if slide is not canonical_representatives[cache_key]:
                 logger.info(
                     f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
                     f"(slide {cache_key}, cached from scene {cached['representative_scene_number']})"
                 )
-                continue
-
-            self.extract(slide)
-            cache[cache_key] = {
-                "title": slide["title"],
-                "t1": slide["t1"],
-                "t1_structure": slide["t1_structure"],
-                "slide_type": slide.get("slide_type", "text"),
-                "visual_assets": list(slide.get("visual_assets", [])),
-                "slide_emphasis": list(slide.get("slide_emphasis", [])),
-                "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
-            }
-            logger.info(
-                f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
-                f"(slide {cache_key}) "
-                f"[{slide.get('text_source', 'base')}]: "
-                f"t1={len(slide['t1'])} chars, "
-                f"structure={len(slide['t1_structure'])} chars, "
-                f"visual_assets={len(slide.get('visual_assets', []))}개, "
-                f"slide_emphasis={len(slide.get('slide_emphasis', []))}개"
-            )
 
         logger.info("✓ t1 extraction complete")
         return slides
@@ -1169,7 +1163,8 @@ class TextualizationPipeline:
                     "t1_structure":        s["t1_structure"],
                     "slide_type":          s.get("slide_type", "text"),
                     "visual_assets":       s.get("visual_assets", []),
-                    "slide_emphasis":      s.get("slide_emphasis", []),
+                    "slide_emphasis":      [],
+                    "ocr_text":            s.get("ocr_text", ""),
                     "slide_topic_keywords": s.get("slide_topic_keywords", []),
                     "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),
                     "slide_topic_keyword_scores": s.get("slide_topic_keyword_scores", {}),

@@ -31,10 +31,10 @@ import cv2
 import numpy as np
 
 try:
-    from .sample_cache import iter_sample_cache, load_sample_cache
+    from .sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from .person_masks import load_person_mask, masked_pair
 except ImportError:  # pragma: no cover - allows direct script execution
-    from sample_cache import iter_sample_cache, load_sample_cache
+    from sample_cache import iter_sample_cache, iter_sample_cache_range as _cache_range, load_sample_cache
     from person_masks import load_person_mask, masked_pair
 
 
@@ -53,6 +53,9 @@ class AnnotationConfig:
     stable_sec: float = 0.7
     min_annot_sec: float = 0.2
     min_gap_sec: float = 1.5
+    # Do not emit a new annotation when its visible change from the last
+    # retained annotation is only cursor/compression noise.
+    capture_dedupe_ratio: float = 0.0005
     scene_start_guard_sec: float = 0.5
     scene_end_guard_sec: float = 1.0
     reject_large_change_ratio: float = 0.16
@@ -130,8 +133,6 @@ def _iter_sample_cache_range(
     the original lecture video. The cache is our analysis coordinate system and
     is much safer to seek than arbitrary source encodings.
     """
-    cache_path = Path(cache_dir)
-    video_path = cache_path / manifest["video_filename"]
     frames = manifest.get("frames", [])
     if not frames:
         return
@@ -141,22 +142,8 @@ def _iter_sample_cache_range(
     if end_sample_index < start_sample_index:
         return
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
-
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_sample_index - 1)
-        for offset, sample_index in enumerate(range(start_sample_index, end_sample_index + 1)):
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise RuntimeError(
-                    f"Sample cache video ended early: {video_path} sample={sample_index}"
-                )
-            frame_info = frames[start_sample_index - 1 + offset]
-            yield frame_info, frame
-    finally:
-        cap.release()
+    for _, frame_info, frame in _cache_range(cache_dir, start_sample_index - 1, end_sample_index):
+        yield frame_info, frame
 
 
 def _build_scene_intervals(scene_payload: dict, manifest: dict, cfg: AnnotationConfig) -> list[dict]:
@@ -262,6 +249,19 @@ class AnnotationState:
         self.stable_count = 0
         self.writing_count = 0
         self.last_active: dict | None = None
+        # Keep the strongest transient change as well as the most recent one.
+        # During an erase the most recent active frame can already be nearly
+        # clean, while this snapshot is the annotation that must be retained.
+        self.peak_active: dict | None = None
+        # A stable annotation becomes the next comparison baseline. Retaining
+        # every baseline lets us recognize an erase as a return to an earlier
+        # state instead of recording the clean frame as a new annotation.
+        self.history: list[dict] = [{
+            "decision": base_decision.copy(),
+            "mask": base_mask.copy() if base_mask is not None else None,
+        }]
+        self.last_recorded_decision: np.ndarray | None = None
+        self.last_recorded_mask: np.ndarray | None = None
         self.last_capture_sample_index = -10**9
         self.annotations: list[dict] = []
 
@@ -277,6 +277,12 @@ class AnnotationState:
         active = instant >= self.cfg.instant_ratio
         sample_index = int(frame_info["sample_index"])
         capture: dict | None = None
+
+        history_match = self._matching_history_index(decision, mask)
+        if history_match is not None and history_match != len(self.history) - 1:
+            capture = self._capture_peak_before_clear(frame_info)
+            self._restore_history(history_match, decision, mask)
+            return self._emit_distinct_capture(capture)
 
         if cumulative >= self.cfg.reject_large_change_ratio:
             self._reset_to(decision, mask)
@@ -295,8 +301,10 @@ class AnnotationState:
                     "cumulative_ratio": cumulative,
                     "instant_ratio": instant,
                 }
+                self.peak_active = self.last_active
         elif self.state == "WRITING":
             if cumulative < self.cfg.cumulative_ratio:
+                capture = self._capture_peak_before_clear(frame_info)
                 self._reset_to(decision, mask)
             else:
                 self.writing_count += 1
@@ -310,6 +318,11 @@ class AnnotationState:
                         "cumulative_ratio": cumulative,
                         "instant_ratio": instant,
                     }
+                    if (
+                        self.peak_active is None
+                        or cumulative > float(self.peak_active["cumulative_ratio"])
+                    ):
+                        self.peak_active = self.last_active
                 else:
                     self.stable_count += 1
 
@@ -325,15 +338,20 @@ class AnnotationState:
                     capture["stable_timestamp_sec"] = float(frame_info["timestamp_sec"])
                     self.base_decision = decision.copy()
                     self.base_mask = mask.copy() if mask is not None else None
+                    self.history.append({
+                        "decision": self.base_decision.copy(),
+                        "mask": self.base_mask.copy() if self.base_mask is not None else None,
+                    })
                     self.last_capture_sample_index = sample_index
                     self.state = "STABLE"
                     self.stable_count = 0
                     self.writing_count = 0
                     self.last_active = None
+                    self.peak_active = None
 
         self.prev_decision = decision.copy()
         self.prev_mask = mask.copy() if mask is not None else None
-        return capture
+        return self._emit_distinct_capture(capture)
 
     def flush(self) -> dict | None:
         if (
@@ -345,7 +363,7 @@ class AnnotationState:
             capture["stable_sample_index"] = int(capture["frame_info"]["sample_index"])
             capture["stable_frame_no"] = int(capture["frame_info"]["frame_no"])
             capture["stable_timestamp_sec"] = float(capture["frame_info"]["timestamp_sec"])
-            return capture
+            return self._emit_distinct_capture(capture)
         return None
 
     def _reset_to(self, decision: np.ndarray, mask: np.ndarray | None = None) -> None:
@@ -353,8 +371,85 @@ class AnnotationState:
         self.stable_count = 0
         self.writing_count = 0
         self.last_active = None
+        self.peak_active = None
         self.prev_decision = decision.copy()
         self.prev_mask = mask.copy() if mask is not None else None
+
+    def _matching_history_index(
+        self,
+        decision: np.ndarray,
+        mask: np.ndarray | None,
+    ) -> int | None:
+        """Return an earlier stable state if this frame is an annotation erase."""
+        for index in range(len(self.history) - 2, -1, -1):
+            state = self.history[index]
+            ratio = _masked_changed_ratio(
+                state["decision"],
+                state["mask"],
+                decision,
+                mask,
+                self.cfg.diff_threshold,
+            )
+            if ratio < self.cfg.cumulative_ratio:
+                return index
+        return None
+
+    def _capture_peak_before_clear(self, frame_info: dict) -> dict | None:
+        """Persist an in-progress annotation before an erase resets the state."""
+        if (
+            self.state != "WRITING"
+            or self.writing_count < self.min_writing
+            or self.peak_active is None
+        ):
+            return None
+        sample_index = int(frame_info["sample_index"])
+        if sample_index - self.last_capture_sample_index < self.min_gap_samples:
+            return None
+
+        capture = dict(self.peak_active)
+        capture["capture_reason"] = "annotation_before_clear"
+        capture["stable_sample_index"] = sample_index
+        capture["stable_frame_no"] = int(frame_info["frame_no"])
+        capture["stable_timestamp_sec"] = float(frame_info["timestamp_sec"])
+        self.last_capture_sample_index = sample_index
+        return capture
+
+    def _restore_history(
+        self,
+        history_index: int,
+        decision: np.ndarray,
+        mask: np.ndarray | None,
+    ) -> None:
+        state = self.history[history_index]
+        self.base_decision = state["decision"].copy()
+        self.base_mask = state["mask"].copy() if state["mask"] is not None else None
+        self.history = self.history[:history_index + 1]
+        self._reset_to(decision, mask)
+
+    def _emit_distinct_capture(self, capture: dict | None) -> dict | None:
+        """Suppress repeated captures whose visible annotation state is unchanged."""
+        if capture is None:
+            return None
+        decision = capture["decision"]
+        mask = capture.get("mask")
+        if self.last_recorded_decision is not None:
+            changed = _masked_changed_ratio(
+                self.last_recorded_decision,
+                self.last_recorded_mask,
+                decision,
+                mask,
+                self.cfg.diff_threshold,
+            )
+            if changed < self.cfg.capture_dedupe_ratio:
+                log.debug(
+                    "annotation capture suppressed as near-duplicate: changed_ratio=%.6f threshold=%.6f",
+                    changed,
+                    self.cfg.capture_dedupe_ratio,
+                )
+                return None
+        self.last_recorded_decision = decision.copy()
+        self.last_recorded_mask = mask.copy() if mask is not None else None
+        return capture
 
 
 def _detect_interval_annotations(
@@ -417,7 +512,7 @@ def _detect_annotation_chunk_worker(args: tuple) -> list[dict]:
 
 
 def _annotation_worker_count(interval_count: int) -> int:
-    requested = os.getenv("GRAPHLEC_ANNOT_WORKERS", "0").strip()
+    requested = os.getenv("VERILEC_ANNOT_WORKERS", "0").strip()
     try:
         workers = int(requested)
     except ValueError:
@@ -552,6 +647,7 @@ def _record_capture(
             "cumulative_ratio": round(float(capture["cumulative_ratio"]), 6),
             "instant_ratio": round(float(capture["instant_ratio"]), 6),
             "person_masked": bool(frame_info.get("person_mask_filename")),
+            "capture_reason": str(capture.get("capture_reason", "stable_annotation")),
         },
     }
     scene_result["annotations"].append(record)
@@ -576,7 +672,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-gap-sec", type=float, default=AnnotationConfig.min_gap_sec)
     parser.add_argument("--scene-start-guard-sec", type=float, default=AnnotationConfig.scene_start_guard_sec)
     parser.add_argument("--scene-end-guard-sec", type=float, default=AnnotationConfig.scene_end_guard_sec)
-    parser.add_argument("--workers", type=int, help="Override GRAPHLEC_ANNOT_WORKERS for this run")
+    parser.add_argument("--workers", type=int, help="Override VERILEC_ANNOT_WORKERS for this run")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -596,7 +692,7 @@ def main() -> None:
         scene_end_guard_sec=max(0.0, args.scene_end_guard_sec),
     )
     if args.workers is not None:
-        os.environ["GRAPHLEC_ANNOT_WORKERS"] = str(max(1, args.workers))
+        os.environ["VERILEC_ANNOT_WORKERS"] = str(max(1, args.workers))
     detect_annotations(args.cache, args.scenes, args.output, cfg)
 
 

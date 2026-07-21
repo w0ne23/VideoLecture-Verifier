@@ -1,32 +1,182 @@
 services:
   db:
     image: postgres:16
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     environment:
       POSTGRES_DB: verilec
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
+      # LocalVLM / OpenAI-compatible DiffusionGemma
+
     ports:
-      # graphLec의 postgres가 5432를 쓰고 있어 호스트 포트는 5433으로 노출
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d verilec"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
+    # 2 GiB works with Docker Desktop and small machines.  Large Linux hosts
+    # can raise this through VERILEC_SHM_SIZE or the GPU override.
+    shm_size: "${VERILEC_SHM_SIZE:-2g}"
     build:
       context: .
       dockerfile: backend/Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql+asyncpg://user:pass@db/verilec
       LOCAL_STORAGE_DIR: /app/storage
       PIPELINE_ROOT: /app
+      # Portable default: CPU RapidOCR. The NVIDIA override switches this to
+      # Nemotron OCR v2 without changing the pipeline's HTTP OCR contract.
+      GRAPHLEC_SLIDE_OCR_PROVIDER: http
+      GRAPHLEC_SLIDE_OCR_BASE_URL: http://127.0.0.1:8000
+      GRAPHLEC_SLIDE_OCR_LANG: korean
+      GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
+      GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
+      # LocalVLM / OpenAI
+      GRAPHLEC_VLM_ENABLED: "1"
+      GRAPHLEC_VLM_APPLY: "1"
+      GRAPHLEC_VLM_PROVIDER: "openai"
+      GRAPHLEC_OPENAI_BASE_URL: "https://api.openai.com/v1"
+      GRAPHLEC_OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      GRAPHLEC_OPENAI_MODEL: "gpt-5.6-luna"
+      GRAPHLEC_VLM_WORKERS: "15"
+      GRAPHLEC_VLM_BATCH_IMAGES: "2"
+      GRAPHLEC_VLM_BATCH_CANDIDATES: "1"
+      GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES: "0"
+      GRAPHLEC_VLM_TIMEOUT_SEC: "300"
+      GRAPHLEC_VLM_NUM_PREDICT: "512"
+      GRAPHLEC_VLM_IMAGE_WIDTH: "768"
+      # P2A base slide t1/t1_structure OpenAI requests
+      GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "15"
+
+      # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
+      # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
+      GRAPHLEC_SLIDE_DECODE_BACKEND: auto
+      GRAPHLEC_GPU_ONLY: "0"
+      # Step 4 duplicate/build comparison crop: remove 5% from each edge.
+      GRAPHLEC_CONTENT_CROP_LEFT: "0.05"
+      GRAPHLEC_CONTENT_CROP_TOP: "0.05"
+      GRAPHLEC_CONTENT_CROP_RIGHT: "0.95"
+      GRAPHLEC_CONTENT_CROP_BOTTOM: "0.95"
+      GRAPHLEC_CLEAR_RESET_CROP_BOTTOM: "0.90"
+
+      # Ultralytics / matplotlib 경고 방지용
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
+      MPLCONFIGDIR: /tmp/matplotlib
+      RAPIDOCR_HOME: /models
+
+      # Step 0 sample cache chunk 병렬화
+      GRAPHLEC_SAMPLE_CACHE_FPS: "5"
+      GRAPHLEC_SAMPLE_CACHE_RESIZE_WIDTH: "768"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASKS: "1"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MODEL: "/app/models/yolo26n.pt"
+      # Empty prevents a TensorRT engine copied from a Linux host from being
+      # selected on a CPU-only machine; Ultralytics loads the .pt model.
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE: ""
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_BATCH_SIZE: "32"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE_BATCH_SIZE: "32"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_CONF: "0.70"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MIN_BBOX_HEIGHT_RATIO: "0.08"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MAX_BBOX_ASPECT: "1.50"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_DILATE_PX: "48"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX: "12"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO: "0.12"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC: "0"
+      # Keep only two 1.4GB TensorRT execution contexts resident. Other
+      # decode chunks queue their person batches until a slot is available.
+      GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC: "20"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_MIN_HITS: "1"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_CONF: "0.45"
+      GRAPHLEC_SCENE_BASE_DELAY_SEC: "2.0"
+      GRAPHLEC_SCENE_BASE_MAX_PENDING_SEC: "5.0"
+      # Remove slides that appear for at most three seconds. The remaining
+      # timeline is compacted before OCR/VLM so an A -> transient -> A return
+      # is evaluated as one continuous slide.
+      GRAPHLEC_MIN_SLIDE_DURATION_SEC: "3.0"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_WIDTH: "384"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_WORKERS: "1"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_SEC: "480"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_OVERLAP_SEC: "5"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_QUANTILE: "0.95"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_RECENTER_PX: "120"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_MAX_GAP_SEC: "2"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS: "4"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC: "240"
+      GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC: "5"
+      GRAPHLEC_SAMPLE_CACHE_STREAM_COPY_CORE: "1"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS: "4"
+      GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS: "4"
+
+      # Step 1 timeline region 병렬화
+      GRAPHLEC_REGION_WORKERS: "4"
+      GRAPHLEC_REGION_CHUNK_SAMPLES: "2000"
+      GRAPHLEC_REGION_GUARD_SAMPLES: "1"
+
+      # Step 2 scene/base probe 병렬화
+      GRAPHLEC_SCENE_PROBE_WORKERS: "4"
+      GRAPHLEC_SCENE_PROBE_CHUNK_SAMPLES: "2000"
+      GRAPHLEC_SCENE_PROBE_GUARD_SAMPLES: "100"
+      GRAPHLEC_SCENE_PROBE_KEEP_PARTS: "0"
+
+      # Step 4 duplicates 병렬화
+      GRAPHLEC_DUPLICATE_PARALLEL: "1"
+      GRAPHLEC_DUPLICATE_WORKERS: "4"
+      GRAPHLEC_DUPLICATE_LOG_PAIRS: "0"
+
+    volumes:
+      - ./storage:/app/storage
+      - ./input:/app/input
+      - rapid_ocr_models:/models
+
+    ports:
+      - "8003:8000"
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ocr:
+    profiles:
+      - ocr
+    build:
+      context: .
+      dockerfile: ocr_service/Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      LOCAL_STORAGE_DIR: /app/storage
+      GRAPHLEC_SLIDE_OCR_LANG: multilingual
+      GRAPHLEC_SLIDE_OCR_MODEL_DIR: ""
+      GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.92"
     volumes:
       - ./storage:/app/storage
     ports:
-      - "8000:8000"
-    depends_on:
-      - db
+      - "8010:8000"
 
+  ollama:
+    profiles:
+      - vlm
+    image: ollama/ollama:latest
+    container_name: verilec-ollama
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
 volumes:
+  ollama:
   postgres_data:
+  rapid_ocr_models:

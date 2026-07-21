@@ -20,7 +20,7 @@ from app.models import (
     ProcessingJob,
     normalize_job_type,
 )
-from app.services.storage_service import lecture_output_dir, make_file_url
+from app.services.storage_service import lecture_output_dir, make_file_url, resolve_storage_path
 
 
 def normalize_domain_value(value: str | None) -> str:
@@ -103,7 +103,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
         'description': lecture.description or '',
         'video_path': lecture.video_path,
         'video_url': make_file_url(lecture.video_path),
-        'output_dir': lecture.output_dir,
+        'output_dir': str(resolve_storage_path(lecture.output_dir) or ''),
         'stem': stem,
         'is_verified': bool(lecture.is_verified),
         'created_at': lecture.created_at.isoformat() if lecture.created_at else None,
@@ -180,10 +180,12 @@ async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return False
-    if lecture.video_path:
-        shutil.rmtree(Path(lecture.video_path).parent, ignore_errors=True)
-    if lecture.output_dir:
-        shutil.rmtree(Path(lecture.output_dir), ignore_errors=True)
+    video_path = resolve_storage_path(lecture.video_path)
+    if video_path is not None:
+        shutil.rmtree(video_path.parent, ignore_errors=True)
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if output_dir is not None:
+        shutil.rmtree(output_dir, ignore_errors=True)
     await db.delete(lecture)
     await db.commit()
     return True
@@ -196,29 +198,12 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
-async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
-    detail = await get_lecture_detail(db, lecture_id)
-    if not detail:
-        raise HTTPException(status_code=404, detail='Lecture result not found')
+def build_content_verification_response(lecture_id: str, stem: str, verifier_path: str, data: dict) -> dict[str, Any]:
+    """검증 결과 원본 JSON → API 응답 매핑 (순수 함수).
 
-    output_dir = Path(detail['output_dir'])
-    stem = str(detail['stem'])
-    analyzer_dir = output_dir / f'{stem}_analyzer'
-    candidates = [
-        analyzer_dir / f'{stem}_content_verification.json',
-        output_dir / f'{stem}_content_verification.json',
-        analyzer_dir / f'{stem}_verification_final.json',
-        output_dir / f'{stem}_verification_final.json',
-    ]
-    verifier_path = next((path for path in candidates if path.exists()), None)
-    if not verifier_path:
-        raise HTTPException(status_code=404, detail='Content verification file not found')
-
-    try:
-        data = json.loads(verifier_path.read_text(encoding='utf-8'))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f'Error reading content verification: {exc}') from exc
-
+    반환 dict의 키 구성은 프론트엔드와의 계약이다 — tests/test_verifier_contract.py가
+    이 계약을 고정하므로, 키를 바꾸면 테스트와 프론트를 함께 수정해야 한다.
+    """
     flow = data.get('claim_decision_flow', {}) or {}
     summary = data.get('claim_decision_flow_summary', {}) or {}
     content_summary = data.get('summary', {}) or summary
@@ -229,7 +214,7 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[st
     slide_errors = data.get('slide_errors', []) or []
 
     return {
-        'lecture_id': str(detail['id']),
+        'lecture_id': str(lecture_id),
         'stem': stem,
         'verification_path': str(verifier_path),
         'schema_version': data.get('schema_version'),
@@ -270,3 +255,29 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[st
         'classified_issue_verifier_path': data.get('classified_issue_verifier_path', ''),
         'classified_issue_verifier': (data.get('views', {}) or {}).get('classified_issue_verifier', {}),
     }
+
+
+async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail='Lecture result not found')
+
+    output_dir = Path(detail['output_dir'])
+    stem = str(detail['stem'])
+    analyzer_dir = output_dir / f'{stem}_analyzer'
+    candidates = [
+        analyzer_dir / f'{stem}_content_verification.json',
+        output_dir / f'{stem}_content_verification.json',
+        analyzer_dir / f'{stem}_verification_final.json',
+        output_dir / f'{stem}_verification_final.json',
+    ]
+    verifier_path = next((path for path in candidates if path.exists()), None)
+    if not verifier_path:
+        raise HTTPException(status_code=404, detail='Content verification file not found')
+
+    try:
+        data = json.loads(verifier_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Error reading content verification: {exc}') from exc
+
+    return build_content_verification_response(str(detail['id']), stem, str(verifier_path), data)
