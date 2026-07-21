@@ -757,6 +757,10 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
    claim_text의 표면적 어색함만으로 점수를 높이지 마세요.
    반대로 resolved_claim이 target context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
    resolved_claim의 강해진 부분을 그대로 믿지 말고 target context 기준으로 낮게 판단하세요.
+   외래어·고유명사 등의 전사 흔들림으로 보이고, 그 표기를 자연스러운 원어 표기로 보정했을 때
+   강의 설명이 사실적으로 맞다면 이는 오류가 아닙니다. 이 경우 반드시 `judgment="not_issue"`,
+   `is_valid_issue=0`, `category_severity=0`으로 출력하세요. 단, 표기를 보정한 뒤에도 설명 자체가
+   틀리거나 강의자가 실제로 다른 대상·용어를 설명한 독립적 문맥 근거가 있으면 이 규칙을 적용하지 마세요.
 1. 먼저 target context 안에서 claim이 실제로 어떤 의미로 사용되었는지 판단하세요.
 2. 바로 앞뒤 context가 같은 대상, 같은 관계, 같은 조건을 설명하는 경우에만 해소 근거로 사용하세요.
 3. 같은 context 또는 바로 인접 context에서 같은 대상의 속성, 조건, 반환값, 구성요소를 이어서 설명하는 경우,

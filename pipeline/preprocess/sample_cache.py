@@ -2,9 +2,10 @@
 Build a lightweight sampled-frame cache from an input video.
 
 This replacement keeps the existing single-pass behavior and adds chunked cache
-creation for long lecture videos. The chunked path creates overlap-trimmed
-segments in parallel and records their exact local frame positions in one
-downstream-compatible manifest.
+creation for long lecture videos. The chunked path preserves the independently
+written chunk videos and records each core frame's exact local position in one
+downstream-compatible manifest. Overlap trimming is virtual: no chunk video is
+decoded, cut, or re-encoded after parallel creation.
 """
 
 from __future__ import annotations
@@ -1846,141 +1847,39 @@ def _copy_optional_mask(
     if not src.exists():
         return None
     dst = dst_cache_dir / dst_rel_filename
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    # The chunk cache lives under a TemporaryDirectory and disappears after the
-    # merge, so final masks still need to be materialized into output_dir.
-    # Prefer hardlinking when source/destination are on the same filesystem;
-    # fall back to copy2 for cross-device filesystems, Docker bind mounts, etc.
-    dst.unlink(missing_ok=True)
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+    _materialize_file(src, dst)
     return dst_rel_filename
 
 
-def _verify_stream_copied_part(
-    part_path: Path,
-    selected_frames: list[dict],
-) -> tuple[bool, str]:
-    """Cheaply verify packet-trimmed MJPEG before accepting the fast path."""
-    expected_count = len(selected_frames)
-    if expected_count <= 0:
-        return False, "empty_selection"
-
-    cap = cv2.VideoCapture(str(part_path))
-    if not cap.isOpened():
-        return False, "open_failed"
+def _materialize_file(src: Path, dst: Path) -> str:
+    """Persist a temporary cache artifact without rewriting its contents."""
+    if not src.exists() or src.stat().st_size <= 0:
+        raise FileNotFoundError(f"Cannot materialize missing or empty cache artifact: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.unlink(missing_ok=True)
     try:
-        reported_count = int(round(float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)))
-        if reported_count != expected_count:
-            return False, f"frame_count={reported_count},expected={expected_count}"
-
-        max_hash_distance = max(
-            0,
-            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")),
-        )
-        verify_stride = max(
-            1,
-            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")),
-        )
-        probe_indices = list(range(0, expected_count, verify_stride))
-        if probe_indices[-1] != expected_count - 1:
-            probe_indices.append(expected_count - 1)
-        for probe_index in probe_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, probe_index)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                return False, f"decode_failed_at={probe_index}"
-            expected_hash = selected_frames[probe_index].get("phash_int")
-            if expected_hash is None:
-                return False, f"missing_phash_at={probe_index}"
-            actual_hash = compute_phash_int(to_decision_frame(frame))
-            distance = phash_distance_int(int(expected_hash), actual_hash)
-            if distance > max_hash_distance:
-                return False, (
-                    f"phash_distance={distance},max={max_hash_distance},index={probe_index}"
-                )
-    finally:
-        cap.release()
-    return True, "ok"
+        os.link(src, dst)
+        return "hardlink"
+    except OSError:
+        shutil.copy2(src, dst)
+        return "copy"
 
 
-def _stream_copy_core_part(
-    chunk_video_path: Path,
-    part_path: Path,
-    *,
-    first_frame_index: int,
-    frame_count: int,
-    sampled_fps: float,
-) -> tuple[bool, str]:
-    """Trim an all-keyframe MJPEG cache at packet level without transcoding."""
-    if shutil.which("ffmpeg") is None:
-        return False, "ffmpeg_unavailable"
-    if frame_count <= 0 or sampled_fps <= 0:
-        return False, "invalid_range"
-
-    offset_sec = max(0.0, float(first_frame_index) / float(sampled_fps))
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-ss",
-        f"{offset_sec:.9f}",
-        "-i",
-        str(chunk_video_path),
-        "-map",
-        "0:v:0",
-        "-an",
-        "-frames:v",
-        str(int(frame_count)),
-        "-c:v",
-        "copy",
-        "-avoid_negative_ts",
-        "make_zero",
-        str(part_path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except OSError as exc:
-        return False, f"exec_failed={exc}"
-    if result.returncode != 0:
-        error = (result.stderr or result.stdout or "unknown_error").strip()
-        return False, f"ffmpeg_exit={result.returncode}:{error[-300:]}"
-    if not part_path.exists() or part_path.stat().st_size <= 0:
-        return False, "empty_output"
-    return True, "ok"
-
-
-def _write_merge_part_worker(
+def _materialize_chunk_segment_worker(
     chunk_manifest_path: str,
     spec: dict,
-    part_path: str,
-    cfg: SampleCacheConfig,
-    sampled_fps: float,
-    resize_width: int,
-    cached_height: int,
+    segment_path: str,
 ) -> dict:
-    """Create one overlap-trimmed part from one chunk cache.
-
-    MJPEG is all-keyframe, so the normal path trims packets with FFmpeg stream
-    copy. The legacy OpenCV decode/re-encode path remains as an automatic
-    fallback when frame-count or pHash verification fails.
-    """
-
-    import time
+    """Persist one original chunk AVI and select its core frames virtually."""
 
     started_at = time.perf_counter()
     chunk_manifest = Path(chunk_manifest_path)
     chunk_dir = chunk_manifest.parent
-    part = Path(part_path)
-    part.parent.mkdir(parents=True, exist_ok=True)
-    part.unlink(missing_ok=True)
-
     payload = json.loads(chunk_manifest.read_text(encoding="utf-8"))
-    chunk_video_path = chunk_dir / payload["video_filename"]
+    video_filename = payload.get("video_filename")
+    if not video_filename:
+        raise ValueError(f"Chunk cache manifest has no video_filename: {chunk_manifest}")
+    chunk_video_path = chunk_dir / str(video_filename)
 
     core_start = float(spec["core_start_sec"])
     core_end = float(spec["core_end_sec"])
@@ -1996,212 +1895,41 @@ def _write_merge_part_worker(
 
     all_frames = list(payload.get("frames", []))
     selected_indices = [index for index, item in enumerate(all_frames) if in_core(item)]
-    selected_frames = [dict(all_frames[index]) for index in selected_indices]
-    skipped_overlap = len(all_frames) - len(selected_frames)
-    for selected in selected_frames:
-        selected["frame_no"] = int(selected["frame_no"])
-        selected["timestamp_sec"] = round(float(selected["timestamp_sec"]), 6)
-
-    stream_copy_enabled = _env_bool("GRAPHLEC_SAMPLE_CACHE_STREAM_COPY_CORE", True)
-    if stream_copy_enabled and selected_indices and all(
-        item.get("phash_int") is not None for item in selected_frames
-    ):
-        copied, copy_reason = _stream_copy_core_part(
-            chunk_video_path,
-            part,
-            first_frame_index=selected_indices[0],
-            frame_count=len(selected_frames),
-            sampled_fps=sampled_fps,
+    if not selected_indices:
+        raise RuntimeError(
+            f"Chunk has no samples in its core range: chunk={spec['chunk_index']} "
+            f"core={core_start:.6f}~{core_end:.6f}"
         )
-        if copied:
-            verified, verify_reason = _verify_stream_copied_part(part, selected_frames)
-            if verified:
-                return {
-                    "chunk_index": int(spec["chunk_index"]),
-                    "chunk_dir": str(chunk_dir),
-                    "part_path": str(part),
-                    "part_mode": "ffmpeg-stream-copy",
-                    "selected_count": len(selected_frames),
-                    "skipped_overlap": skipped_overlap,
-                    "fallback_phash_count": 0,
-                    "video_read_elapsed": 0.0,
-                    "video_write_elapsed": 0.0,
-                    "metric_fallback_elapsed": 0.0,
-                    "elapsed": time.perf_counter() - started_at,
-                    "frames": selected_frames,
-                }
-            copy_reason = f"verify_failed:{verify_reason}"
-        part.unlink(missing_ok=True)
-        log.warning(
-            "sample merge stream-copy fallback: chunk=%s reason=%s",
-            int(spec["chunk_index"]),
-            copy_reason,
+    expected_indices = list(range(selected_indices[0], selected_indices[-1] + 1))
+    if selected_indices != expected_indices:
+        raise RuntimeError(
+            f"Chunk core sample indices are not contiguous: chunk={spec['chunk_index']}"
         )
-
-    cap = cv2.VideoCapture(str(chunk_video_path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open chunk sampled video: {chunk_video_path}")
-
-    writer = cv2.VideoWriter(
-        str(part),
-        cv2.VideoWriter_fourcc(*"MJPG"),
-        float(sampled_fps),
-        (int(resize_width), int(cached_height)),
-    )
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError(f"Cannot open merge part writer: {part}")
 
     selected_frames = []
-    skipped_overlap = 0
-    fallback_phash_count = 0
-    video_read_elapsed = 0.0
-    video_write_elapsed = 0.0
-    metric_fallback_elapsed = 0.0
-
-    try:
-        for item in all_frames:
-            read_t0 = time.perf_counter()
-            ret, frame = cap.read()
-            video_read_elapsed += time.perf_counter() - read_t0
-            if not ret or frame is None:
-                raise RuntimeError(f"Chunk sampled video ended early: {chunk_video_path}")
-
-            timestamp = float(item["timestamp_sec"])
-            if timestamp < core_start - 1e-6:
-                skipped_overlap += 1
-                continue
-            if is_last:
-                if timestamp > core_end + 1e-6:
-                    skipped_overlap += 1
-                    continue
-            elif timestamp >= core_end - 1e-6:
-                skipped_overlap += 1
-                continue
-
-            write_t0 = time.perf_counter()
-            writer.write(frame)
-            video_write_elapsed += time.perf_counter() - write_t0
-
-            selected = dict(item)
-            selected["frame_no"] = int(item["frame_no"])
-            selected["timestamp_sec"] = round(float(item["timestamp_sec"]), 6)
-
-            # In normal chunk caches this already exists. Keep a fallback so old
-            # caches or partially written manifests still remain usable.
-            if selected.get("phash_int") is None:
-                metric_t0 = time.perf_counter()
-                selected["phash_int"] = compute_phash_int(to_decision_frame(frame))
-                metric_fallback_elapsed += time.perf_counter() - metric_t0
-                fallback_phash_count += 1
-
-            selected_frames.append(selected)
-    finally:
-        cap.release()
-        writer.release()
-
+    for local_index in selected_indices:
+        selected = dict(all_frames[local_index])
+        selected["cache_segment_frame_index"] = int(local_index)
+        selected["frame_no"] = int(selected["frame_no"])
+        selected["timestamp_sec"] = round(float(selected["timestamp_sec"]), 6)
+        selected_frames.append(selected)
+    skipped_overlap = len(all_frames) - len(selected_frames)
+    segment = Path(segment_path)
+    materialize_mode = _materialize_file(chunk_video_path, segment)
     return {
         "chunk_index": int(spec["chunk_index"]),
         "chunk_dir": str(chunk_dir),
-        "part_path": str(part),
-        "part_mode": "opencv-reencode",
+        "segment_path": str(segment),
+        "segment_filename": f"segments/{segment.name}",
+        "materialize_mode": materialize_mode,
         "selected_count": len(selected_frames),
         "skipped_overlap": skipped_overlap,
-        "fallback_phash_count": fallback_phash_count,
-        "video_read_elapsed": video_read_elapsed,
-        "video_write_elapsed": video_write_elapsed,
-        "metric_fallback_elapsed": metric_fallback_elapsed,
         "elapsed": time.perf_counter() - started_at,
         "frames": selected_frames,
     }
 
 
-def _ffmpeg_concat_escape(path: Path) -> str:
-    return str(path).replace("'", "'\\''")
-
-
-def _concat_merge_parts_ffmpeg(
-    part_paths: list[Path],
-    list_path: Path,
-    output_video_path: Path,
-    *,
-    reencode: bool = False,
-) -> None:
-    # ffmpeg concat resolves relative `file ...` entries relative to the list
-    # file location. Use absolute paths to avoid duplicated path prefixes when
-    # output_dir itself is relative, e.g. output_slides_staged/sample_cache.
-    list_path = list_path.resolve()
-    output_video_path = output_video_path.resolve()
-    list_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(list_path, "w", encoding="utf-8") as f:
-        for part in part_paths:
-            f.write(f"file '{_ffmpeg_concat_escape(part.resolve())}'\n")
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-    ]
-    if reencode:
-        # AVI/MJPEG stream copy can preserve discontinuous chunk timestamps.
-        # Re-encoding normalizes the timeline while the expensive source decode
-        # and per-chunk part generation remain fully parallel.
-        cmd.extend(["-c:v", "mjpeg", "-q:v", "3", "-an"])
-    else:
-        cmd.extend(["-c", "copy"])
-    cmd.append(str(output_video_path))
-    subprocess.run(cmd, check=True)
-
-
-def _concat_merge_parts_opencv(
-    part_paths: list[Path],
-    output_video_path: Path,
-    sampled_fps: float,
-    resize_width: int,
-    cached_height: int,
-) -> int:
-    """Fallback concat path if ffmpeg stream-copy concat fails."""
-
-    output_video_path.unlink(missing_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_video_path),
-        cv2.VideoWriter_fourcc(*"MJPG"),
-        float(sampled_fps),
-        (int(resize_width), int(cached_height)),
-    )
-    if not writer.isOpened():
-        raise RuntimeError(f"Cannot open fallback merged sample cache writer: {output_video_path}")
-
-    written = 0
-    try:
-        for part in part_paths:
-            cap = cv2.VideoCapture(str(part))
-            if not cap.isOpened():
-                raise FileNotFoundError(f"Cannot open merge part video: {part}")
-            try:
-                while True:
-                    ret, frame = cap.read()
-                    if not ret or frame is None:
-                        break
-                    writer.write(frame)
-                    written += 1
-            finally:
-                cap.release()
-    finally:
-        writer.release()
-    return written
-
-
-def _merge_chunk_caches(
+def _assemble_chunk_caches(
     input_path: str,
     output_dir: str,
     cfg: SampleCacheConfig,
@@ -2212,19 +1940,19 @@ def _merge_chunk_caches(
 
     video_meta = read_video_metadata(input_path)
     output_path = Path(output_dir)
-    # Chunk workers already write MJPEG parts in parallel.  Keep those parts as
-    # the final cache layout instead of concatenating them into one AVI: ffmpeg
-    # concat can alter/drop AVI frames at timestamp boundaries.
+    # Chunk workers already wrote the final MJPEG bytes in parallel. Persist
+    # those exact files and trim overlaps only in the global manifest; do not
+    # decode, packet-trim, concatenate, or re-encode them here.
     _, merged_manifest_path, _, _, _ = _prepare_output_dirs(output_path, cfg)
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
     sampled_fps = float(cfg.sample_fps)
-    merge_started_at = time.perf_counter()
+    assemble_started_at = time.perf_counter()
 
-    parts_dir = output_path / "segments"
-    if parts_dir.exists():
-        shutil.rmtree(parts_dir, ignore_errors=True)
-    parts_dir.mkdir(parents=True, exist_ok=True)
+    segments_dir = output_path / "segments"
+    if segments_dir.exists():
+        shutil.rmtree(segments_dir, ignore_errors=True)
+    segments_dir.mkdir(parents=True, exist_ok=True)
 
     total_chunk_frames = 0
     for chunk_manifest_path in manifest_paths:
@@ -2240,36 +1968,32 @@ def _merge_chunk_caches(
             os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2"),
         )
     )
-    merge_workers = max(1, min(requested_workers, len(specs) if specs else 1))
+    materialize_workers = max(1, min(requested_workers, len(specs) if specs else 1))
 
     log.info(
-        "sample cache merge start: chunks=%s candidate_frames=%s output=%s merge_workers=%s",
+        "sample cache virtual assembly start: chunks=%s candidate_frames=%s output=%s workers=%s",
         len(specs),
         total_chunk_frames,
         output_path,
-        merge_workers,
+        materialize_workers,
     )
 
-    part_started_at = time.perf_counter()
-    part_by_index: dict[int, dict] = {}
-    with ProcessPoolExecutor(max_workers=merge_workers) as executor:
+    materialize_started_at = time.perf_counter()
+    segment_by_index: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=materialize_workers) as executor:
         future_map = {}
         for chunk_manifest_path, spec in zip(manifest_paths, specs):
             chunk_index = int(spec["chunk_index"])
-            part_path = parts_dir / f"part_{chunk_index:03d}.avi"
+            segment_path = segments_dir / f"chunk_{chunk_index:03d}.avi"
             future = executor.submit(
-                _write_merge_part_worker,
+                _materialize_chunk_segment_worker,
                 str(chunk_manifest_path),
                 dict(spec),
-                str(part_path),
-                cfg,
-                sampled_fps,
-                int(cfg.resize_width),
-                int(cached_height),
+                str(segment_path),
             )
             future_map[future] = spec
             log.info(
-                "  [sample merge part submit %s/%s] core=%.1fs~%.1fs",
+                "  [sample segment materialize submit %s/%s] core=%.1fs~%.1fs",
                 chunk_index + 1,
                 len(specs),
                 float(spec["core_start_sec"]),
@@ -2280,32 +2004,29 @@ def _merge_chunk_caches(
         for future in as_completed(future_map):
             result = future.result()
             chunk_index = int(result["chunk_index"])
-            part_by_index[chunk_index] = result
+            segment_by_index[chunk_index] = result
             completed += 1
             log.info(
-                "  [sample merge part done %s/%s | idx=%s] selected=%s skipped_overlap=%s mode=%s elapsed=%.1fs",
+                "  [sample segment materialized %s/%s | idx=%s] selected=%s skipped_overlap=%s mode=%s elapsed=%.1fs",
                 completed,
                 len(specs),
                 chunk_index + 1,
                 int(result["selected_count"]),
                 int(result["skipped_overlap"]),
-                str(result.get("part_mode") or "unknown"),
+                str(result.get("materialize_mode") or "unknown"),
                 float(result["elapsed"]),
             )
 
-    ordered_indices = sorted(part_by_index)
-    ordered_results = [part_by_index[idx] for idx in ordered_indices]
-    part_paths = [Path(result["part_path"]) for result in ordered_results]
-    part_wall_elapsed = time.perf_counter() - part_started_at
+    ordered_indices = sorted(segment_by_index)
+    ordered_results = [segment_by_index[idx] for idx in ordered_indices]
+    materialize_elapsed = time.perf_counter() - materialize_started_at
 
-    if not part_paths:
-        raise RuntimeError("No merge part videos were produced")
+    if not ordered_results:
+        raise RuntimeError("No chunk cache segments were materialized")
 
-    # No final concat.  Each part is an independently valid, overlap-trimmed
-    # cache segment.  The manifest below maps every global sample to a local
-    # segment frame, so readers never infer identity from AVI timestamps.
-    concat_mode = "none-segmented"
-    concat_elapsed = 0.0
+    # Each segment is the original chunk cache, including overlap frames. The
+    # manifest exposes only core frames and preserves their original local index.
+    concat_mode = "none-direct-chunks"
 
     manifest_started_at = time.perf_counter()
     frames: list[dict] = []
@@ -2316,7 +2037,7 @@ def _merge_chunk_caches(
     mask_workers_requested = int(
         os.getenv(
             "GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS",
-            str(max(1, merge_workers)),
+            str(max(1, materialize_workers)),
         )
     )
     mask_workers = max(1, mask_workers_requested)
@@ -2380,14 +2101,14 @@ def _merge_chunk_caches(
         for result in ordered_results:
             chunk_dir = Path(result["chunk_dir"])
             segment_index = int(result["chunk_index"])
-            segment_rel = f"segments/part_{segment_index:03d}.avi"
-            for segment_frame_index, item in enumerate(result.get("frames", [])):
+            segment_rel = str(result["segment_filename"])
+            for item in result.get("frames", []):
                 frame_no = int(item["frame_no"])
                 if frame_no in seen_frame_nos:
                     duplicate_frame_count += 1
                     raise RuntimeError(
-                        f"Duplicate frame_no during two-stage merge: frame_no={frame_no}. "
-                        "This would desync sampled_frames.avi and sampled_manifest.json."
+                        f"Duplicate frame_no during virtual assembly: frame_no={frame_no}. "
+                        "This would desync the segmented cache and its manifest."
                     )
                 seen_frame_nos.add(frame_no)
 
@@ -2398,7 +2119,7 @@ def _merge_chunk_caches(
                     "timestamp_sec": round(float(item["timestamp_sec"]), 6),
                     "cache_segment_index": segment_index,
                     "cache_segment_filename": segment_rel,
-                    "cache_segment_frame_index": segment_frame_index,
+                    "cache_segment_frame_index": int(item["cache_segment_frame_index"]),
                     "phash_int": item.get("phash_int"),
                     "prev_mse": item.get("prev_mse"),
                     "prev_hash_dist": item.get("prev_hash_dist"),
@@ -2461,7 +2182,7 @@ def _merge_chunk_caches(
             int(previous["frame_no"]),
         ):
             raise RuntimeError(
-                "sample cache merged frame order violation: "
+                "sample cache assembled frame order violation: "
                 f"previous={previous.get('frame_no')}@{previous.get('timestamp_sec')} "
                 f"current={current.get('frame_no')}@{current.get('timestamp_sec')}"
             )
@@ -2472,10 +2193,6 @@ def _merge_chunk_caches(
     inherited_masks = _fill_short_person_mask_gaps(frames, max_gap=mask_fill_gap_samples)
     postprocess_elapsed = time.perf_counter() - post_started_at
 
-    part_video_read_elapsed = sum(float(result.get("video_read_elapsed", 0.0)) for result in ordered_results)
-    part_video_write_elapsed = sum(float(result.get("video_write_elapsed", 0.0)) for result in ordered_results)
-    metric_fallback_elapsed = sum(float(result.get("metric_fallback_elapsed", 0.0)) for result in ordered_results)
-    fallback_phash_count = sum(int(result.get("fallback_phash_count", 0)) for result in ordered_results)
     skipped_overlap_frames = sum(int(result.get("skipped_overlap", 0)) for result in ordered_results)
 
     person_masks_payload = {
@@ -2515,8 +2232,9 @@ def _merge_chunk_caches(
             "chunked": True,
             "chunk_count": len(specs),
             "layout": "segmented",
-            "merge_mode": "parallel_parts_no_concat",
-            "merge_workers": merge_workers,
+            "merge_mode": "virtual_manifest",
+            "segment_storage": "original_chunk_cache",
+            "merge_workers": materialize_workers,
             "merge_mask_workers": mask_workers,
             "concat_mode": concat_mode,
             "segments_dirname": "segments",
@@ -2533,42 +2251,37 @@ def _merge_chunk_caches(
     manifest_build_elapsed = time.perf_counter() - manifest_started_at
 
     log.info(
-        "sample cache merge timings: part_wall=%.1fs part_video_read_sum=%.1fs "
-        "part_video_write_sum=%.1fs concat=%.1fs mask_materialize=%.1fs "
-        "metric_fallback=%.1fs postprocess=%.1fs manifest_build=%.1fs "
-        "manifest_write=%.1fs skipped_overlap=%s skipped_duplicate=%s "
-        "fallback_phash=%s concat_mode=%s manifest_frames=%s",
-        part_wall_elapsed,
-        part_video_read_elapsed,
-        part_video_write_elapsed,
-        concat_elapsed,
+        "sample cache assembly timings: segment_materialize=%.1fs mask_materialize=%.1fs "
+        "postprocess=%.1fs manifest_build=%.1fs manifest_write=%.1fs "
+        "skipped_overlap=%s skipped_duplicate=%s concat_mode=%s manifest_frames=%s",
+        materialize_elapsed,
         mask_materialize_elapsed,
-        metric_fallback_elapsed,
         postprocess_elapsed,
         manifest_build_elapsed,
         manifest_write_elapsed,
         skipped_overlap_frames,
         duplicate_frame_count,
-        fallback_phash_count,
         concat_mode,
         len(frames),
     )
     log.info(
-        "chunked sample cache merged: chunks=%s samples=%s output=%s elapsed=%.1fs",
+        "chunked sample cache assembled virtually: chunks=%s samples=%s output=%s elapsed=%.1fs",
         len(specs),
         len(frames),
         output_path,
-        time.perf_counter() - merge_started_at,
+        time.perf_counter() - assemble_started_at,
     )
     return manifest
 
 
 def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dict:
-    """Check that decoded cache frames still match their manifest entries.
+    """Validate cache mappings and verify that representative frames decode.
 
-    The manifest is produced before chunk merge. A damaged or timestamp-shifted
-    merged AVI can otherwise cause every downstream stage to associate the
-    right frame number with the wrong pixels.
+    Direct chunk segments contain the exact AVI bytes written beside their chunk
+    manifests, so their safe alignment contract is structural: a valid local
+    index mapping and a decodable frame of the expected size. Comparing a hash
+    captured before lossy MJPEG encoding with decoded pixels creates false
+    mismatches and does not validate the virtual mapping.
     """
     if os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_ALIGNMENT", "1").strip().lower() in {
         "0", "false", "no", "off",
@@ -2580,10 +2293,6 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
         return {"enabled": True, "ok": False, "checked": 0, "mismatches": ["empty_manifest"]}
 
     stride = max(1, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")))
-    # Segment AVI is MJPEG/lossy. Near an end-of-stream keyframe its pHash can
-    # drift by roughly 12 bits even though the local frame mapping is correct.
-    # Keep this below the 26-bit mismatch observed for an actually shifted
-    # merged cache, while accepting codec noise.
     max_hash_distance = max(0, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")))
     target_positions = set(range(0, len(frames), stride))
     target_positions.add(len(frames) - 1)
@@ -2592,8 +2301,9 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
     mismatches: list[dict] = []
     segmented = is_segmented_sample_cache(manifest)
     if segmented:
-        previous_segment = None
-        previous_local_index = None
+        current_segment: str | None = None
+        previous_local_index: int | None = None
+        completed_segments: set[str] = set()
         for frame_info in frames:
             segment = frame_info.get("cache_segment_filename")
             local_index = frame_info.get("cache_segment_frame_index")
@@ -2603,20 +2313,41 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
                     "sample_index": int(frame_info.get("sample_index", 0) or 0),
                 })
                 break
+            segment = str(segment)
             local_index = int(local_index)
-            expected_local_index = (
-                int(previous_local_index) + 1 if segment == previous_segment else 0
-            )
+            if local_index < 0:
+                mismatches.append({
+                    "reason": "negative_segment_frame_index",
+                    "sample_index": int(frame_info.get("sample_index", 0) or 0),
+                    "segment": segment,
+                    "local_index": local_index,
+                })
+                break
+
+            if segment != current_segment:
+                if segment in completed_segments:
+                    mismatches.append({
+                        "reason": "non_contiguous_segment_reuse",
+                        "sample_index": int(frame_info.get("sample_index", 0) or 0),
+                        "segment": segment,
+                    })
+                    break
+                if current_segment is not None:
+                    completed_segments.add(current_segment)
+                current_segment = segment
+                previous_local_index = local_index
+                continue
+
+            expected_local_index = int(previous_local_index) + 1
             if local_index != expected_local_index:
                 mismatches.append({
                     "reason": "non_contiguous_segment_mapping",
                     "sample_index": int(frame_info.get("sample_index", 0) or 0),
-                    "segment": str(segment),
+                    "segment": segment,
                     "local_index": local_index,
                     "expected_local_index": expected_local_index,
                 })
                 break
-            previous_segment = segment
             previous_local_index = local_index
         if mismatches:
             return {
@@ -2632,7 +2363,7 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
         "sample cache alignment verify start: targets=%s samples=%s mode=%s",
         len(target_positions),
         len(frames),
-        "segment-seek" if segmented else "legacy-sequential",
+        "direct-segment-mapping" if segmented else "legacy-sequential",
     )
     try:
         if segmented:
@@ -2643,6 +2374,23 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
             if not segmented and position not in target_positions:
                 continue
             checked += 1
+            if segmented:
+                expected_width = int(manifest.get("cache", {}).get("width") or 0)
+                expected_height = int(manifest.get("cache", {}).get("height") or 0)
+                actual_height, actual_width = frame.shape[:2]
+                if (
+                    (expected_width > 0 and actual_width != expected_width)
+                    or (expected_height > 0 and actual_height != expected_height)
+                ):
+                    mismatches.append({
+                        "reason": "segment_frame_size_mismatch",
+                        "sample_index": int(frame_info.get("sample_index", position + 1)),
+                        "expected": [expected_width, expected_height],
+                        "actual": [actual_width, actual_height],
+                    })
+                    break
+                continue
+
             expected = frame_info.get("phash_int")
             if expected is None:
                 continue
@@ -2657,6 +2405,12 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
                 # One mismatch is sufficient to reject the cache. Keep the
                 # validation overhead bounded on long recordings.
                 break
+        if not mismatches and checked != len(target_positions):
+            mismatches.append({
+                "reason": "verification_target_count_mismatch",
+                "expected": len(target_positions),
+                "actual": checked,
+            })
     except Exception as exc:
         mismatches.append({"reason": f"cache_read_failed:{exc}"})
 
@@ -2673,6 +2427,7 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
         "checked": checked,
         "stride": stride,
         "max_hash_distance": max_hash_distance,
+        "mode": "direct-segment-mapping" if segmented else "legacy-phash",
         "mismatches": mismatches,
     }
 
@@ -2888,7 +2643,7 @@ def create_sample_cache_chunked(
 
         ordered_manifests = [manifest_by_index[idx] for idx in sorted(manifest_by_index)]
         ordered_specs = [specs[idx] for idx in sorted(manifest_by_index)]
-        merged = _merge_chunk_caches(input_path, output_dir, cfg, ordered_manifests, ordered_specs)
+        merged = _assemble_chunk_caches(input_path, output_dir, cfg, ordered_manifests, ordered_specs)
 
         alignment = _verify_sample_cache_alignment(output_dir, merged)
         if alignment["ok"]:
@@ -2899,12 +2654,11 @@ def create_sample_cache_chunked(
             )
             return merged
 
-        # A bad cache cannot be handed to scene/OCR/VLM stages. Do not silently
-        # disable chunk parallelism here: the default concat path re-encodes
-        # the already parallel-produced parts. A remaining mismatch means the
-        # cache is unsafe and must fail visibly.
+        # A bad cache cannot be handed to scene/OCR/VLM stages. Keep chunk
+        # parallelism enabled and fail visibly when the direct segment mapping
+        # or representative decoding check is invalid.
         raise RuntimeError(
-            "sample cache alignment mismatch after parallel chunk merge: "
+            "sample cache alignment mismatch after parallel chunk assembly: "
             f"checked={alignment['checked']} details={alignment['mismatches']}"
         )
 
@@ -2982,7 +2736,8 @@ def iter_sample_cache_range(
 ) -> Iterator[tuple[int, dict, np.ndarray]]:
     """Yield global cache positions from legacy or segmented cache storage.
 
-    A segmented cache stores overlap-trimmed chunk AVIs independently.  Every
+    A segmented cache stores original chunk AVIs independently. Overlap frames
+    remain in those files but are omitted from the global manifest. Every
     manifest frame carries its exact segment path and local frame index, so no
     reader relies on an AVI concat timestamp timeline.
     """
