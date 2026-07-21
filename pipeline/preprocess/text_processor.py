@@ -1,8 +1,9 @@
 """
 텍스트 교정 엔진.
 
-Pass 1: 슬라이드 제목 + 용어 사전만으로 ASR 오인식 교정
-Pass 2: 슬라이드 전체 컨텍스트로 교정 → Pass 1과 merge하여 안전하게 적용
+Pass 1: Gemini로 슬라이드 제목 + 용어 사전 기반 ASR 오인식 후보 생성
+Pass 2: GPT로 슬라이드 전체 텍스트 컨텍스트 기반 후보 보강
+Pass 3: GPT-5.4로 Pass 1/2 후보 중 적용할 후보만 선택
 """
 
 import json
@@ -10,7 +11,9 @@ import os
 import re
 import time
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -22,13 +25,25 @@ from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 load_dotenv()
 
 GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
-IMAGE_PROVIDER = os.getenv("VERILEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "gemini").strip().lower()
-IMAGE_MODEL = os.getenv("VERILEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
+PASS1_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL", "gemini-3-flash-preview").strip()
+PASS2_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL", "gpt-5.4-mini").strip()
+PASS3_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL", "gpt-5.4").strip()
+TEXT_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_REASONING_EFFORT", "minimal").strip().lower()
+PASS2_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_REASONING_EFFORT", "minimal").strip().lower()
+PASS3_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_REASONING_EFFORT", "low").strip().lower()
+TEXT_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_TEXT_MAX_OUTPUT_TOKENS", "8192"))
+PASS2_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MAX_OUTPUT_TOKENS", "4096"))
+PASS3_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MAX_OUTPUT_TOKENS", "2048"))
+PASS3_ITEM_BATCH_SIZE = max(1, int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_ITEM_BATCH_SIZE", "12")))
+IMAGE_PROVIDER = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "text").strip().lower()
+IMAGE_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
 
-BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "50"))
+BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "12"))
+PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_PARALLEL_REQUESTS", "12")))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
 TRANSITION_TAIL_SEC = float(os.getenv("MERGE_TRANSITION_TAIL_SEC", "0.2"))
 ASSIGN_MAX_GAP_SEC = float(os.getenv("MERGE_ASSIGN_MAX_GAP_SEC", "3.0"))
+DEBUG_CORRECTION_OUTPUT = os.getenv("MERGE_CORRECTION_DEBUG_OUTPUT", "0").strip() == "1"
 
 DOMAIN_CHOICES = [
     "engineering",
@@ -50,7 +65,25 @@ SUBDOMAIN_CHOICES = [
 ]
 
 _token_usage: dict[str, int] = {"input": 0, "output": 0, "calls": 0}
+_stage_token_usage: dict[str, dict[str, int]] = {}
+_stage_counts: dict[str, int] = {
+    "pass1_candidates": 0,
+    "pass2_candidates": 0,
+    "pass3_candidates": 0,
+    "pass3_accepted": 0,
+}
+_pass3_candidate_audit: list[dict] = []
+_token_usage_lock = Lock()
 _override_client: Optional[genai.Client] = gemini_client_2
+PASS3_REASON_CODES = {
+    1: "asr_phonetic",
+    2: "domain_term",
+    3: "slide_term",
+    4: "broken_phrase",
+    5: "particle_repair",
+    6: "english_or_code",
+    7: "proper_noun",
+}
 
 def set_client(client: genai.Client) -> None:
     global _override_client
@@ -63,12 +96,34 @@ def _get_client() -> genai.Client:
     return _override_client
 
 
+def _add_stage_count(key: str, value: int) -> None:
+    with _token_usage_lock:
+        _stage_counts[key] = int(_stage_counts.get(key, 0) or 0) + int(value or 0)
+
+
+def _add_pass3_candidate_audit(records: list[dict]) -> None:
+    if not records:
+        return
+    with _token_usage_lock:
+        _pass3_candidate_audit.extend(records)
+
+
 def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
     usage = getattr(response, "usage_metadata", None)
-    if usage:
-        _token_usage["input"] += getattr(usage, "prompt_token_count", 0) or 0
-        _token_usage["output"] += getattr(usage, "candidates_token_count", 0) or 0
-    _token_usage["calls"] += 1
+    with _token_usage_lock:
+        if usage:
+            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+            _token_usage["input"] += input_tokens
+            _token_usage["output"] += output_tokens
+            bucket = _stage_token_usage.setdefault(stage, {"input": 0, "output": 0, "calls": 0})
+            bucket["input"] += input_tokens
+            bucket["output"] += output_tokens
+            bucket["calls"] += 1
+        else:
+            bucket = _stage_token_usage.setdefault(stage, {"input": 0, "output": 0, "calls": 0})
+            bucket["calls"] += 1
+        _token_usage["calls"] += 1
     try:
         from .cost_report import record_model_call
 
@@ -80,6 +135,99 @@ def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
         )
     except Exception:
         pass
+
+
+def _add_openai_usage(response, *, stage: str, model: str, prompt_chars: int = 0) -> None:
+    usage = getattr(response, "usage", None)
+    with _token_usage_lock:
+        if usage:
+            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            _token_usage["input"] += input_tokens
+            _token_usage["output"] += output_tokens
+            bucket = _stage_token_usage.setdefault(stage, {"input": 0, "output": 0, "calls": 0})
+            bucket["input"] += input_tokens
+            bucket["output"] += output_tokens
+            bucket["calls"] += 1
+        else:
+            bucket = _stage_token_usage.setdefault(stage, {"input": 0, "output": 0, "calls": 0})
+            bucket["calls"] += 1
+        _token_usage["calls"] += 1
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage=stage,
+            provider="openai",
+            model=model,
+            response=response,
+            prompt_chars=prompt_chars,
+        )
+    except Exception:
+        pass
+
+
+def _call_openai_text_correction(
+    prompt: str,
+    *,
+    stage: str,
+    model: str,
+    system_prompt: str,
+    max_output_tokens: int = 8192,
+) -> str:
+    from .config import get_openai_client
+
+    client = get_openai_client()
+    if client is None and os.getenv("OPENAI_API_KEY"):
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+
+    def call():
+        reasoning_effort = TEXT_REASONING_EFFORT
+        if "pass2" in stage:
+            reasoning_effort = PASS2_REASONING_EFFORT
+        elif "pass3" in stage:
+            reasoning_effort = PASS3_REASONING_EFFORT
+        kwargs = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_completion_tokens": max_output_tokens,
+        }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        temperature = os.getenv("GRAPHLEC_TEXT_PROCESSOR_OPENAI_TEMPERATURE", "0").strip()
+        if temperature:
+            kwargs["temperature"] = float(temperature)
+
+        while True:
+            try:
+                return client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                message = str(exc).lower()
+                removed = False
+                if "temperature" in kwargs and "temperature" in message and (
+                    "unsupported" in message or "not support" in message
+                ):
+                    kwargs.pop("temperature", None)
+                    removed = True
+                if "reasoning_effort" in kwargs and (
+                    "reasoning" in message or "reasoning_effort" in message
+                ) and ("unsupported" in message or "not support" in message):
+                    kwargs.pop("reasoning_effort", None)
+                    removed = True
+                if removed:
+                    continue
+                raise
+
+    response = api_call_with_retry(call)
+    _add_openai_usage(response, stage=stage, model=model, prompt_chars=len(prompt))
+    return response.choices[0].message.content or ""
 
 
 def _call_openai_image_correction(prompt: str, image_bytes: bytes):
@@ -130,10 +278,10 @@ def _call_openai_image_correction(prompt: str, image_bytes: bytes):
 
 def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int | None = None):
     if max_retries is None:
-        max_retries = int(os.getenv("VERILEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
+        max_retries = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
     if initial_wait is None:
-        initial_wait = int(os.getenv("VERILEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
-    max_wait = float(os.getenv("VERILEC_API_RETRY_MAX_WAIT_SEC", "60"))
+        initial_wait = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
+    max_wait = float(os.getenv("GRAPHLEC_API_RETRY_MAX_WAIT_SEC", "60"))
     infinite = max_retries <= 0
     attempt = 0
     while infinite or attempt < max_retries:
@@ -322,13 +470,76 @@ def parse_batch_response(text: str) -> dict[int, dict]:
 
 
 def extract_glossary_terms(slide_texts: dict[int, dict]) -> list[str]:
-    all_text = ""
+    ordered_terms: dict[str, None] = {}
+
+    def add_term(term: str) -> None:
+        cleaned = re.sub(r"\s+", " ", str(term or "")).strip()
+        cleaned = re.sub(r"^[\d\s\.\)\]-]+", "", cleaned).strip()
+        cleaned = cleaned.strip(" \t\r\n,.;:()[]{}<>\"'")
+        variants = [cleaned]
+        if re.search(r"[가-힣]", cleaned) and re.search(r"[\(\[]", cleaned):
+            variants.insert(0, re.split(r"\s*[\(\[]", cleaned, maxsplit=1)[0].strip())
+        for variant in variants:
+            variant = variant.strip(" \t\r\n,.;:()[]{}<>\"'")
+            if len(variant) < 2 or len(variant) > 40:
+                continue
+            ordered_terms.setdefault(variant, None)
+
+    all_text_parts: list[str] = []
     for _, extracted in slide_texts.items():
-        all_text += f" {extracted.get('title', '')} {extracted.get('text', '')}"
+        all_text_parts.extend([
+            str(extracted.get("title", "") or ""),
+            str(extracted.get("text", "") or ""),
+            str(extracted.get("t1", "") or ""),
+            str(extracted.get("t1_structure", "") or ""),
+        ])
+    all_text = "\n".join(all_text_parts)
+
+    for raw_unit in re.split(r"[\n\r\t,;:|•●○■□▶]+", all_text):
+        unit = re.sub(r"\s+", " ", raw_unit).strip()
+        unit = re.sub(r"^[\d\s\.\)\]-]+", "", unit).strip()
+        if not re.search(r"[가-힣]", unit):
+            continue
+        if len(unit) <= 28:
+            add_term(unit)
+
+        words = unit.split()
+        if len(words) > 6:
+            continue
+        for size in range(1, min(3, len(words)) + 1):
+            for start in range(0, len(words) - size + 1):
+                phrase = " ".join(words[start:start + size])
+                if re.search(r"[가-힣]", phrase) and (size > 1 or len(phrase) >= 3):
+                    add_term(phrase)
+
     code_terms = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_.()]*\b", all_text))
     func_terms = set(re.findall(r"\b[A-Za-z_]\w*\s*\(", all_text))
     func_terms = {term.strip().rstrip("(").strip() for term in func_terms}
-    return sorted({term for term in (code_terms | func_terms) if len(term) >= 2})
+    for term in sorted(code_terms | func_terms):
+        if term.isupper() or re.search(r"[\d_.()]", term):
+            add_term(term)
+
+    max_terms = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_MAX_GLOSSARY_TERMS", "800"))
+    return list(ordered_terms.keys())[:max_terms]
+
+
+def build_local_glossary(
+    slide_texts: dict[int, dict],
+    slide_no: Optional[int],
+    *,
+    window: int = 1,
+) -> str:
+    if not isinstance(slide_no, int):
+        return ""
+    local_slide_texts = {
+        sno: slide_texts[sno]
+        for sno in range(slide_no - window, slide_no + window + 1)
+        if sno in slide_texts
+    }
+    terms = extract_glossary_terms(local_slide_texts)
+    if not terms:
+        return ""
+    return "## 현재/인접 슬라이드 용어 사전 (표기 참조용)\n" + ", ".join(terms)
 
 
 def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[int, list[dict]], dict[int, int]]:
@@ -365,7 +576,7 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
 def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     scene_meta: dict[int, dict] = {}
     for entry in metadata:
-        if entry.get("capture_type") != "base":
+        if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
             continue
         scene_idx = entry.get("scene_index")
         if not isinstance(scene_idx, int) or scene_idx in scene_meta:
@@ -445,43 +656,61 @@ def _correct_batch_pass1(
     if not batch:
         return {}
 
-    seg_text = "\n".join(
-        f"[{local_i}] {seg.get('text_original', seg['text'])}"
-        for local_i, (_, seg) in enumerate(batch)
-    )
+    seg_lines: list[str] = []
+    for local_i, (_, seg) in enumerate(batch):
+        original_text = str(seg.get("text_original", seg["text"]) or "")
+        pass1_candidate = str(seg.get("pass1_candidate", "") or "")
+        if pass1_candidate and _normalize_text(pass1_candidate) != _normalize_text(original_text):
+            seg_lines.append(
+                f"[{local_i}]\n원문: {original_text}\nPass1 후보: {pass1_candidate}"
+            )
+        else:
+            seg_lines.append(f"[{local_i}]\n원문: {original_text}")
+    seg_text = "\n\n".join(seg_lines)
     topic_hint = f"\n## 현재 구간 주제\n{slide_title}\n" if slide_title.strip() else ""
     glossary_block = f"\n{glossary}\n" if glossary.strip() else ""
 
-    prompt = f"""강의 음성 전사본을 문맥만 보고 교정하세요. 슬라이드 원본은 제공되지 않습니다.
+    prompt = f"""강의 음성 전사본을 문맥과 용어 후보들을 보고 ASR 오인식 수정 후보만 생성하세요. 슬라이드 원본은 제공되지 않습니다.
 {topic_hint}{glossary_block}
 ## 전사 (교정 대상)
 {seg_text}
 
 ## 출력 (JSON만)
 {{"corrections": [{{"index": 0, "text": "교정된 텍스트"}}, ...]}}
+수정 대상 index만 corrections에 넣으세요.
+전체 전사본을 다시 출력하지 마세요.
+각 correction의 text에는 해당 index의 교정 후 전체 문장만 넣으세요.
+원문과 동일하게 유지할 index, 단순 자연화 후보는 출력하지 마세요.
+ASR 오인식 가능성이 있는 후보는 Pass3가 검증할 수 있도록 출력하세요.
+후보가 없으면 {{"corrections": []}}를 출력하세요.
 
 ### 교정 범위
 - ASR 오인식 교정 (깨진 텍스트를 문맥에 맞는 단어로 복원)
+- 전문용어 철자 교정 (슬라이드를 참고하여 정확한 표기로)
 - 맞춤법, 띄어쓰기, 조사 오류 교정
 - 불필요한 추임새(자, 뭐, 어, 그) 제거 (의미가 유지될 때만)
-- 코드에 실제로 등장하는 영문 토큰, 함수명, 클래스명, 변수명, 라이브러리명이 한국어식 발음 또는 ASR 오인식으로 들어온 경우에만 glossary를 참고하여 해당 영문 표기로 복원
-- 강의자가 실제로 한국어 일반 용어로 말한 경우에는 glossary에 대응되는 영문 용어가 있더라도 영어로 번역하지 말 것
-- 발화가 외래어/영문 토큰 자체를 읽는 맥락이면 영문 표기를 사용할 수 있다
-- 발화가 한국어 설명 문장이라면 한국어 표현을 유지할 것
-- ASR이 영문 용어를 잘못 인식한 경우 glossary를 참고하여 교정
+- 가장 발음이 인접한 후보를 통해 완전한 문맥이 형성된다면 해당 후보만 적용
 
-### 핵심 원칙
-- 강의자의 발화 구조와 의미를 절대적으로 보존하라
+### 핵심 원칙 — 강의자의 실제 발화 의미를 보존하라
+- 전사 원문의 의미가 기준이다. 슬라이드는 용어 철자 확인용 참고 자료일 뿐이다
 - 문장 길이와 정보량은 원문과 거의 똑같게 유지
-- 문맥상 말이 안 되는 단어(ASR 깨짐)만 복원. 의미가 통하는 단어는 그대로 둘 것
-- 강의자가 틀린 개념, 반대 개념, 이상한 관계를 말한 것처럼 보여도 정답처럼 고치지 말 것
-- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 교정 대상이 아니다
-- 의미가 바뀔 수 있는 한국어 전문용어 교체는 하지 말 것
-- 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것"""
+- 원문의 손상된 표현을 삭제하거나 더 일반적인 개념어로 추상화하지 말 것
+- 원문에 있는 정보 단위가 후보에서 사라지면 출력하지 말 것
+- 비문을 자연스럽게 요약하지 말고, 깨진 어절을 같은 위치의 어절로 복원할 것
+- 요약, 재서술, 슬라이드 bullet 복사 금지
+- 강의자의 발화 중 오인식된 단어가 있다면 해당 단어에 대해서만 교체하는 수준이다
+- 슬라이드와 발화가 완전히 다르다면, 발화를 따르도록 할 것.
+- 전사본을 따라갔을 때 강의 내용이 틀려 보이더라도 정답으로 고치지 말 것
+- 슬라이드의 정답/문맥에 맞추기 위해 강의자의 한국어 개념어를 반대 개념으로 바꾸지 말 것
+- 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것
+
+### 중요 원칙
+- 강의자의 발화 구조를 절대적으로 따라가라
+- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 verifier가 확인할 문제이므로 전사 보정에서 제거하지 말 것"""
 
     def call():
         return _get_client().models.generate_content(
-            model=GEMINI_MODEL,
+            model=PASS1_TEXT_MODEL,
             contents=[types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(
                 temperature=0.0,
@@ -506,6 +735,7 @@ def _correct_batch_pass1(
             cleaned = _normalize_text(str(corr_payload.get("text", "") or ""))
             if cleaned and cleaned != _normalize_text(original):
                 result[global_i] = cleaned
+    _add_stage_count("pass1_candidates", len(result))
     return result
 
 
@@ -513,76 +743,93 @@ def _correct_batch_pass2(
     batch: list[tuple[int, dict]],
     slide_context: str,
     slide_image_path: Optional[str] = None,
+    glossary: str = "",
 ) -> dict[int, str]:
     if not batch:
         return {}
 
-    seg_text = "\n".join(
-        f"[{local_i}] {seg.get('text_original', seg['text'])}"
-        for local_i, (_, seg) in enumerate(batch)
-    )
-    has_image = bool(slide_image_path and Path(slide_image_path).exists())
+    seg_lines: list[str] = []
+    for local_i, (_, seg) in enumerate(batch):
+        original_text = str(seg.get("text_original", seg["text"]) or "")
+        pass1_candidate = str(seg.get("pass1_candidate", "") or "")
+        if pass1_candidate and _normalize_text(pass1_candidate) != _normalize_text(original_text):
+            seg_lines.append(
+                f"[{local_i}]\n원문: {original_text}\nPass1 후보: {pass1_candidate}"
+            )
+        else:
+            seg_lines.append(f"[{local_i}]\n원문: {original_text}")
+    seg_text = "\n\n".join(seg_lines)
+    has_image = IMAGE_PROVIDER == "openai" and bool(slide_image_path and Path(slide_image_path).exists())
     if has_image:
         ref_block = "\n## 강의 슬라이드 이미지 (첨부됨)\n이미지에 보이는 용어, 수식, 다이어그램을 참고하여 전사를 교정하세요.\n"
         if slide_context.strip():
             ref_block += f"\n## 강의자료 텍스트 (추가 참조)\n{slide_context[:1500]}\n"
     else:
         ref_block = f"\n## 강의자료 (용어 참조)\n{slide_context[:2000]}\n" if slide_context.strip() else ""
+    glossary_block = f"\n## 현재/인접 슬라이드 용어 사전\n{glossary}\n" if glossary.strip() else ""
 
-    prompt = f"""강의 음성 전사본을 슬라이드와 문맥을 참고하여 교정하세요.
-{ref_block}
+    prompt = f"""강의 음성 전사본을 슬라이드와 문맥을 참고하여 STT/ASR 오인식 가능성이 높은 수정 후보를 생성하세요.
+{ref_block}{glossary_block}
 ## 전사 (교정 대상)
 {seg_text}
 
 ## 출력 (JSON만)
 {{"corrections": [{{"index": 0, "text": "교정된 텍스트"}}, ...]}}
+수정 대상 index만 corrections에 넣으세요.
+전체 전사본을 다시 출력하지 마세요.
+각 correction의 text에는 해당 index의 교정 후 전체 문장만 넣으세요.
+원문과 동일하게 유지할 index, 단순 자연화 후보는 출력하지 마세요.
+ASR 오인식 가능성이 있는 후보는 Pass3가 검증할 수 있도록 출력하세요.
+후보가 없으면 {{"corrections": []}}를 출력하세요.
 
-### 교정 범위
-- ASR 오인식 교정 (깨진 텍스트를 문맥에 맞는 단어로 복원)
-- 전문용어 철자 교정 (슬라이드를 참고하여 정확한 표기로)
-- 맞춤법, 띄어쓰기, 조사 오류 교정
-- 불필요한 추임새(자, 뭐, 어, 그) 제거 (의미가 유지될 때만)
+### 역할
+- 이것은 전사 후처리의 Standard Fix 단계다. 필러 제거, 요약, 구조화, 문장 정리는 하지 않는다.
+- 슬라이드와 용어 사전은 correction dictionary로만 사용한다. 슬라이드 문장을 베껴 전사를 더 좋은 설명문으로 만들지 않는다.
+- Pass2는 최종 승인 단계가 아니라 후보 생성 단계다. 원문이 깨져 있고 슬라이드/용어 사전/주변 문맥이 지지하는 후보는 출력한다. 최종 적용 여부는 Pass3가 판단한다.
+- Pass2의 출력 text는 반드시 원문을 기준으로 교정한 전체 문장이어야 한다.
 
-### 핵심 원칙 — 강의자의 실제 발화 의미를 보존하라
-- 전사 원문의 의미가 기준이다. 슬라이드는 용어 철자 확인용 참고 자료일 뿐이다
-- 문장 길이와 정보량은 원문과 거의 똑같게 유지
-- 요약, 재서술, 슬라이드 bullet 복사 금지
-- 강의자의 발화 중 오인식된 단어가 있다면 해당 단어에 대해서만 교체하는 수준이다
-- 슬라이드와 발화가 완전히 다르다면, 발화를 따르도록 할 것.
-- 전사본을 따라갔을 때 강의 내용이 틀려 보이더라도 정답으로 고치지 말 것
-- 슬라이드의 정답/문맥에 맞추기 위해 강의자의 한국어 개념어를 반대 개념으로 바꾸지 말 것
-- 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것
+### 수정할 것
+- STT/ASR 오인식 가능성이 높은 단어/구절: 발음은 비슷하지만 문맥상 한국어로 성립하기 어렵거나 강의 용어와 맞지 않는 경우
+- 슬라이드 또는 용어 사전에 실제로 보이는 강의 용어의 철자/표기 오류
+- 전문용어가 조사/접사와 붙어 깨진 경우, 전문용어가 포함된 어절 전체를 후보로 복원
+- 한국어식 발음이나 깨진 음가로 들어온 영문/외래어/전문용어의 원 표기 복원
+- 맞춤법/띄어쓰기는 강의 용어 표기 또는 오인식 복원에 필요한 경우만 수정
 
-### 중요 원칙
-- 강의자의 발화 구조를 절대적으로 따라가라
-- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 verifier가 확인할 문제이므로 전사 보정에서 제거하지 말 것"""
+### 수정하지 말 것
+- 문장 어미, 말투, 격식, 발화 순서, 문장 구조 변경
+- 단순 자연화, 표현 개선, 중복 제거, 필러 제거
+- 설명 추가, 의미 보충, 정의문/뜻풀이로 확장
+- 슬라이드 정답에 맞추기 위한 개념 교정
+- 한국어로 정상 발화한 일반어를 영어/전문어로 번역하는 것
+- 다른 index의 내용을 섞거나, 한 index의 내용을 다른 index로 옮기는 것
+
+### 기준
+- 전사 원문의 의미가 기준이다. 슬라이드는 용어와 표기 확인용 참고 자료다.
+- 수정은 가능한 최소 span이어야 한다.
+- 후보 문장은 원문과 길이, 정보량, 구어체가 거의 같아야 한다.
+- 단순 취향 차이나 자연화 후보는 출력하지 않는다.
+- 원문 구절이 깨져 있고 참조 자료나 주변 문맥이 지지하면, 적용 여부 판단은 Pass3에 맡기고 후보로 출력한다."""
 
     img_bytes = None
-    contents = []
-    if has_image:
+    if has_image and IMAGE_PROVIDER == "openai":
         with open(slide_image_path, "rb") as f:
             img_bytes = f.read()
-        contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
-    contents.append(types.Part.from_text(text=prompt))
-
-    def call():
-        return _get_client().models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=8192,
-                thinking_config=types.ThinkingConfig(thinking_budget=1024),
-            ),
-        )
 
     try:
         if has_image and IMAGE_PROVIDER == "openai":
             response_text = _call_openai_image_correction(prompt, img_bytes or b"")
         else:
-            response = api_call_with_retry(call)
-            _add_usage(response, stage="stage3b_text_processor_pass2")
-            response_text = response.text or ""
+            response_text = _call_openai_text_correction(
+                prompt,
+                stage="stage3b_text_processor_pass2",
+                model=PASS2_TEXT_MODEL,
+                system_prompt=(
+                    "당신은 한국어 강의 STT 오류 후보 생성기입니다. "
+                    "슬라이드와 용어 사전을 교정 사전으로만 사용하고, "
+                    "오인식 가능성이 높은 후보를 JSON으로 출력하세요."
+                ),
+                max_output_tokens=PASS2_MAX_OUTPUT_TOKENS,
+            )
         local_corrections = parse_batch_response(response_text)
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")
@@ -596,7 +843,356 @@ def _correct_batch_pass2(
             cleaned = _normalize_text(str(corr_payload.get("text", "") or ""))
             if cleaned and cleaned != _normalize_text(original):
                 result[global_i] = cleaned
+    _add_stage_count("pass2_candidates", len(result))
     return result
+
+
+def parse_pass3_response(text: str) -> dict[str, list[dict]]:
+    if not text:
+        return {"accepted_changes": []}
+    raw = text.strip()
+    if "```json" in raw:
+        raw = raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```")[1].split("```")[0].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"accepted_changes": []}
+    if not isinstance(parsed, dict):
+        return {"accepted_changes": []}
+
+    raw_items = parsed.get("changes", parsed.get("accepted_changes", parsed.get("accepted", [])))
+    accepted_changes: list[dict] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("i", item.get("index"))
+        from_text = str(item.get("from", item.get("from_text", "")) or "")
+        to_text = str(item.get("to", item.get("to_text", "")) or "")
+        if not isinstance(idx, int) or not from_text or not to_text:
+            continue
+        candidate_number = item.get("c", item.get("candidate_number"))
+        occurrence = item.get("occ", item.get("occurrence", 1))
+        reason_code = item.get("reason_code", item.get("r"))
+        if isinstance(reason_code, str) and reason_code.isdigit():
+            reason_code = int(reason_code)
+        if not isinstance(reason_code, int) or reason_code not in PASS3_REASON_CODES:
+            reason_code = 0
+        reason = PASS3_REASON_CODES.get(reason_code, "")
+        if not reason:
+            reason = str(item.get("reason", "") or "").strip()
+        accepted_changes.append({
+            "index": idx,
+            "candidate_number": candidate_number if isinstance(candidate_number, int) else None,
+            "from_text": from_text,
+            "to_text": to_text,
+            "occurrence": occurrence,
+            "reason_code": reason_code,
+            "reason": reason,
+        })
+    return {"accepted_changes": accepted_changes}
+
+
+def _build_pass3_items(
+    batch: list[tuple[int, dict]],
+    pass1: dict[int, str],
+    pass2: dict[int, str],
+) -> list[dict]:
+    raw_by_global = {
+        global_i: str(seg.get("text_original", seg["text"]) or "")
+        for global_i, seg in batch
+    }
+    sorted_globals = sorted(raw_by_global.keys())
+    position_by_global = {global_i: pos for pos, global_i in enumerate(sorted_globals)}
+    items: list[dict] = []
+    for global_i in sorted(set(pass1.keys()) | set(pass2.keys())):
+        raw = raw_by_global.get(global_i, "")
+        raw_norm = _normalize_text(raw)
+        candidates: list[dict] = []
+        p1 = _normalize_text(pass1.get(global_i, "") or "")
+        p2 = _normalize_text(pass2.get(global_i, "") or "")
+        if p1 and p1 != raw_norm:
+            candidates.append({"source": "pass1", "text": p1})
+        if p2 and p2 != raw_norm and p2 not in [c["text"] for c in candidates]:
+            candidates.append({"source": "pass2", "text": p2})
+        if candidates:
+            pos = position_by_global.get(global_i, -1)
+            prev_text = raw_by_global.get(sorted_globals[pos - 1], "") if pos > 0 else ""
+            next_text = raw_by_global.get(sorted_globals[pos + 1], "") if 0 <= pos < len(sorted_globals) - 1 else ""
+            items.append({
+                "global_index": global_i,
+                "raw_text": raw,
+                "prev_text": prev_text,
+                "next_text": next_text,
+                "candidates": candidates,
+            })
+    return items
+
+
+def _format_pass3_items(pass3_items: list[dict]) -> str:
+    blocks: list[str] = []
+    for local_i, item in enumerate(pass3_items):
+        lines = [
+            f"[{local_i}]",
+            f"이전 발화: {item.get('prev_text', '')}",
+            f"원문: {item.get('raw_text', '')}",
+            f"다음 발화: {item.get('next_text', '')}",
+            "후보 문장:",
+        ]
+        for candidate_number, candidate in enumerate(item.get("candidates", []), start=1):
+            lines.append(
+                f"- 후보 {candidate_number} ({candidate.get('source', '')}): "
+                f"{candidate.get('text', '')}"
+            )
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _validate_candidates_pass3(
+    pass3_items: list[dict],
+    slide_context: str = "",
+) -> dict[int, dict]:
+    if not pass3_items:
+        return {}
+    total_candidates = sum(len(item.get("candidates", [])) for item in pass3_items)
+    _add_stage_count("pass3_candidates", total_candidates)
+
+    ref_block = f"\n## 강의자료 참고\n{slide_context[:1000]}\n" if slide_context.strip() else ""
+    items_text = _format_pass3_items(pass3_items)
+    prompt = f"""역할: 한국어 강의 STT 후보 edit 추출기.
+목표: 후보 문장을 적용하지 말고, 원문에서 후보로 바꿀 수 있는 최소 from_text/to_text 쌍만 모두 출력한다.
+출력에 없는 변경은 적용하지 않는다.
+{ref_block}
+
+## 검증 대상
+{items_text}
+
+## 출력(JSON만)
+{{
+  "changes":[
+    {{"i":0,"c":1,"from":"원문 연속 문자열","to":"후보 근거 문자열","occ":1,"r":1}}
+  ]
+}}
+
+reason_code는 아래 번호 중 하나만 사용한다. 번호를 고를 수 없으면 그 변경은 출력하지 않는다.
+1 발음/음가 유사 오인식
+2 강의 도메인 전문용어 복원
+3 슬라이드 표기 용어 복원
+4 문맥상 깨진 구절 복원
+5 깨진 용어에 붙은 조사까지 복원
+6 영문/코드/약어 오인식 복원
+7 고유명사 복원
+
+## 실행 순서
+1. 각 후보를 원문과 왼쪽부터 오른쪽까지 끝까지 비교한다.
+2. 원문의 깨진 단어/구절과 후보의 같은 위치 대응어를 찾는다.
+3. 하나를 찾은 뒤에도 멈추지 말고, 같은 항목의 남은 차이를 계속 검사한다.
+4. 서로 독립된 오류는 하나의 큰 span으로 합치지 말고 별도 changes로 출력한다.
+5. 후보 전체가 자연화/재작성이어도, 명확한 단어/구절 대응만 따로 출력한다.
+6. from_text는 원문에 실제로 존재해야 하고, to_text는 해당 후보에 실제로 존재해야 한다.
+7. 한국어 오류 span은 한 글자나 어절 내부 일부만 자르지 말고, 깨진 어절/용어 단위로 잡는다.
+   - 금지: 외 -> 회, 한해 -> 환산, 재활 -> 재화
+   - 허용: 관리외계 -> 관리회계, 외계에서 -> 회계에서, 한해봐야겠죠 -> 환산해봐야겠죠, 재활을 -> 재화를
+8. 조사/어미와 결합했을 때 최종 문장이 깨지면, 조사/어미까지 포함한 span을 출력한다.
+
+출력 키 의미:
+- i: 검증 대상의 [] 번호
+- c: 후보 번호
+- from: 원문에 실제로 있는 연속 문자열
+- to: 후보 문장에 실제로 있는 문자열
+- occ: 같은 from이 원문에 여러 번 있으면 몇 번째인지, 모두면 "all"
+- r: reason_code
+
+## accepted 기준
+- 고유명사, 영문 토큰, 코드/함수명, 제품명, 슬라이드 표기 용어, 운영체제/컴퓨터 구조 전문용어의 오인식은 적극 출력한다.
+- 같은 강의에서 반복되는 전문용어의 오인식도 적극 출력한다.
+- 일반 명사구/술어구는 원문이 문맥상 성립하기 어렵고, 후보가 같은 위치에서 음가/문맥상 자연스럽게 복원할 때만 출력한다.
+- 비문은 전체 문장을 고치지 말고, 비문을 만든 깨진 단어/구절만 출력한다.
+
+## rejected span
+- 문장 전체 또는 절 전체
+- 어순 변경, 주어/목적어/서술어 보충
+- 원문 단어 삭제, 설명 추가, 의미 추가/삭제
+- 단순 자연화, 구어체 정리, 문장부호/띄어쓰기만 변경
+- 후보에 없는 새 표현
+- 최소 대응을 확정할 수 없는 변경
+"""
+
+    try:
+        response_text = _call_openai_text_correction(
+            prompt,
+            stage="stage3b_text_processor_pass3",
+            model=PASS3_TEXT_MODEL,
+            system_prompt=(
+                "당신은 한국어 강의 STT 후보 edit 추출기입니다. "
+                "후보 문장 전체를 승인/거절하지 말고 원문에서 실제로 교체할 최소 from_text/to_text를 모두 출력하세요. "
+                "문장 전체, 절 전체, 새 문장은 출력하지 마세요. "
+                "JSON만 출력하세요."
+            ),
+            max_output_tokens=PASS3_MAX_OUTPUT_TOKENS,
+        )
+        accepted = parse_pass3_response(response_text)
+    except Exception as exc:
+        print(f"  [Pass3 오류 무시] {exc}")
+        return {}
+
+    accepted_changes_by_local: dict[int, list[dict]] = {}
+    for judgment in accepted.get("accepted_changes", []):
+        local_i = judgment.get("index")
+        if not isinstance(local_i, int):
+            continue
+        accepted_changes_by_local.setdefault(local_i, []).append(judgment)
+
+    audit_records: list[dict] = []
+    result: dict[int, dict] = {}
+    for local_i, item in enumerate(pass3_items):
+        global_i = int(item["global_index"])
+        raw = str(item.get("raw_text", "") or "")
+        accepted_edits: list[dict] = []
+        audit_changes: list[dict] = []
+        for change in accepted_changes_by_local.get(local_i, []):
+            expanded_changes = _expand_llm_change(raw, change, item.get("candidates", []))
+            if expanded_changes:
+                accepted_edits.extend(expanded_changes)
+                audit_changes.extend([{**edit, "accepted": True} for edit in expanded_changes])
+            else:
+                audit_changes.append({
+                    "candidate_number": change.get("candidate_number"),
+                    "from_text": str(change.get("from_text", "") or ""),
+                    "to_text": str(change.get("to_text", "") or ""),
+                    "occurrence": change.get("occurrence", 1),
+                    "reason_code": change.get("reason_code", 0),
+                    "reason": str(change.get("reason", "") or ""),
+                    "accepted": False,
+                })
+        audit_records.append({
+            "index": global_i,
+            "pass3_local_index": local_i,
+            "raw_text": raw,
+            "prev_text": str(item.get("prev_text", "") or ""),
+            "next_text": str(item.get("next_text", "") or ""),
+            "candidate_full_texts": item.get("candidates", []),
+            "accepted_changes": audit_changes,
+        })
+
+        if accepted_edits:
+            result[global_i] = {
+                "accepted_edits": accepted_edits,
+                "raw_text": raw,
+            }
+    _add_pass3_candidate_audit(audit_records)
+    _add_stage_count("pass3_accepted", len(result))
+    return result
+
+
+def _is_surface_only_edit(edit: dict) -> bool:
+    from_text = str(edit.get("from_text", "") or "")
+    to_text = str(edit.get("to_text", "") or "")
+    if not from_text or not to_text:
+        return False
+    strip_chars = r"[\s\.,;:!\?。．，、…]+"
+    return re.sub(strip_chars, "", from_text) == re.sub(strip_chars, "", to_text)
+
+
+def _is_hangul_char(value: str) -> bool:
+    return bool(value) and "가" <= value <= "힣"
+
+
+def _is_unsafe_short_korean_span(raw_text: str, from_text: str, to_text: str, raw_start: int, raw_end: int) -> bool:
+    if len(from_text) > 2 and len(to_text) > 2:
+        return False
+    if not re.search(r"[가-힣]", from_text + to_text):
+        return False
+    left = raw_text[raw_start - 1] if raw_start > 0 else ""
+    right = raw_text[raw_end] if raw_end < len(raw_text) else ""
+    return _is_hangul_char(left) or _is_hangul_char(right)
+
+
+def _expand_llm_change(raw_text: str, change: dict, candidates: list[dict]) -> list[dict]:
+    raw_text = str(raw_text or "")
+    from_text = str(change.get("from_text", "") or "")
+    to_text = str(change.get("to_text", "") or "")
+    if not from_text or not to_text:
+        return []
+    if _is_surface_only_edit({"from_text": from_text, "to_text": to_text}):
+        return []
+
+    candidate_number = change.get("candidate_number")
+    if isinstance(candidate_number, int) and 1 <= candidate_number <= len(candidates):
+        candidate_text = str(candidates[candidate_number - 1].get("text", "") or "")
+        if to_text not in candidate_text:
+            return []
+
+    starts: list[int] = []
+    start = raw_text.find(from_text)
+    while start != -1:
+        starts.append(start)
+        start = raw_text.find(from_text, start + max(1, len(from_text)))
+    if not starts:
+        return []
+
+    occurrence = change.get("occurrence", 1)
+    if isinstance(occurrence, str) and occurrence.lower() == "all":
+        selected_starts = starts
+    elif isinstance(occurrence, int) and 1 <= occurrence <= len(starts):
+        selected_starts = [starts[occurrence - 1]]
+    elif len(starts) == 1:
+        selected_starts = starts
+    else:
+        return []
+
+    reason = str(change.get("reason", "") or "")
+    reason_code = change.get("reason_code", 0)
+    expanded: list[dict] = []
+    for raw_start in selected_starts:
+        raw_end = raw_start + len(from_text)
+        if _is_unsafe_short_korean_span(raw_text, from_text, to_text, raw_start, raw_end):
+            continue
+        expanded.append({
+            "source": "pass3_llm",
+            "candidate_number": candidate_number if isinstance(candidate_number, int) else 0,
+            "from_text": from_text,
+            "to_text": to_text,
+            "raw_start": raw_start,
+            "raw_end": raw_end,
+            "reason_code": reason_code if isinstance(reason_code, int) else 0,
+            "reason": reason,
+            "accepted": True,
+            "accepted_via": "llm_change",
+        })
+    return expanded
+
+
+def _apply_accepted_edits(raw_text: str, edits: list[dict]) -> tuple[str, list[dict]]:
+    raw_text = str(raw_text or "")
+    valid_edits: list[dict] = []
+    occupied: list[tuple[int, int]] = []
+
+    for edit in sorted(edits, key=lambda e: (int(e.get("raw_start", 0) or 0), int(e.get("raw_end", 0) or 0))):
+        raw_start = int(edit.get("raw_start", 0) or 0)
+        raw_end = int(edit.get("raw_end", raw_start) or raw_start)
+        from_text = str(edit.get("from_text", "") or "")
+        if raw_start < 0 or raw_end < raw_start or raw_end > len(raw_text):
+            continue
+        if raw_text[raw_start:raw_end] != from_text:
+            continue
+        overlaps = any(not (raw_end <= used_start or raw_start >= used_end) for used_start, used_end in occupied)
+        if overlaps and raw_start != raw_end:
+            continue
+        occupied.append((raw_start, raw_end))
+        valid_edits.append(edit)
+
+    if not valid_edits:
+        return raw_text, []
+
+    corrected = raw_text
+    for edit in sorted(valid_edits, key=lambda e: int(e.get("raw_start", 0) or 0), reverse=True):
+        raw_start = int(edit.get("raw_start", 0) or 0)
+        raw_end = int(edit.get("raw_end", raw_start) or raw_start)
+        to_text = str(edit.get("to_text", "") or "")
+        corrected = corrected[:raw_start] + to_text + corrected[raw_end:]
+    return corrected, valid_edits
 
 
 def merge_two_passes(
@@ -604,17 +1200,38 @@ def merge_two_passes(
     pass1: dict[int, str],
     pass2: dict[int, str],
     subdomain: str = "",
+    slide_context: str = "",
+) -> dict[int, dict]:
+    pass3_items = _build_pass3_items(batch, pass1, pass2)
+    return merge_pass3_items(pass3_items, slide_context=slide_context)
+
+
+def merge_pass3_items(
+    pass3_items: list[dict],
+    slide_context: str = "",
 ) -> dict[int, dict]:
     corrections: dict[int, dict] = {}
-    all_indices = set(pass1.keys()) | set(pass2.keys())
+    accepted = _validate_candidates_pass3(pass3_items, slide_context=slide_context)
 
-    for global_i in all_indices:
-        p1 = pass1.get(global_i)
-        p2 = pass2.get(global_i)
-        if p2:
-            corrections[global_i] = _applied(p2, "low", "pass2 채택 (1차 교정본 기반)")
-        elif p1:
-            corrections[global_i] = _applied(p1, "low", "pass1만 교정 (문맥 기반)")
+    for global_i, judgment in accepted.items():
+        raw_text = str(judgment.get("raw_text", "") or "")
+        accepted_edits = list(judgment.get("accepted_edits", []) or [])
+        applied_text, applied_edits = _apply_accepted_edits(raw_text, accepted_edits)
+        selected_text = _normalize_text(applied_text)
+        raw_norm = _normalize_text(raw_text)
+        if not selected_text or selected_text == raw_norm or not applied_edits:
+            continue
+        sources = sorted({str(edit.get("source", "") or "candidate") for edit in applied_edits})
+        reasons = [str(edit.get("reason", "") or "") for edit in applied_edits if str(edit.get("reason", "") or "")]
+        corrections[global_i] = {
+            "candidate_text": selected_text,
+            "applied_text": selected_text,
+            "risk": "low",
+            "apply": True,
+            "reason": "; ".join(reasons) or "pass3 accepted edits",
+            "source": "+".join(sources) if sources else "candidate",
+            "accepted_edits": applied_edits,
+        }
     return corrections
 
 
@@ -622,20 +1239,10 @@ def _build_pass2_batch_from_pass1(
     batch: list[tuple[int, dict]],
     pass1: dict[int, str],
 ) -> list[tuple[int, dict]]:
-    pass2_batch: list[tuple[int, dict]] = []
-    for global_i, seg in batch:
-        pass1_text = pass1.get(global_i)
-        if not pass1_text:
-            pass2_batch.append((global_i, seg))
-            continue
-        seg_for_pass2 = seg.copy()
-        seg_for_pass2["text_original"] = pass1_text
-        seg_for_pass2["text"] = pass1_text
-        pass2_batch.append((global_i, seg_for_pass2))
-    return pass2_batch
+    return [(global_i, seg.copy()) for global_i, seg in batch]
 
 
-def correct_segments_two_pass(
+def correct_segments_three_pass(
     segments: list[dict],
     metadata: list[dict],
     textualized_data: dict,
@@ -690,12 +1297,29 @@ def correct_segments_two_pass(
     subdomain = domain_info.get("subdomain", "")
     print(f"    도메인: {domain_info['domain']}, 서브도메인: {subdomain}")
 
-    glossary_terms = extract_glossary_terms(extracted_slide_texts)
-    glossary = "## 슬라이드 용어 사전 (표기 참조용)\n" + ", ".join(glossary_terms) if glossary_terms else ""
-    if glossary:
-        print(f"    용어 사전: {len(glossary_terms)}개 용어")
+    glossary_window = max(0, int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_GLOSSARY_SLIDE_WINDOW", "1")))
+    total_glossary_terms = len(extract_glossary_terms(extracted_slide_texts))
+    if total_glossary_terms:
+        print(
+            f"    용어 사전: 전체 {total_glossary_terms}개 용어, "
+            f"batch별 현재±{glossary_window} 슬라이드만 사용"
+        )
 
-    all_corrections: dict[int, dict] = {}
+    def process_sub_batch(
+        sub: list[tuple[int, dict]],
+        context: str,
+        slide_title: str = "",
+        glossary: str = "",
+    ) -> tuple[str, list[dict]]:
+        pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
+        if not use_pass2:
+            return context, _build_pass3_items(sub, pass1, {})
+
+        pass2_batch = _build_pass2_batch_from_pass1(sub, pass1)
+        pass2 = _correct_batch_pass2(pass2_batch, context, glossary=glossary)
+        return context, _build_pass3_items(sub, pass1, pass2)
+
+    parallel_jobs: list[tuple[list[tuple[int, dict]], str, str, str]] = []
     for logical_slide_no in sorted(extracted_slide_texts.keys()):
         group = groups.get(logical_slide_no, [])
         if not group:
@@ -708,53 +1332,67 @@ def correct_segments_two_pass(
             scene_label = ",".join(f"{scene_idx}" for scene_idx in scene_list)
         else:
             scene_label = f"{scene_list[0]},{scene_list[1]},...,{scene_list[-1]}"
+        sub_batches = [group[b:b + BATCH_SIZE] for b in range(0, len(group), BATCH_SIZE)]
         print(
-            f"    slide {logical_slide_no:3d} (scenes {scene_label:>7s}, {slide_title[:22]:22s}): {len(group):3d}개",
-            end="",
+            f"    slide {logical_slide_no:3d} (scenes {scene_label:>7s}, {slide_title[:22]:22s}): "
+            f"{len(group):3d}개, {len(sub_batches)}배치",
             flush=True,
         )
 
-        sub_batches = [group[b:b + BATCH_SIZE] for b in range(0, len(group), BATCH_SIZE)]
         for sub in sub_batches:
-            if use_pass2:
-                pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
-                print("①", end="", flush=True)
-                pass2_batch = _build_pass2_batch_from_pass1(sub, pass1)
-                pass2 = _correct_batch_pass2(pass2_batch, context)
-                print("②", end="", flush=True)
-                merged = merge_two_passes(sub, pass1, pass2, subdomain=subdomain)
-            else:
-                pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
-                print("①", end="", flush=True)
-                merged = {
-                    global_i: {
-                        "candidate_text": text_value,
-                        "applied_text": text_value,
-                        "risk": "low",
-                        "apply": True,
-                        "reason": "pass1 only",
-                    }
-                    for global_i, text_value in pass1.items()
-                }
-            all_corrections.update(merged)
-        print()
+            glossary = build_local_glossary(
+                extracted_slide_texts,
+                logical_slide_no,
+                window=glossary_window,
+            )
+            parallel_jobs.append((sub, context, slide_title, glossary))
 
     if no_slide:
-        print(f"    미매핑 {len(no_slide)}개 교정 중...", end="", flush=True)
+        print(f"    미매핑 {len(no_slide)}개 교정 중...")
         for offset in range(0, len(no_slide), BATCH_SIZE):
             sub = no_slide[offset:offset + BATCH_SIZE]
-            pass1 = _correct_batch_pass1(sub, glossary=glossary)
-            all_corrections.update({
-                global_i: {
-                    "candidate_text": text_value,
-                    "applied_text": text_value,
-                    "risk": "low",
-                    "apply": True,
-                    "reason": "pass1 only (미매핑)",
-                }
-                for global_i, text_value in pass1.items()
-            })
+            parallel_jobs.append((sub, "", "", ""))
+
+    print(
+        f"    총 {len(parallel_jobs)}개 batch를 최대 {PARALLEL_REQUESTS}개 병렬로 교정 중...",
+        end="",
+        flush=True,
+    )
+    with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as executor:
+        futures = [
+            executor.submit(process_sub_batch, sub, context, slide_title, glossary)
+            for sub, context, slide_title, glossary in parallel_jobs
+        ]
+        pass3_groups: dict[str, list[dict]] = {}
+        for future in as_completed(futures):
+            context, pass3_items = future.result()
+            if pass3_items:
+                pass3_groups.setdefault(context, []).extend(pass3_items)
             print(".", end="", flush=True)
+    print()
+
+    pass3_jobs: list[tuple[list[dict], str]] = []
+    for context, items in pass3_groups.items():
+        items.sort(key=lambda item: int(item.get("global_index", 0) or 0))
+        for offset in range(0, len(items), PASS3_ITEM_BATCH_SIZE):
+            pass3_jobs.append((items[offset:offset + PASS3_ITEM_BATCH_SIZE], context))
+
+    all_corrections: dict[int, dict] = {}
+    total_pass3_items = sum(len(items) for items, _ in pass3_jobs)
+    if pass3_jobs:
+        print(
+            f"    Pass3 후보 {total_pass3_items}개를 {len(pass3_jobs)}개 batch로 검증 중...",
+            end="",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as executor:
+            futures = [
+                executor.submit(merge_pass3_items, items, context)
+                for items, context in pass3_jobs
+            ]
+            for future in as_completed(futures):
+                all_corrections.update(future.result())
+                print(".", end="", flush=True)
         print()
 
     corrected_segments: list[dict] = []
@@ -780,11 +1418,16 @@ def correct_segments_two_pass(
 
         corr_info = all_corrections.get(i)
         if corr_info:
+            accepted_edits = corr_info.get("accepted_edits")
+            if accepted_edits:
+                corrected["accepted_edits"] = accepted_edits
             corrected["correction_risk"] = str(corr_info.get("risk", "none") or "none")
             corrected["correction_reason"] = str(corr_info.get("reason", "") or "")
             candidate_text = str(corr_info.get("candidate_text", "") or "").strip()
             if candidate_text:
                 corrected["text_corrected_candidate"] = candidate_text
+            if DEBUG_CORRECTION_OUTPUT:
+                corrected["correction_source"] = str(corr_info.get("source", "") or "")
 
             if corr_info.get("apply") and corr_info.get("applied_text"):
                 corrected_text = str(corr_info["applied_text"])
@@ -794,7 +1437,7 @@ def correct_segments_two_pass(
                 applied_count += 1
             else:
                 corrected["text"] = original
-                corrected["correction_status"] = "candidate_only"
+                corrected["correction_status"] = "unchanged"
         else:
             corrected["text"] = original
             corrected["correction_status"] = "unchanged"
@@ -803,5 +1446,9 @@ def correct_segments_two_pass(
 
         corrected_segments.append(corrected)
 
-    print(f"    교정 적용: {applied_count}건 / 전체 {len(segments)}건")
+    print(f"    교정 적용: {applied_count}건 / 후보 출력: 0건 / 전체 {len(segments)}건")
     return corrected_segments
+
+
+# 외부 호출 호환용 별칭. 구현은 현재 3-pass이다.
+correct_segments_two_pass = correct_segments_three_pass

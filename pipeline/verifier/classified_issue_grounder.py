@@ -1887,33 +1887,67 @@ def ground_classified_issues(
         }
         return verifier_result
 
-    print(f"  classified issue grounding 시작: {len(targets)}건 ({', '.join(sorted(categories))})", flush=True)
+    models = _grounding_model_specs()
+    print(
+        f"  classified issue grounding 시작: {len(targets)}건 ({', '.join(sorted(categories))}), "
+        f"workers_per_model={max_workers}",
+        flush=True,
+    )
+
+    # 모델별로 독립된 pool을 사용한다. 따라서 여러 grounding 모델을 켜도
+    # ``max_workers``가 전체 한도가 아니라 모델당 동시 요청 한도가 된다.
+    trials_by_id: dict[str, list[dict[str, Any]]] = {}
+
+    def worker(model_spec: str, issue: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, int]]:
+        issue_id = str(issue.get("id") or issue.get("issue_id") or "")
+        try:
+            payload, usage = _call_grounding_trial(
+                model_spec=model_spec,
+                issue=issue,
+                current_date=current_date,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            payload = {
+                "status": "grounding_unavailable",
+                "claim_verdict": "uncertain",
+                "issue_supported": None,
+                "reason": f"grounding 실패: {exc}",
+                "evidence_sources": [],
+                "evidence_summary": "",
+                "search_queries": [],
+                "model_spec": model_spec,
+                "model": model_spec,
+                "provider": "",
+                "search_mode": "unavailable",
+                "source_verification_status": "no_sources",
+                "verified_sources": [],
+            }
+            usage = _empty_token_usage()
+        return issue_id, payload, usage
+
+    def run_model(model_spec: str) -> list[tuple[str, dict[str, Any], dict[str, int]]]:
+        results: list[tuple[str, dict[str, Any], dict[str, int]]] = []
+        with ThreadPoolExecutor(max_workers=min(max(1, max_workers), len(targets))) as executor:
+            futures = [executor.submit(worker, model_spec, issue) for issue in targets]
+            for future in as_completed(futures):
+                results.append(future.result())
+        return results
+
+    with ThreadPoolExecutor(max_workers=max(1, len(models))) as model_executor:
+        futures = [model_executor.submit(run_model, model_spec) for model_spec in models]
+        for future in as_completed(futures):
+            for issue_id, payload, usage in future.result():
+                trials_by_id.setdefault(issue_id, []).append(payload)
+                _merge_token_usage(token_usage, usage)
 
     by_id: dict[str, dict[str, Any]] = {}
-
-    def worker(issue: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, int]]:
-        payload, usage = _call_grounding(issue, current_date, max_tokens)
-        return str(issue.get("id") or issue.get("issue_id") or ""), payload, usage
-
-    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-        futures = {executor.submit(worker, issue): issue for issue in targets}
-        for future in as_completed(futures):
-            issue = futures[future]
-            try:
-                issue_id, payload, usage = future.result()
-            except Exception as exc:
-                issue_id = str(issue.get("id") or issue.get("issue_id") or "")
-                payload = {
-                    "status": "grounding_unavailable",
-                    "reason": f"grounding 실패: {exc}",
-                    "evidence_sources": [],
-                    "evidence_summary": "",
-                }
-                usage = _empty_token_usage()
-            by_id[issue_id] = payload
-            _merge_token_usage(token_usage, usage)
-            status_counts[_normalize_status(payload.get("status"))] += 1
-            print(f"    grounding {issue_id}: {payload.get('status')}", flush=True)
+    target_by_id = {str(issue.get("id") or issue.get("issue_id") or ""): issue for issue in targets}
+    for issue_id, issue in target_by_id.items():
+        payload = _aggregate_grounding_trials(issue, trials_by_id.get(issue_id, []))
+        by_id[issue_id] = payload
+        status_counts[_normalize_status(payload.get("status"))] += 1
+        print(f"    grounding {issue_id}: {payload.get('status')}", flush=True)
 
     for issue in issues:
         if not isinstance(issue, dict):
@@ -1939,7 +1973,7 @@ def ground_classified_issues(
         "enabled": True,
         "grounded_issue_count": len(targets),
         "categories": sorted(categories),
-        "models": _grounding_model_specs(),
+        "models": models,
         "status_counts": dict(status_counts),
         "token_usage": token_usage,
         "target_policy": "all factual_error/temporal_error candidates, including final rejected candidates",

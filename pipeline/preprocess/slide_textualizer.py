@@ -2,7 +2,7 @@
 슬라이드 텍스트화 파이프라인 (Stage 1)
 
 슬라이드 이미지 내의 텍스트, 다이어그램, 표 등 시각 요소를
-Gemini Vision을 통해 텍스트로 변환합니다.
+OpenAI Vision을 통해 텍스트로 변환합니다.
 
 Input:
   - output_slides/ 폴더: slide_extractor.py 출력 디렉토리
@@ -19,7 +19,7 @@ Output:
   - slide_textualized.json: 텍스트화 결과
 
 추출 항목:
-  - t1          : 슬라이드 원본 텍스트 (Gemini Vision)
+  - t1          : 슬라이드 원본 텍스트 (OpenAI Vision)
   - t1_structure: 다이어그램/표/화살표 관계 (Stage 3 관계 추출 힌트)
 
 ※ annotation 이미지의 강조 분석은 annotation_analyzer.py에서 별도 처리
@@ -39,9 +39,6 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from PIL import Image
 
-from google.genai import types
-
-from .config import GEMINI_GENERATIVE_MODEL
 from .emphasis_keyword import (
     get_topic_keyword_count_map,
     summarize_topic_keyword_counts_for_text,
@@ -67,9 +64,6 @@ logger = logging.getLogger(__name__)
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("google").setLevel(logging.WARNING)
-logging.getLogger("google.ai.generativelanguage").setLevel(logging.WARNING)
-logging.getLogger("google.genai").setLevel(logging.WARNING)
 
 # ============================================================================ #
 #  설정                                                                         #
@@ -80,15 +74,12 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    provider: str = os.getenv("VERILEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
-    model: str = os.getenv(
-        "VERILEC_SLIDE_TEXTUALIZER_MODEL",
-        os.getenv("VERILEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
-    )
-    gemini_model: str = GEMINI_GENERATIVE_MODEL
+    # T1 textualization is OpenAI-only. Kept for config compatibility.
+    provider: str = "openai"
+    model: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini")
     max_retries: int = 3
     retry_delay: float = 5.0
-    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "1"))
+    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "12"))
     ocr_provider: str = os.getenv("GRAPHLEC_SLIDE_OCR_PROVIDER", "none")
     ocr_model_dir: str = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "")
     ocr_lang: str = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual")
@@ -374,7 +365,7 @@ class SlideLoader:
     def _load_from_metadata(self, metadata_path: Path) -> List[Dict]:
         """
         metadata.json 기준으로 scene별 텍스트 추출 대상을 결정한다.
-        실제 Gemini 호출은 slide_canonical_number 기준으로 캐시 가능하도록
+        실제 OpenAI Vision 호출은 slide_canonical_number 기준으로 캐시 가능하도록
         representative scene 정보를 함께 싣는다.
         """
         with open(metadata_path, encoding="utf-8") as f:
@@ -615,7 +606,7 @@ class SlideLoader:
 
 
 # ============================================================================ #
-#  t1 추출기 (Gemini Vision)                                                    #
+#  t1 추출기 (OpenAI Vision)                                                     #
 # ============================================================================ #
 
 class T1Extractor:
@@ -625,17 +616,11 @@ class T1Extractor:
 
     def __init__(self, config: Config):
         self.config = config
-        self.provider = str(config.provider or "gemini").strip().lower()
-        if self.provider == "openai":
-            from .config import get_openai_client
-            self.client = get_openai_client()
-            if self.client is None:
-                raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
-            logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
-        else:
-            from .config import gemini_client
-            self.client = gemini_client
-            logger.info(f"✓ Gemini initialized for t1 extraction: {self.config.gemini_model}")
+        from .config import get_openai_client
+        self.client = get_openai_client()
+        if self.client is None:
+            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+        logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
 
     @staticmethod
     def _compose_prompt_with_ocr(prompt: str, ocr_hint: str) -> str:
@@ -861,51 +846,6 @@ class T1Extractor:
             )
         return normalized
 
-    def _call_gemini(self, image: Image.Image, base_image: Image.Image = None, ocr_hint: str = "") -> str:
-        """재시도 로직을 포함한 base 이미지 1장 Gemini Vision 호출."""
-        if self.provider == "openai":
-            return self._call_openai(image, base_image=base_image, ocr_hint=ocr_hint)
-
-        template = T1_EXTRACTION_PROMPT_WITH_ANNOT if base_image is not None else T1_BASE_ONLY_EXTRACTION_PROMPT
-        contents = [self._compose_prompt_with_ocr(template, ocr_hint)]
-        if base_image is not None:
-            contents.append(base_image)
-        contents.append(image)
-
-        last_exc = None
-        for attempt in range(self.config.max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=self.config.gemini_model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    )
-                )
-                try:
-                    from .cost_report import record_model_call
-
-                    record_model_call(
-                        stage="stage2a_slide_textualizer",
-                        provider="google",
-                        model=self.config.gemini_model,
-                        response=response,
-                        image_count=2 if base_image is not None else 1,
-                        prompt_chars=len(template),
-                    )
-                except Exception:
-                    pass
-                return response.text
-            except Exception as e:
-                last_exc = e
-                logger.warning(
-                    f"  ⚠ Gemini call failed "
-                    f"(attempt {attempt+1}/{self.config.max_retries}): {e}"
-                )
-                if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay * (attempt + 1))
-        raise last_exc
-
     def extract(self, slide: Dict) -> Dict:
         """단일 base 슬라이드에서 t1과 t1_structure를 추출한다."""
         slide.setdefault("title", f"Slide {slide['slide_number']}")
@@ -936,7 +876,7 @@ class T1Extractor:
         slide["ocr_text"] = ocr_hint
 
         try:
-            raw_text = self._call_gemini(slide["image"], base_image=base_image, ocr_hint=ocr_hint)
+            raw_text = self._call_openai(slide["image"], base_image=base_image, ocr_hint=ocr_hint)
 
             # 코드펜스 제거
             if "```json" in raw_text:
@@ -1082,7 +1022,7 @@ class TextualizationPipeline:
 
         # Stage 2: t1 추출 (텍스트 + 구조)
         print("\n" + "-"*70)
-        print("Stage 2: 텍스트화 (Gemini Vision)")
+        print("Stage 2: 텍스트화 (OpenAI Vision)")
         print("-"*70)
 
         slides = T1Extractor(self.config).extract_batch(slides)
@@ -1216,7 +1156,7 @@ def main():
     parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_DIR),
                         help=f"결과 저장 디렉토리 (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--retries", type=int, default=3,
-                        help="Gemini API 재시도 횟수 (default: 3)")
+                        help="OpenAI API 재시도 횟수 (default: 3)")
 
     args = parser.parse_args()
 

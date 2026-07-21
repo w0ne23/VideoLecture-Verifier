@@ -1374,42 +1374,46 @@ def judge_classified_issues(
                 "batch_errors": [],
             }
 
-        work_items = []
+        work_items_by_model: dict[str, list[tuple]] = {}
         for model in models:
             batches = _chunk_by_slide_and_category(bundles, batch_size)
+            work_items_by_model[model] = []
             for batch_index, batch in enumerate(batches, start=1):
                 category = _batch_category_label(batch)
-                work_items.append((model, category, batch, batch_index, len(batches), current_date, max_tokens))
+                work_items_by_model[model].append((model, category, batch, batch_index, len(batches), current_date, max_tokens))
 
-        if max_workers <= 1:
-            for args in work_items:
-                try:
-                    result = _batch_worker(args)
-                except Exception as exc:
-                    model = args[0]
-                    model_results[model]["status"] = "partial_failed"
-                    model_results[model]["batch_errors"].append({"category": args[1], "batch_index": args[3], "error": str(exc)})
-                    continue
-                model_results[result["model"]]["judgments"].extend(result["judgments"])
-                model_results[result["model"]]["token_usage_by_batch"].append(result["token_usage"])
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # ``max_workers``는 모델별 한도다. 모델마다 별도 pool을 두어 한
+        # 공급자의 느린 요청이 다른 모델의 동시성을 줄이지 않게 한다.
+        def _run_model_batches(model: str, work_items: list[tuple]) -> tuple[str, list[dict[str, Any]], list[tuple[tuple, Exception]]]:
+            completed: list[dict[str, Any]] = []
+            failed: list[tuple[tuple, Exception]] = []
+            with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(work_items)))) as executor:
                 futures = {executor.submit(_batch_worker, args): args for args in work_items}
                 for future in as_completed(futures):
                     args = futures[future]
                     try:
-                        result = future.result()
+                        completed.append(future.result())
                     except Exception as exc:
-                        model = args[0]
-                        model_results[model]["status"] = "partial_failed"
-                        model_results[model]["batch_errors"].append({
-                            "category": args[1],
-                            "batch_index": args[3],
-                            "error": str(exc),
-                        })
-                        continue
+                        failed.append((args, exc))
+            return model, completed, failed
+
+        with ThreadPoolExecutor(max_workers=max(1, len(work_items_by_model))) as model_executor:
+            model_futures = {
+                model_executor.submit(_run_model_batches, model, work_items): model
+                for model, work_items in work_items_by_model.items()
+            }
+            for model_future in as_completed(model_futures):
+                model, completed, failed = model_future.result()
+                for result in completed:
                     model_results[result["model"]]["judgments"].extend(result["judgments"])
                     model_results[result["model"]]["token_usage_by_batch"].append(result["token_usage"])
+                for args, exc in failed:
+                    model_results[model]["status"] = "partial_failed"
+                    model_results[model]["batch_errors"].append({
+                        "category": args[1],
+                        "batch_index": args[3],
+                        "error": str(exc),
+                    })
 
         for result in model_results.values():
             usages = result.pop("token_usage_by_batch", [])

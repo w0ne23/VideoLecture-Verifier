@@ -59,7 +59,7 @@ services:
       GRAPHLEC_VLM_NUM_PREDICT: "512"
       GRAPHLEC_VLM_IMAGE_WIDTH: "768"
       # P2A base slide t1/t1_structure OpenAI requests
-      GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "15"
+      GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "12"
 
       # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
       # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.

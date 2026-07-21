@@ -347,29 +347,18 @@ def _build_extract_prompt(
       "context_id": "S001-SC0001-C001",
       "claim_type": "definition",
       "claim_text": "현재 context에서 직접 가져온 claim 원문",
-      "resolved_claim": "원문 범위를 보존한 최소 정리문",
-      "resolution_status": "preserved",
-      "antecedent_context_ids": [],
-      "context_note": ""
+      "resolved_claim": "원문 범위를 보존한 최소 정리문"
     }}
   ]
 }}
 ```
 
-추가 필드 규칙:
-- `resolution_status`는 반드시 `resolved`, `preserved`, `partial` 중 하나입니다.
-  - `resolved`: 지시어·생략을 문맥상 확실히 풀어 `resolved_claim`을 `claim_text`보다 더 완성된 검증 명제로 만든 경우
-  - `preserved`: `resolved_claim`을 `claim_text`와 동일하게 둔 경우 (미해소 지시어, 애매함, 또는 원문이 이미 완결)
-  - `partial`: 일부만 해소했거나 예시/가정 범위가 아직 불명확한 경우
-- `antecedent_context_ids`: 지시어 선행사·생략 주어 확인에 **실제로 참고한** 다른 context_id 배열. 참고 context가 없으면 `[]`
-- `context_note`: 해석상 주의점(예시 범위, 미해소 지시어, 같은 슬라이드 맥락 등)을 한 문장으로. 특별한 메모가 없으면 `""`
-- `verification_question`은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
-
 지침:
 - 검증 불가능한 주장은 추출하지 마세요.
 - 하나의 context에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
-- resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두고 `resolution_status`는 `preserved`로 두세요.
+- verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
+- resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
 - JSON 외 텍스트를 출력하지 마세요.
 """
@@ -416,72 +405,8 @@ def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
     for _batch, claims in claims_by_batch:
         for claim in claims:
             claim["claim_id"] = f"CL{sequence:04d}"
-            _finalize_claim_fields(claim)
             _order_claim_fields(claim)
             sequence += 1
-
-
-_CLAIM_OUTPUT_FIELDS = frozenset({
-    "context_id",
-    "claim_text",
-    "resolved_claim",
-    "claim_type",
-    "resolution_status",
-    "antecedent_context_ids",
-    "context_note",
-})
-
-_RESOLUTION_STATUSES = frozenset({"resolved", "preserved", "partial"})
-
-
-def _normalize_resolution_status(raw, claim_text: str, resolved_claim: str) -> str:
-    token = str(raw or "").strip().lower()
-    if token in _RESOLUTION_STATUSES:
-        return token
-    if resolved_claim == claim_text:
-        return "preserved"
-    return "resolved"
-
-
-def _normalize_antecedent_context_ids(raw, *, context_id: str) -> list[str]:
-    if isinstance(raw, str) and raw.strip():
-        values = [part.strip() for part in raw.split(",") if part.strip()]
-    elif isinstance(raw, list):
-        values = [str(part).strip() for part in raw if str(part).strip()]
-    else:
-        values = []
-    own_id = str(context_id or "").strip()
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value == own_id or value in seen:
-            continue
-        seen.add(value)
-        deduped.append(value)
-    return deduped
-
-
-def _normalize_context_note(raw) -> str:
-    return str(raw or "").strip()
-
-
-def _finalize_claim_fields(claim: dict) -> None:
-    claim_text = str(claim.get("claim_text") or "").strip()
-    resolved_claim = str(claim.get("resolved_claim") or "").strip() or claim_text
-    context_id = str(claim.get("context_id") or "").strip()
-
-    claim["claim_text"] = claim_text
-    claim["resolved_claim"] = resolved_claim
-    claim["resolution_status"] = _normalize_resolution_status(
-        claim.get("resolution_status"),
-        claim_text,
-        resolved_claim,
-    )
-    claim["antecedent_context_ids"] = _normalize_antecedent_context_ids(
-        claim.get("antecedent_context_ids"),
-        context_id=context_id,
-    )
-    claim["context_note"] = _normalize_context_note(claim.get("context_note"))
 
 
 def _order_claim_fields(claim: dict) -> None:
@@ -491,9 +416,6 @@ def _order_claim_fields(claim: dict) -> None:
         "claim_text",
         "resolved_claim",
         "claim_type",
-        "resolution_status",
-        "antecedent_context_ids",
-        "context_note",
     )
     ordered = {key: claim[key] for key in preferred_keys if key in claim}
     ordered.update({key: value for key, value in claim.items() if key not in ordered})
@@ -617,15 +539,21 @@ def _extract_claims(
                 c["claim_text"] = claim_text
                 c["resolved_claim"] = resolved_claim
                 c.pop("claim_id", None)
-                c.pop("context_ids", None)
+                c["context_ids"] = [str(c.get("context_id") or "")]
+                c.pop("resolution_status", None)
+                c.pop("antecedent_context_ids", None)
+                c.pop("claim_fingerprint", None)
+                c.pop("is_approximate", None)
+                c.pop("context_note", None)
+                c.pop("verification_question", None)
                 c.pop("verificationQuestion", None)
                 cleaned.append(c)
             cleaned = _dedupe_overlapping_claims(cleaned)
             for claim in cleaned:
+                allowed = {"context_id", "claim_text", "resolved_claim", "claim_type"}
                 for key in list(claim.keys()):
-                    if key not in _CLAIM_OUTPUT_FIELDS:
+                    if key not in allowed:
                         claim.pop(key, None)
-                _finalize_claim_fields(claim)
             return cleaned, False, api_calls, token_usage
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             if attempt < cv.VERIFIER_PARSE_RETRIES:

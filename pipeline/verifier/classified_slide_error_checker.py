@@ -694,10 +694,11 @@ def detect_classified_slide_errors(
         for model in models
         for item in [model]
     }
-    work_items: list[tuple[str, dict[str, Any]]] = []
+    work_items_by_model: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for model in models:
+        work_items_by_model[model] = []
         for slide in slides:
-            work_items.append((model, slide))
+            work_items_by_model[model].append((model, slide))
 
     def worker(args: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         model, slide = args
@@ -718,40 +719,29 @@ def detect_classified_slide_errors(
             "token_usage": usage,
         }
 
-    if max_workers <= 1:
-        for args in work_items:
-            try:
-                result = worker(args)
-            except Exception as exc:
-                model_results[args[0]]["status"] = "partial_failed"
-                model_results[args[0]]["batch_errors"].append(
-                    {"slide_number": _slide_number(args[1]), "error": str(exc)}
-                )
-                continue
-            model_results[result["model"]]["slide_errors"].extend(result["slide_errors"])
-            model_results[result["model"]]["api_calls"] += int(result.get("api_calls", 0) or 0)
-            model_results[result["model"]]["token_usage"] = cc._merge_token_usage(
-                model_results[result["model"]].get("token_usage"),
-                result.get("token_usage"),
-            )
-            if result.get("parse_failed"):
-                model_results[result["model"]]["status"] = "partial_failed"
-                model_results[result["model"]]["batch_errors"].append(
-                    {"slide_number": result.get("slide_number"), "error": "json_parse_failed"}
-                )
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # ``max_workers``는 모델별 한도다. 현재 기본은 단일 모델이지만, 다중
+    # 모델 설정에서도 각 모델이 독립적으로 같은 동시성을 사용한다.
+    def _run_model_slides(model: str, work_items: list[tuple[str, dict[str, Any]]]) -> tuple[str, list[dict[str, Any]], list[tuple[tuple[str, dict[str, Any]], Exception]]]:
+        completed: list[dict[str, Any]] = []
+        failed: list[tuple[tuple[str, dict[str, Any]], Exception]] = []
+        with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(work_items)))) as executor:
             futures = {executor.submit(worker, args): args for args in work_items}
             for future in as_completed(futures):
                 args = futures[future]
                 try:
-                    result = future.result()
+                    completed.append(future.result())
                 except Exception as exc:
-                    model_results[args[0]]["status"] = "partial_failed"
-                    model_results[args[0]]["batch_errors"].append(
-                        {"slide_number": _slide_number(args[1]), "error": str(exc)}
-                    )
-                    continue
+                    failed.append((args, exc))
+        return model, completed, failed
+
+    with ThreadPoolExecutor(max_workers=max(1, len(work_items_by_model))) as model_executor:
+        model_futures = {
+            model_executor.submit(_run_model_slides, model, work_items): model
+            for model, work_items in work_items_by_model.items()
+        }
+        for model_future in as_completed(model_futures):
+            model, completed, failed = model_future.result()
+            for result in completed:
                 model_results[result["model"]]["slide_errors"].extend(result["slide_errors"])
                 model_results[result["model"]]["api_calls"] += int(result.get("api_calls", 0) or 0)
                 model_results[result["model"]]["token_usage"] = cc._merge_token_usage(
@@ -763,6 +753,11 @@ def detect_classified_slide_errors(
                     model_results[result["model"]]["batch_errors"].append(
                         {"slide_number": result.get("slide_number"), "error": "json_parse_failed"}
                     )
+            for args, exc in failed:
+                model_results[model]["status"] = "partial_failed"
+                model_results[model]["batch_errors"].append(
+                    {"slide_number": _slide_number(args[1]), "error": str(exc)}
+                )
 
     all_errors: list[dict[str, Any]] = []
     token_usage = Counter()
