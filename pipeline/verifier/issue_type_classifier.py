@@ -192,6 +192,7 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 - resolved_claim만 근거로 판단하세요.
 - 원문 문맥, 슬라이드, 앞뒤 설명을 추정하지 마세요.
 - 이 단계는 issue가 맞는지 최종 판정하는 단계가 아니라, 후속 verifier가 어떤 기준으로 검증해야 하는지 정하는 routing 단계입니다.
+- 입력이 사실상 맞아 보이거나 네 유형에 정확히 들어맞지 않아도 절대 생략하거나 기각하지 마세요. 가장 가까운 후속 검증 경로에 확률을 배분하세요.
 
 중요:
 - 단순히 날짜나 시점 표현이 들어갔다고 temporal_error가 아니다. 제시된 시점에서도 틀린 정의/원리/관계/메커니즘 오류는 factual_error로 본다.
@@ -815,37 +816,69 @@ def _model_worker(args: tuple) -> dict[str, Any]:
 def _batch_worker(args: tuple) -> dict[str, Any]:
     model, batch, batch_index, total_batches, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
-    ids = f"{batch[0]['id']}..{batch[-1]['id']}" if batch else "-"
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES", 2, min_value=0) + 1
     retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC", 10.0, min_value=0.0)
     last_exc: Exception | None = None
+    pending_batch = list(batch)
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    latest_rows_by_id: dict[str, dict[str, Any]] = {}
+    usage_by_attempt: list[dict[str, Any]] = []
     for attempt in range(1, attempts + 1):
         suffix = f" (시도 {attempt}/{attempts})" if attempts > 1 else ""
-        print(f"  [{model}] batch {batch_index}/{total_batches} 요청 중: {ids}{suffix}", flush=True)
+        request_ids = (
+            f"{pending_batch[0]['id']}..{pending_batch[-1]['id']}"
+            if pending_batch else "-"
+        )
+        print(
+            f"  [{model}] batch {batch_index}/{total_batches} 요청 중: "
+            f"{request_ids}{suffix}",
+            flush=True,
+        )
         try:
-            rows, usage = _call_model_for_batch(
+            attempt_rows, attempt_usage = _call_model_for_batch(
                 model=model,
-                batch=batch,
+                batch=pending_batch,
                 current_date=current_date,
                 max_tokens=max_tokens,
             )
-            ok_count = sum(1 for row in rows if row.get("status") == "ok")
-            if ok_count < len(rows) and attempt < attempts:
+            usage_by_attempt.append(attempt_usage)
+            for row in attempt_rows:
+                row_id = str(row.get("id", "") or "")
+                if row_id:
+                    latest_rows_by_id[row_id] = row
+                if row.get("status") == "ok":
+                    rows_by_id[row_id] = row
+            pending_batch = [
+                ref for ref in batch
+                if ref["id"] not in rows_by_id
+            ]
+            if pending_batch and attempt < attempts:
                 last_exc = ValueError(
-                    f"probability vectors parsed {ok_count}/{len(rows)}"
+                    f"probability vectors parsed {len(rows_by_id)}/{len(batch)}"
                 )
+                missing_ids = ", ".join(ref["id"] for ref in pending_batch)
                 print(
                     f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
-                    f"{attempt}/{attempts - 1}: {last_exc}",
+                    f"{attempt}/{attempts - 1}: {last_exc}; "
+                    f"누락 {len(pending_batch)}건만 재요청 ({missing_ids})",
                     flush=True,
                 )
                 if retry_wait:
                     time.sleep(retry_wait)
                 continue
-            if ok_count < len(rows):
-                raise ValueError(
-                    f"probability vectors parsed {ok_count}/{len(rows)} after {attempts} attempts"
+            if pending_batch:
+                missing_details = "; ".join(
+                    f"{ref['id']}: "
+                    f"{latest_rows_by_id.get(ref['id'], {}).get('parse_error') or '응답 누락'}"
+                    for ref in pending_batch
                 )
+                print(
+                    f"    [{model}] batch {batch_index}/{total_batches} 부분 실패 유지: "
+                    f"probability vectors parsed {len(rows_by_id)}/{len(batch)} "
+                    f"after {attempts} attempts; {missing_details}",
+                    flush=True,
+                )
+                break
             break
         except Exception as exc:
             last_exc = exc
@@ -861,6 +894,26 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
     else:
         raise RuntimeError("batch 분류 실패") from last_exc
 
+    rows = []
+    for ref in batch:
+        row = rows_by_id.get(ref["id"]) or latest_rows_by_id.get(ref["id"])
+        if row is None:
+            row = {
+                "id": ref["id"],
+                "model": model,
+                "provider": resolved["provider"],
+                "resolved_model": resolved["resolved_model"],
+                "probabilities": {issue_type: 0.0 for issue_type in ISSUE_TYPES},
+                "top_issue_type": None,
+                "top_issue_type_label": _issue_type_label(None),
+                "top_probability": 0.0,
+                "confidence": 0.0,
+                "reason": "",
+                "status": "parse_failed",
+                "parse_error": "응답 누락",
+            }
+        rows.append(row)
+    usage = _aggregate_token_usage(usage_by_attempt)
     for row in rows:
         row["batch_index"] = batch_index
     ok_count = sum(1 for row in rows if row.get("status") == "ok")

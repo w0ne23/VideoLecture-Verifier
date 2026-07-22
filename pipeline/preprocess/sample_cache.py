@@ -231,10 +231,10 @@ class SampleCacheConfig:
         "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MOTION_MIN_CHANGED_RATIO", 0.01
     )
     person_mask_fixed_min_center_shift_px: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX", 12.0
+        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX", 4.0
     )
     person_mask_fixed_min_area_change_ratio: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO", 0.12
+        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO", 0.08
     )
     person_mask_active_ranges: list[tuple[float, float]] | None = field(default=None, repr=False)
     save_person_mask_previews: bool = False
@@ -730,6 +730,36 @@ def _bbox_motion_metrics(frame_a: np.ndarray, frame_b: np.ndarray, bbox: tuple[i
     b = cv2.cvtColor(frame_b[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
     diff = np.abs(a - b)
     return float(np.mean(diff)), float(np.mean(diff >= 8.0))
+
+
+def _bbox_ring_changed_ratio(
+    frame_a: np.ndarray,
+    frame_b: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> float:
+    """Measure nearby background motion without including the person box."""
+    height, width = frame_a.shape[:2]
+    x1, y1, x2, y2 = bbox
+    box_width = max(1, x2 - x1)
+    box_height = max(1, y2 - y1)
+    pad = max(16, int(round(min(box_width, box_height) * 0.15)))
+    rx1, ry1 = max(0, x1 - pad), max(0, y1 - pad)
+    rx2, ry2 = min(width, x2 + pad), min(height, y2 + pad)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return 0.0
+
+    a = cv2.cvtColor(frame_a[ry1:ry2, rx1:rx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b = cv2.cvtColor(frame_b[ry1:ry2, rx1:rx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    changed = np.abs(a - b) >= 8.0
+    ring = np.ones(changed.shape, dtype=bool)
+    inner_x1, inner_y1 = max(0, x1 - rx1), max(0, y1 - ry1)
+    inner_x2, inner_y2 = min(ring.shape[1], x2 - rx1), min(ring.shape[0], y2 - ry1)
+    if inner_x2 > inner_x1 and inner_y2 > inner_y1:
+        ring[inner_y1:inner_y2, inner_x1:inner_x2] = False
+    ring_pixels = int(np.count_nonzero(ring))
+    if ring_pixels == 0:
+        return 0.0
+    return float(np.count_nonzero(changed & ring) / ring_pixels)
 
 
 def _moving_person_mask(
@@ -1504,17 +1534,13 @@ def _motion_filter_person_boxes(
     boxes_by_frame: list[list[tuple[int, int, int, int]]],
     cfg: SampleCacheConfig,
 ) -> tuple[list[list[tuple[int, int, int, int]]], int]:
-    """Keep tracks only after their *box geometry* proves real movement.
-
-    A fixed presenter, portrait, or false-positive character must not be
-    masked merely because slide pixels behind the box change.  The former
-    implementation compared pixels inside each box, which treated handwriting,
-    slide transitions, and compression noise as person motion.
-    """
+    """Keep tracks after geometry or localized in-box motion proves movement."""
     filtered: list[list[tuple[int, int, int, int]]] = []
     vetoed = 0
     min_center_shift = max(0.0, float(cfg.person_mask_fixed_min_center_shift_px))
     min_area_change = max(0.0, float(cfg.person_mask_fixed_min_area_change_ratio))
+    min_mean_diff = max(0.0, float(cfg.person_mask_fixed_motion_min_mean_diff))
+    min_changed_ratio = max(0.0, float(cfg.person_mask_fixed_motion_min_changed_ratio))
     match_iou = max(0.05, float(cfg.person_mask_match_iou_threshold))
     tracks: list[dict] = []
     max_missing_frames = max(
@@ -1557,14 +1583,35 @@ def _motion_filter_person_boxes(
                 continue
 
             anchor = best_track["anchor"]
+            previous_box = best_track["last"]
+            previous_frame_index = int(best_track["last_seen_frame"])
             ax, ay = center(anchor)
             bx, by = center(bbox)
             center_shift = max(abs(bx - ax), abs(by - ay))
             area_change = abs(area(bbox) - area(anchor)) / area(anchor)
+            motion_box = (
+                min(previous_box[0], bbox[0]),
+                min(previous_box[1], bbox[1]),
+                max(previous_box[2], bbox[2]),
+                max(previous_box[3], bbox[3]),
+            )
+            mean_diff, changed_ratio = _bbox_motion_metrics(
+                frames[previous_frame_index], frames[frame_index], motion_box
+            )
+            ring_changed_ratio = _bbox_ring_changed_ratio(
+                frames[previous_frame_index], frames[frame_index], motion_box
+            )
+            localized_pixel_motion = (
+                mean_diff >= min_mean_diff
+                and changed_ratio >= min_changed_ratio
+                and ring_changed_ratio < max(min_changed_ratio, changed_ratio * 0.65)
+            )
             best_track["last"] = bbox
             best_track["last_seen_frame"] = frame_index
             if not bool(best_track["confirmed"]) and (
-                center_shift >= min_center_shift or area_change >= min_area_change
+                center_shift >= min_center_shift
+                or area_change >= min_area_change
+                or localized_pixel_motion
             ):
                 best_track["confirmed"] = True
                 # Keep a fresh baseline for diagnostics and a future track

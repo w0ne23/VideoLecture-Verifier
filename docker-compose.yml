@@ -61,6 +61,17 @@ services:
       # P2A base slide t1/t1_structure OpenAI requests
       GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "12"
 
+      # Verifier concurrency. Each multi-model stage applies this limit per
+      # model, while the claim extractor and slide checker use it as their
+      # stage worker limit. Host environment values can override the defaults.
+      VERIFIER_STAGE_MAX_WORKERS: "${VERIFIER_STAGE_MAX_WORKERS:-12}"
+      VERIFIER_CLAIM_EXTRACT_MAX_WORKERS: "${VERIFIER_CLAIM_EXTRACT_MAX_WORKERS:-12}"
+      ISSUE_JUDGE_MAX_WORKERS: "${ISSUE_JUDGE_MAX_WORKERS:-12}"
+      ISSUE_TYPE_CLASSIFIER_MAX_WORKERS: "${ISSUE_TYPE_CLASSIFIER_MAX_WORKERS:-12}"
+      CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS: "${CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS:-12}"
+      CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS: "${CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS:-12}"
+      CLASSIFIED_SLIDE_ERROR_MAX_WORKERS: "${CLASSIFIED_SLIDE_ERROR_MAX_WORKERS:-12}"
+
       # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
       # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
       GRAPHLEC_SLIDE_DECODE_BACKEND: auto
@@ -91,8 +102,8 @@ services:
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MIN_BBOX_HEIGHT_RATIO: "0.08"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MAX_BBOX_ASPECT: "1.50"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_DILATE_PX: "48"
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX: "12"
-      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO: "0.12"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX: "4"
+      GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO: "0.08"
       GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC: "0"
       # Keep only two 1.4GB TensorRT execution contexts resident. Other
       # decode chunks queue their person batches until a slot is available.
