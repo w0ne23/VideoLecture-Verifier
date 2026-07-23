@@ -1141,10 +1141,23 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         web_grounding = issue.get("web_grounding") if isinstance(issue.get("web_grounding"), dict) else {}
         grounding_reason = str(web_grounding.get("reason") or "").strip()
         grounding_sources = web_grounding.get("evidence_sources") if isinstance(web_grounding.get("evidence_sources"), list) else []
+        grounding_adjustment = (
+            issue.get("web_grounding_adjustment")
+            if isinstance(issue.get("web_grounding_adjustment"), dict)
+            else {}
+        )
+        grounding_delta = grounding_adjustment.get("delta")
+        grounding_delta_text = ""
+        if isinstance(grounding_delta, (int, float)):
+            grounding_delta_text = f" ({grounding_delta:+.3f})"
         if web_grounding.get("status") == "refutes_issue" and grounding_reason:
-            reason = f"웹 근거로 기각: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
+            reason = f"웹 근거로 점수 감산{grounding_delta_text}: {grounding_reason}" + (
+                f" / 기존 모델 판단: {reason}" if reason else ""
+            )
         elif web_grounding.get("status") == "supports_issue" and grounding_reason:
-            reason = f"웹 근거로 확인: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
+            reason = f"웹 근거로 점수 가산{grounding_delta_text}: {grounding_reason}" + (
+                f" / 기존 모델 판단: {reason}" if reason else ""
+            )
         minimal_fix = next(
             (
                 row.get("minimal_fix", "")
@@ -1260,6 +1273,25 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
     review = [item for item in feedback_items if item.get("status") == "professor_check"]
     rejected = [item for item in feedback_items if item.get("status") == "rejected"]
     breakdown = Counter(item.get("feedback_type") or "unknown" for item in feedback_items)
+    summary = {
+        "total_feedback_count": len(feedback_items),
+        "confirmed_feedback_count": len(confirmed),
+        "review_needed_feedback_count": len(review),
+        "rejected_feedback_count": len(rejected),
+        "breakdown_by_type": dict(breakdown),
+    }
+    source_summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    for key in (
+        "grounded_issue_count",
+        "grounding_status_counts",
+        "web_grounding_adjusted_count",
+        "web_grounding_supports_adjusted_count",
+        "web_grounding_refutes_adjusted_count",
+        "web_grounding_total_score_delta",
+    ):
+        if key in source_summary:
+            summary[key] = source_summary[key]
+
     return {
         "schema_version": "content_verification.v2",
         "mode": "classified_issue_verifier",
@@ -1267,13 +1299,7 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         "models": list((result.get("model_weights") or {}).keys()),
         "verifier_source_models": list((result.get("model_weights") or {}).keys()),
         "verifier_model_weights": result.get("model_weights", {}),
-        "summary": {
-            "total_feedback_count": len(feedback_items),
-            "confirmed_feedback_count": len(confirmed),
-            "review_needed_feedback_count": len(review),
-            "rejected_feedback_count": len(rejected),
-            "breakdown_by_type": dict(breakdown),
-        },
+        "summary": summary,
         "counts": {
             "final_confirmed": len(confirmed),
             "needs_review": len(review),

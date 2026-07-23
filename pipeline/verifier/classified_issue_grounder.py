@@ -2,8 +2,8 @@
 
 This stage runs after ``classified_issue_verifier`` and checks externally
 verifiable factual_error and temporal_error issues with GPT web grounding by default.
-It only grounds surfaced verifier candidates and can lower refuted candidates
-below the rejected threshold.
+It only grounds surfaced verifier candidates and applies a small score delta for
+web-supported or web-refuted issues instead of overriding the verifier decision.
 """
 
 from __future__ import annotations
@@ -119,11 +119,12 @@ def _confirmed_threshold() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.80)
 
 
-def _resurrected_score() -> float:
-    configured = os.getenv("CLASSIFIED_ISSUE_GROUNDING_RESURRECT_SCORE")
-    if configured is not None and str(configured).strip():
-        return _clamp01(configured, _rejected_threshold() + 0.001)
-    return min(_confirmed_threshold() - 0.001, _rejected_threshold() + 0.001)
+def _supports_issue_delta() -> float:
+    return _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_SUPPORTS_DELTA"), 0.10)
+
+
+def _refutes_issue_delta() -> float:
+    return _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_REFUTES_DELTA"), -0.10)
 
 
 def _status_from_score(score: float) -> str:
@@ -1819,28 +1820,43 @@ def _should_ground(issue: dict[str, Any], categories: set[str]) -> bool:
     return True
 
 
+def _clear_grounding_adjustment(issue: dict[str, Any]) -> None:
+    for key in (
+        "pre_grounding_final_severity_score",
+        "pre_grounding_final_severity_percent",
+        "pre_grounding_status",
+        "web_grounding_adjustment",
+        "rejected_by_web_grounding",
+        "resurrected_by_web_grounding",
+        "confirmed_by_web_grounding",
+    ):
+        issue.pop(key, None)
+
+
 def _apply_grounding_decision(issue: dict[str, Any], payload: dict[str, Any]) -> None:
+    _clear_grounding_adjustment(issue)
     if payload.get("status") not in {"refutes_issue", "supports_issue"}:
         return
     original_score = _clamp01(issue.get("final_severity_score"))
+    status = str(payload.get("status") or "")
+    delta = _supports_issue_delta() if status == "supports_issue" else _refutes_issue_delta()
+    adjusted_score = _clamp01(original_score + delta)
     issue["pre_grounding_final_severity_score"] = original_score
     issue["pre_grounding_final_severity_percent"] = round(original_score * 100.0, 2)
     issue["pre_grounding_status"] = _status_from_score(original_score)
-    if payload.get("status") == "refutes_issue":
-        rejected_score = max(0.0, _rejected_threshold() - 0.001)
-        issue["final_severity_score"] = min(original_score, rejected_score)
-        issue["final_severity_percent"] = round(float(issue["final_severity_score"]) * 100.0, 2)
-        issue["needs_manual_review"] = False
-        issue["rejected_by_web_grounding"] = True
-        return
-
-    if original_score <= _rejected_threshold():
-        issue["final_severity_score"] = max(original_score, _resurrected_score())
-        issue["final_severity_percent"] = round(float(issue["final_severity_score"]) * 100.0, 2)
-        issue["needs_manual_review"] = _status_from_score(float(issue["final_severity_score"])) == "professor_check"
-        issue["resurrected_by_web_grounding"] = True
-    else:
-        issue["confirmed_by_web_grounding"] = True
+    issue["final_severity_score"] = adjusted_score
+    issue["final_severity_percent"] = round(adjusted_score * 100.0, 2)
+    issue["needs_manual_review"] = _status_from_score(adjusted_score) == "professor_check"
+    issue["web_grounding_adjustment"] = {
+        "mode": "soft_delta",
+        "status": status,
+        "delta": round(adjusted_score - original_score, 6),
+        "configured_delta": delta,
+        "pre_score": original_score,
+        "post_score": adjusted_score,
+        "pre_status": issue["pre_grounding_status"],
+        "post_status": _status_from_score(adjusted_score),
+    }
 
 
 def _refresh_summary(verifier_result: dict[str, Any]) -> None:
@@ -1854,12 +1870,24 @@ def _refresh_summary(verifier_result: dict[str, Any]) -> None:
     summary["needs_manual_review_count"] = sum(
         1 for issue in issues if isinstance(issue, dict) and bool(issue.get("needs_manual_review"))
     )
-    summary["web_grounding_rejected_count"] = sum(
-        1 for issue in issues if isinstance(issue, dict) and bool(issue.get("rejected_by_web_grounding"))
+    adjustments = [
+        issue.get("web_grounding_adjustment")
+        for issue in issues
+        if isinstance(issue, dict) and isinstance(issue.get("web_grounding_adjustment"), dict)
+    ]
+    summary["web_grounding_adjusted_count"] = len(adjustments)
+    summary["web_grounding_supports_adjusted_count"] = sum(
+        1 for adjustment in adjustments if adjustment.get("status") == "supports_issue"
     )
-    summary["web_grounding_resurrected_count"] = sum(
-        1 for issue in issues if isinstance(issue, dict) and bool(issue.get("resurrected_by_web_grounding"))
+    summary["web_grounding_refutes_adjusted_count"] = sum(
+        1 for adjustment in adjustments if adjustment.get("status") == "refutes_issue"
     )
+    summary["web_grounding_total_score_delta"] = round(
+        sum(_safe_float(adjustment.get("delta")) for adjustment in adjustments),
+        6,
+    )
+    summary.pop("web_grounding_rejected_count", None)
+    summary.pop("web_grounding_resurrected_count", None)
 
 
 def ground_classified_issues(
@@ -1952,6 +1980,7 @@ def ground_classified_issues(
     for issue in issues:
         if not isinstance(issue, dict):
             continue
+        _clear_grounding_adjustment(issue)
         issue_id = str(issue.get("id") or issue.get("issue_id") or "")
         payload = by_id.get(issue_id)
         if payload:
