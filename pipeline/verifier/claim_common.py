@@ -740,6 +740,7 @@ ISSUE_TYPE_LABELS = {
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
     "confusing_explanation": "혼동 가능 설명",
+    "composite_issue": "복합 오류",
 }
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
 VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES", "1"))

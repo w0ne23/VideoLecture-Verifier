@@ -1,11 +1,10 @@
 from pipeline.verifier.classified_issue_verifier import (
-    ISSUE_TYPES,
-    _ambiguous_candidate_categories,
-    _merge_ambiguous_verification,
+    _composite_candidate_categories,
+    _merge_composite_verification,
 )
 
 
-def test_ambiguous_candidate_categories_low_margin_top_two():
+def test_composite_candidate_categories_low_margin_top_two():
     issue = {
         "routing_reasons": ["low_margin"],
         "weighted_scores": {
@@ -14,10 +13,10 @@ def test_ambiguous_candidate_categories_low_margin_top_two():
             "temporal_error": 0.27,
         },
     }
-    assert _ambiguous_candidate_categories(issue) == ["scope_overclaim", "factual_error"]
+    assert _composite_candidate_categories(issue) == ["scope_overclaim", "factual_error"]
 
 
-def test_ambiguous_candidate_categories_model_disagreement_union():
+def test_composite_candidate_categories_model_disagreement_union():
     issue = {
         "routing_reasons": ["model_disagreement"],
         "model_classifications": [
@@ -26,10 +25,10 @@ def test_ambiguous_candidate_categories_model_disagreement_union():
             {"model": "grok", "top_issue_type": "temporal_error"},
         ],
     }
-    assert _ambiguous_candidate_categories(issue) == list(ISSUE_TYPES)
+    assert _composite_candidate_categories(issue) == ["temporal_error", "scope_overclaim", "factual_error"]
 
 
-def test_merge_ambiguous_verification_picks_highest_score():
+def test_merge_composite_verification_picks_highest_score():
     ref = {
         "id": "I0001",
         "issue": {
@@ -37,7 +36,7 @@ def test_merge_ambiguous_verification_picks_highest_score():
             "weighted_scores": {"factual_error": 0.4, "scope_overclaim": 0.35, "temporal_error": 0.25},
         },
     }
-    merged = _merge_ambiguous_verification(
+    merged = _merge_composite_verification(
         ref,
         ["factual_error", "scope_overclaim"],
         {
@@ -56,5 +55,5 @@ def test_merge_ambiguous_verification_picks_highest_score():
         },
     )
     assert merged["selected_issue_type"] == "scope_overclaim"
-    assert merged["selected_from_ambiguous"] is True
+    assert merged["selected_from_composite"] is True
     assert set(merged["candidate_verifications"].keys()) == {"factual_error", "scope_overclaim"}

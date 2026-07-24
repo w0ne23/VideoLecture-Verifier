@@ -15,21 +15,21 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "issue_types.v2"
+SCHEMA_VERSION = "issue_types.v3"
 DEFAULT_MODELS = (
     "gpt",
     "claude",
     "grok",
 )
-# LLM이 확률을 내는 4유형. ambiguous_issue는 별도 routing 결과로 유지한다.
+# LLM이 확률을 내는 4유형. composite_issue는 별도 routing 결과로 유지한다.
 ISSUE_TYPES = (
     "temporal_error",
     "scope_overclaim",
     "factual_error",
     "confusing_explanation",
 )
-AMBIGUOUS_ISSUE_TYPE = "ambiguous_issue"
-ALL_ISSUE_TYPES = ISSUE_TYPES + (AMBIGUOUS_ISSUE_TYPE,)
+COMPOSITE_ISSUE_TYPE = "composite_issue"
+ALL_ISSUE_TYPES = ISSUE_TYPES + (COMPOSITE_ISSUE_TYPE,)
 DEFAULT_LIST_KEYS = ("issues",)
 DEFAULT_MODEL_WEIGHTS = {
     "gpt": 0.4,
@@ -47,7 +47,7 @@ ISSUE_TYPE_LABELS = {
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
     "confusing_explanation": "혼동 가능 설명",
-    AMBIGUOUS_ISSUE_TYPE: "분류 불명확",
+    COMPOSITE_ISSUE_TYPE: "복합 오류",
 }
 ISSUE_TYPE_SHORT_LABELS = {
     "factual_error": "factual",
@@ -1035,7 +1035,7 @@ def _all_models_disagree(verdicts: list[dict[str, Any]], *, expected_model_count
     return len(tops) >= expected_model_count and len(set(tops)) == expected_model_count
 
 
-def _apply_ambiguous_routing(
+def _apply_composite_routing(
     *,
     provisional_type: str | None,
     low_margin: bool,
@@ -1048,7 +1048,7 @@ def _apply_ambiguous_routing(
     if _all_models_disagree(verdicts, expected_model_count=expected_model_count):
         reasons.append("model_disagreement")
     if reasons and provisional_type:
-        return AMBIGUOUS_ISSUE_TYPE, reasons
+        return COMPOSITE_ISSUE_TYPE, reasons
     return provisional_type, reasons
 
 
@@ -1106,7 +1106,7 @@ def _classification_record(
         low_margin,
         margin,
     ) = _choose_final_type(verdicts, model_weights, low_margin_threshold)
-    final_type, routing_reasons = _apply_ambiguous_routing(
+    final_type, routing_reasons = _apply_composite_routing(
         provisional_type=provisional_type,
         low_margin=low_margin,
         verdicts=verdicts,
@@ -1136,7 +1136,7 @@ def _classification_record(
         "low_margin": bool(provisional_type and low_margin),
         "margin": margin,
         "routing_reasons": routing_reasons,
-        "routed_to_ambiguous": final_type == AMBIGUOUS_ISSUE_TYPE,
+        "routed_to_composite": final_type == COMPOSITE_ISSUE_TYPE,
         "model_count": len(verdicts),
         "model_classifications": verdicts,
     }
@@ -1154,7 +1154,7 @@ def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
             "issue": record.get("issue"),
             "ensemble_confidence": record.get("ensemble_confidence"),
             "routing_reasons": record.get("routing_reasons", []),
-            "routed_to_ambiguous": bool(record.get("routed_to_ambiguous")),
+            "routed_to_composite": bool(record.get("routed_to_composite")),
             "low_margin": record.get("low_margin", False),
             "margin": record.get("margin", 0.0),
         }
@@ -1190,8 +1190,8 @@ def _print_classification_score_report(records: list[dict[str, Any]]) -> None:
         ensemble = float(record.get("ensemble_confidence", 0.0) or 0.0)
         margin = float(record.get("margin", 0.0) or 0.0)
         flags = []
-        if record.get("routed_to_ambiguous"):
-            flags.append("ambiguous")
+        if record.get("routed_to_composite"):
+            flags.append("composite")
         if record.get("low_margin"):
             flags.append("low_margin")
         if record.get("routing_reasons"):
@@ -1252,7 +1252,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "weighted_scores": record.get("weighted_scores", {}),
         "ensemble_confidence": record.get("ensemble_confidence", 0.0),
         "routing_reasons": record.get("routing_reasons", []),
-        "routed_to_ambiguous": bool(record.get("routed_to_ambiguous")),
+        "routed_to_composite": bool(record.get("routed_to_composite")),
         "low_margin": bool(record.get("low_margin")),
         "margin": record.get("margin", 0.0),
         "model_classifications": _compact_model_classifications(record.get("model_classifications") or []),
@@ -1281,7 +1281,7 @@ def build_next_stage_input(result: dict[str, Any], *, classification_path: str |
 
     summary = result.get("summary") or {}
     return {
-        "schema_version": "classified_issue_input.v1",
+        "schema_version": "classified_issue_input.v2",
         "source_classification_path": str(classification_path),
         "source_issue_path": result.get("input_path", ""),
         "generated_at": _now_iso(),
@@ -1290,7 +1290,7 @@ def build_next_stage_input(result: dict[str, Any], *, classification_path: str |
             "input_issue_count": summary.get("input_issue_count", 0),
             "breakdown_by_type": summary.get("breakdown_by_type", {}),
             "low_margin_count": summary.get("low_margin_count", 0),
-            "ambiguous_count": summary.get("ambiguous_count", 0),
+            "composite_count": summary.get("composite_count", 0),
             "routing_reason_breakdown": summary.get("routing_reason_breakdown", {}),
             "unclassified_count": len(unclassified),
         },
@@ -1497,8 +1497,8 @@ def classify_issues(
     failed_models = [model for model, row in model_results.items() if row.get("status") == "failed"]
     model_type_breakdown = _model_breakdown(model_results)
     low_margin_count = sum(1 for record in records if record.get("low_margin"))
-    ambiguous_count = sum(1 for record in records if record.get("final_issue_type") == AMBIGUOUS_ISSUE_TYPE)
-    routed_to_ambiguous_count = sum(1 for record in records if record.get("routed_to_ambiguous"))
+    composite_count = sum(1 for record in records if record.get("final_issue_type") == COMPOSITE_ISSUE_TYPE)
+    routed_to_composite_count = sum(1 for record in records if record.get("routed_to_composite"))
     routing_reason_breakdown = Counter(
         reason
         for record in records
@@ -1528,8 +1528,8 @@ def classify_issues(
             "failed_models": failed_models,
             "breakdown_by_type": dict(type_counts),
             "low_margin_count": low_margin_count,
-            "ambiguous_count": ambiguous_count,
-            "routed_to_ambiguous_count": routed_to_ambiguous_count,
+            "composite_count": composite_count,
+            "routed_to_composite_count": routed_to_composite_count,
             "routing_reason_breakdown": dict(routing_reason_breakdown),
             "model_breakdown_by_type": model_type_breakdown,
         },
@@ -1555,7 +1555,7 @@ def _default_next_input_path(output_path: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Classify issue-judge selected issues into 4 issue types with ambiguous routing.",
+        description="Classify issue-judge selected issues into 4 issue types with composite routing.",
     )
     parser.add_argument("input_json", help="verifier issue judge JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
@@ -1685,9 +1685,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"실패 모델: {', '.join(summary['failed_models'])}")
     print(f"유형별 분포: {json.dumps(summary['breakdown_by_type'], ensure_ascii=False)}")
     print(f"low_margin: {summary.get('low_margin_count', 0)}건")
-    print(f"ambiguous: {summary.get('ambiguous_count', 0)}건")
+    print(f"composite: {summary.get('composite_count', 0)}건")
     if summary.get("routing_reason_breakdown"):
-        print(f"ambiguous 사유: {json.dumps(summary['routing_reason_breakdown'], ensure_ascii=False)}")
+        print(f"composite 사유: {json.dumps(summary['routing_reason_breakdown'], ensure_ascii=False)}")
     print("모델별 판정 갯수:")
     for model, breakdown in (summary.get("model_breakdown_by_type") or {}).items():
         counts = breakdown.get("breakdown_by_type", {})
