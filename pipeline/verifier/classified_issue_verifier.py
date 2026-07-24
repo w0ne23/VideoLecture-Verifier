@@ -1,6 +1,6 @@
 """Final verifier for classified issue candidates.
 
-This module consumes ``classified_issue_input.v1`` produced by
+This module consumes ``classified_issue_input.v2`` produced by
 ``issue_type_classifier.py`` and runs a category-specific final verifier over each
 already-classified issue.
 """
@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from .issue_type_classifier import (
-    AMBIGUOUS_ISSUE_TYPE,
+    ALL_ISSUE_TYPES,
+    COMPOSITE_ISSUE_TYPE,
     ISSUE_TYPES,
     TOKEN_USAGE_FIELDS,
     _aggregate_token_usage,
@@ -30,7 +31,7 @@ from .issue_type_classifier import (
 )
 
 
-SCHEMA_VERSION = "classified_issue_verifier.v1"
+SCHEMA_VERSION = "classified_issue_verifier.v3"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 5
@@ -50,6 +51,7 @@ CATEGORY_LABELS = {
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
     "confusing_explanation": "혼동 가능 설명",
+    COMPOSITE_ISSUE_TYPE: "복합 오류",
 }
 
 
@@ -278,10 +280,10 @@ def _flatten_issues(
     limit: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     standard_refs: list[dict[str, Any]] = []
-    ambiguous_refs: list[dict[str, Any]] = []
+    composite_refs: list[dict[str, Any]] = []
     issues_by_type = payload.get("issues_by_type") or {}
     if not isinstance(issues_by_type, dict):
-        return standard_refs, ambiguous_refs
+        return standard_refs, composite_refs
     for category in ISSUE_TYPES:
         rows = issues_by_type.get(category) or []
         if not isinstance(rows, list):
@@ -296,25 +298,25 @@ def _flatten_issues(
                 "index": index,
                 "issue": issue,
             })
-    ambiguous_rows = issues_by_type.get(AMBIGUOUS_ISSUE_TYPE) or []
-    if isinstance(ambiguous_rows, list):
-        for index, issue in enumerate(ambiguous_rows):
+    composite_rows = issues_by_type.get(COMPOSITE_ISSUE_TYPE) or []
+    if isinstance(composite_rows, list):
+        for index, issue in enumerate(composite_rows):
             if not isinstance(issue, dict):
                 continue
-            ambiguous_refs.append({
-                "id": str(issue.get("issue_id") or f"{AMBIGUOUS_ISSUE_TYPE}:{index + 1}"),
-                "category": AMBIGUOUS_ISSUE_TYPE,
-                "category_label": "분류 불명확",
+            composite_refs.append({
+                "id": str(issue.get("issue_id") or f"{COMPOSITE_ISSUE_TYPE}:{index + 1}"),
+                "category": COMPOSITE_ISSUE_TYPE,
+                "category_label": "복합 오류",
                 "index": index,
                 "issue": issue,
             })
     if limit is not None:
         cap = max(0, limit)
-        return standard_refs[:cap], ambiguous_refs[: max(0, cap - len(standard_refs))]
-    return standard_refs, ambiguous_refs
+        return standard_refs[:cap], composite_refs[: max(0, cap - len(standard_refs))]
+    return standard_refs, composite_refs
 
 
-def _ambiguous_candidate_categories(issue: dict[str, Any]) -> list[str]:
+def _composite_candidate_categories(issue: dict[str, Any]) -> list[str]:
     reasons = set(issue.get("routing_reasons") or [])
     candidates: set[str] = set()
     weighted_scores = issue.get("weighted_scores") or {}
@@ -348,6 +350,46 @@ def _candidate_bundle_id(base_id: str, category: str) -> str:
     return f"{base_id}::{category}"
 
 
+def _composite_category_label(candidate_categories: list[str]) -> str:
+    labels = [
+        CATEGORY_LABELS.get(category, category)
+        for category in candidate_categories
+        if category in ISSUE_TYPES
+    ]
+    if not labels:
+        return CATEGORY_LABELS[COMPOSITE_ISSUE_TYPE]
+    return f"{CATEGORY_LABELS[COMPOSITE_ISSUE_TYPE]}({', '.join(labels)})"
+
+
+def _normalized_composite_probabilities(
+    candidate_categories: list[str],
+    weighted_scores: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, float]]:
+    raw = {
+        category: _clamp01(weighted_scores.get(category))
+        for category in candidate_categories
+        if category in ISSUE_TYPES
+    }
+    if not raw:
+        return {}, {}
+
+    total = sum(raw.values())
+    if total <= 0.0:
+        equal = round(1.0 / len(raw), 6)
+        normalized = {category: equal for category in raw}
+    else:
+        normalized = {
+            category: round(value / total, 6)
+            for category, value in raw.items()
+        }
+
+    categories = list(normalized)
+    if categories:
+        previous_sum = sum(normalized[category] for category in categories[:-1])
+        normalized[categories[-1]] = round(max(0.0, 1.0 - previous_sum), 6)
+    return raw, normalized
+
+
 def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
     return {
         "id": _candidate_bundle_id(ref["id"], category),
@@ -355,42 +397,79 @@ def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
         "category_label": CATEGORY_LABELS.get(category, category),
         "index": ref.get("index"),
         "issue": ref["issue"],
-        "ambiguous_base_id": ref["id"],
+        "composite_base_id": ref["id"],
     }
 
 
-def _merge_ambiguous_verification(
+def _merge_composite_verification(
     ref: dict[str, Any],
     candidate_categories: list[str],
     candidate_records: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    selected_category = max(
+    candidate_categories = [
+        category
+        for category in candidate_categories
+        if category in ISSUE_TYPES and category in candidate_records
+    ]
+    if not candidate_categories:
+        raise ValueError(f"composite issue {ref.get('id', '')} has no candidate verification records")
+    issue = ref["issue"]
+    raw_probabilities, normalized_probabilities = _normalized_composite_probabilities(
+        candidate_categories,
+        issue.get("weighted_scores") or {},
+    )
+    candidate_scores = {
+        category: _clamp01(candidate_records[category].get("final_severity_score"))
+        for category in candidate_categories
+    }
+    candidate_contributions = {
+        category: round(normalized_probabilities.get(category, 0.0) * candidate_scores.get(category, 0.0), 6)
+        for category in candidate_categories
+    }
+    final_score = round(sum(candidate_contributions.values()), 6)
+    primary_category = max(
         candidate_categories,
         key=lambda category: (
-            float(candidate_records[category].get("final_severity_score") or 0.0),
+            candidate_contributions.get(category, 0.0),
+            candidate_scores.get(category, 0.0),
+            normalized_probabilities.get(category, 0.0),
             -ISSUE_TYPES.index(category),
         ),
     )
-    selected = dict(candidate_records[selected_category])
-    issue = ref["issue"]
+    selected = dict(candidate_records[primary_category])
+    composite_label = _composite_category_label(candidate_categories)
+    final_status = _status_from_severity(final_score)
     selected.update({
-        "original_final_issue_type": AMBIGUOUS_ISSUE_TYPE,
-        "original_final_issue_type_label": "분류 불명확",
+        "original_final_issue_type": COMPOSITE_ISSUE_TYPE,
+        "original_final_issue_type_label": "복합 오류",
         "routing_reasons": issue.get("routing_reasons", []),
-        "ambiguous_candidate_categories": list(candidate_categories),
+        "composite_candidate_categories": list(candidate_categories),
         "candidate_verifications": dict(candidate_records),
-        "selected_issue_type": selected_category,
-        "selected_issue_type_label": CATEGORY_LABELS.get(selected_category, selected_category),
-        "selected_from_ambiguous": True,
-        "category": selected_category,
-        "category_label": CATEGORY_LABELS.get(selected_category, selected_category),
+        "primary_issue_type": primary_category,
+        "primary_issue_type_label": CATEGORY_LABELS.get(primary_category, primary_category),
+        "scored_as_composite": True,
+        "composite_scoring": {
+            "method": "weighted_expected_severity",
+            "raw_probabilities": raw_probabilities,
+            "normalized_probabilities": normalized_probabilities,
+            "candidate_scores": candidate_scores,
+            "candidate_contributions": candidate_contributions,
+            "weighted_score": final_score,
+            "primary_issue_type": primary_category,
+            "primary_issue_type_label": CATEGORY_LABELS.get(primary_category, primary_category),
+        },
+        "category": COMPOSITE_ISSUE_TYPE,
+        "category_label": composite_label,
+        "final_severity_score": final_score,
+        "final_severity_percent": round(final_score * 100.0, 2),
+        "needs_manual_review": final_status == "professor_check",
         "id": ref["id"],
     })
     previous = dict(selected.get("previous_classification") or {})
     previous.update({
-        "final_issue_type": issue.get("final_issue_type", AMBIGUOUS_ISSUE_TYPE),
+        "final_issue_type": issue.get("final_issue_type", COMPOSITE_ISSUE_TYPE),
         "routing_reasons": issue.get("routing_reasons", []),
-        "routed_to_ambiguous": True,
+        "routed_to_composite": True,
         "weighted_scores": issue.get("weighted_scores", {}),
         "ensemble_confidence": issue.get("ensemble_confidence", 0.0),
         "low_margin": bool(issue.get("low_margin")),
@@ -659,6 +738,8 @@ def _response_contract() -> str:
 공통 출력 규칙:
 - is_valid_issue, category_severity, context_resolution은 0.0 이상 1.0 이하 숫자입니다.
 - context_resolution은 문맥이 issue를 해소하는 정도입니다. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨입니다.
+- reason과 minimal_fix는 반드시 한국어로 작성하세요. 영어 원문 용어, API 이름, 공식 문서 표현이 필요하면 한국어 설명 뒤 괄호 안에만 짧게 병기하세요.
+- judgment 같은 enum 값과 JSON key 이름은 지정된 영어 값을 그대로 사용하세요.
 - 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_resolution을 높게 주세요."""
 
 
@@ -720,6 +801,8 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
 - 응답은 JSON 객체 하나만 출력하세요.
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
+- reason과 minimal_fix는 반드시 한국어로 작성하세요. 판단 과정에서 영어 자료나 영어 개념어를 사용해도 되지만, 설명 문장은 한국어로 쓰고 필요한 영어 원문/API명/전문용어만 괄호 안에 짧게 병기하세요.
+- JSON key 이름과 judgment enum 값(valid_issue, partially_resolved, not_issue, insufficient_context)은 영어 그대로 유지하세요.
 - reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
 - 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
@@ -1044,7 +1127,7 @@ def _issue_result_record(
 
 
 def _group_issue_results(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped = {category: [] for category in ISSUE_TYPES}
+    grouped = {category: [] for category in ALL_ISSUE_TYPES}
     for record in records:
         category = record.get("category")
         if category in grouped:
@@ -1068,8 +1151,8 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
     )
     return {
         "total_issue_count": len(records),
-        "breakdown_by_type": {category: by_type.get(category, 0) for category in ISSUE_TYPES},
-        "ambiguous_resolved_count": sum(1 for record in records if record.get("selected_from_ambiguous")),
+        "breakdown_by_type": {category: by_type.get(category, 0) for category in ALL_ISSUE_TYPES},
+        "composite_resolved_count": sum(1 for record in records if record.get("scored_as_composite")),
         "high_severity_count": high_count,
         "needs_manual_review_count": manual_review_count,
         "model_breakdown": {
@@ -1141,10 +1224,23 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         web_grounding = issue.get("web_grounding") if isinstance(issue.get("web_grounding"), dict) else {}
         grounding_reason = str(web_grounding.get("reason") or "").strip()
         grounding_sources = web_grounding.get("evidence_sources") if isinstance(web_grounding.get("evidence_sources"), list) else []
+        grounding_adjustment = (
+            issue.get("web_grounding_adjustment")
+            if isinstance(issue.get("web_grounding_adjustment"), dict)
+            else {}
+        )
+        grounding_delta = grounding_adjustment.get("delta")
+        grounding_delta_text = ""
+        if isinstance(grounding_delta, (int, float)):
+            grounding_delta_text = f" ({grounding_delta:+.3f})"
         if web_grounding.get("status") == "refutes_issue" and grounding_reason:
-            reason = f"웹 근거로 기각: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
+            reason = f"웹 근거로 점수 감산{grounding_delta_text}: {grounding_reason}" + (
+                f" / 기존 모델 판단: {reason}" if reason else ""
+            )
         elif web_grounding.get("status") == "supports_issue" and grounding_reason:
-            reason = f"웹 근거로 확인: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
+            reason = f"웹 근거로 점수 가산{grounding_delta_text}: {grounding_reason}" + (
+                f" / 기존 모델 판단: {reason}" if reason else ""
+            )
         minimal_fix = next(
             (
                 row.get("minimal_fix", "")
@@ -1239,27 +1335,47 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "average_category_severity",
                 0.0,
             )
-        if issue.get("selected_from_ambiguous"):
-            feedback_items[-1]["classified_issue_verifier"]["selected_from_ambiguous"] = True
+        if issue.get("scored_as_composite"):
+            feedback_items[-1]["classified_issue_verifier"]["scored_as_composite"] = True
             feedback_items[-1]["classified_issue_verifier"]["original_final_issue_type"] = issue.get(
                 "original_final_issue_type",
-                AMBIGUOUS_ISSUE_TYPE,
+                COMPOSITE_ISSUE_TYPE,
             )
             feedback_items[-1]["classified_issue_verifier"]["routing_reasons"] = issue.get("routing_reasons", [])
-            feedback_items[-1]["classified_issue_verifier"]["ambiguous_candidate_categories"] = issue.get(
-                "ambiguous_candidate_categories",
+            feedback_items[-1]["classified_issue_verifier"]["composite_candidate_categories"] = issue.get(
+                "composite_candidate_categories",
                 [],
             )
             feedback_items[-1]["classified_issue_verifier"]["candidate_verifications"] = issue.get(
                 "candidate_verifications",
                 {},
             )
-            feedback_items[-1]["classified_issue_verifier"]["selected_issue_type"] = issue.get("selected_issue_type", "")
+            feedback_items[-1]["classified_issue_verifier"]["primary_issue_type"] = issue.get("primary_issue_type", "")
+            feedback_items[-1]["classified_issue_verifier"]["composite_scoring"] = issue.get("composite_scoring", {})
 
     confirmed = [item for item in feedback_items if item.get("status") == "confirmed"]
     review = [item for item in feedback_items if item.get("status") == "professor_check"]
     rejected = [item for item in feedback_items if item.get("status") == "rejected"]
     breakdown = Counter(item.get("feedback_type") or "unknown" for item in feedback_items)
+    summary = {
+        "total_feedback_count": len(feedback_items),
+        "confirmed_feedback_count": len(confirmed),
+        "review_needed_feedback_count": len(review),
+        "rejected_feedback_count": len(rejected),
+        "breakdown_by_type": dict(breakdown),
+    }
+    source_summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    for key in (
+        "grounded_issue_count",
+        "grounding_status_counts",
+        "web_grounding_adjusted_count",
+        "web_grounding_supports_adjusted_count",
+        "web_grounding_refutes_adjusted_count",
+        "web_grounding_total_score_delta",
+    ):
+        if key in source_summary:
+            summary[key] = source_summary[key]
+
     return {
         "schema_version": "content_verification.v2",
         "mode": "classified_issue_verifier",
@@ -1267,13 +1383,7 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         "models": list((result.get("model_weights") or {}).keys()),
         "verifier_source_models": list((result.get("model_weights") or {}).keys()),
         "verifier_model_weights": result.get("model_weights", {}),
-        "summary": {
-            "total_feedback_count": len(feedback_items),
-            "confirmed_feedback_count": len(confirmed),
-            "review_needed_feedback_count": len(review),
-            "rejected_feedback_count": len(rejected),
-            "breakdown_by_type": dict(breakdown),
-        },
+        "summary": summary,
         "counts": {
             "final_confirmed": len(confirmed),
             "needs_review": len(review),
@@ -1315,7 +1425,7 @@ def judge_classified_issues(
     model_weights_spec: str | None = None,
 ) -> dict[str, Any]:
     _load_env()
-    standard_refs, ambiguous_refs = _flatten_issues(payload, limit=limit)
+    standard_refs, composite_refs = _flatten_issues(payload, limit=limit)
     merged_payload = _load_json(merged_clean_path)
     slide_lookup = _build_slide_lookup(merged_payload)
     context_by_id, contexts_by_slide = _build_context_lookup(merged_payload)
@@ -1337,20 +1447,20 @@ def judge_classified_issues(
         ]
 
     standard_bundles = _make_bundles(standard_refs)
-    ambiguous_plans: list[tuple[dict[str, Any], list[str], list[dict[str, Any]]]] = []
-    ambiguous_candidate_bundles: list[dict[str, Any]] = []
-    for ref in ambiguous_refs:
-        candidate_categories = _ambiguous_candidate_categories(ref["issue"])
+    composite_plans: list[tuple[dict[str, Any], list[str], list[dict[str, Any]]]] = []
+    composite_candidate_bundles: list[dict[str, Any]] = []
+    for ref in composite_refs:
+        candidate_categories = _composite_candidate_categories(ref["issue"])
         candidate_refs = [_build_candidate_ref(ref, category) for category in candidate_categories]
         candidate_bundles = _make_bundles(candidate_refs)
-        ambiguous_plans.append((ref, candidate_categories, candidate_bundles))
-        ambiguous_candidate_bundles.extend(candidate_bundles)
+        composite_plans.append((ref, candidate_categories, candidate_bundles))
+        composite_candidate_bundles.extend(candidate_bundles)
 
-    bundles = standard_bundles + ambiguous_candidate_bundles
-    if ambiguous_refs:
+    bundles = standard_bundles + composite_candidate_bundles
+    if composite_refs:
         print(
-            f"  ambiguous issue {len(ambiguous_refs)}건 → "
-            f"후보 검증 {len(ambiguous_candidate_bundles)}건",
+            f"  composite issue {len(composite_refs)}건 → "
+            f"후보 검증 {len(composite_candidate_bundles)}건",
             flush=True,
         )
 
@@ -1429,7 +1539,7 @@ def judge_classified_issues(
         _issue_result_record(bundle, verdicts_by_id.get(bundle["id"], []), model_weights=model_weights)
         for bundle in standard_bundles
     ]
-    for ref, candidate_categories, candidate_bundles in ambiguous_plans:
+    for ref, candidate_categories, candidate_bundles in composite_plans:
         candidate_records = {
             bundle["category"]: _issue_result_record(
                 bundle,
@@ -1438,7 +1548,7 @@ def judge_classified_issues(
             )
             for bundle in candidate_bundles
         }
-        records.append(_merge_ambiguous_verification(ref, candidate_categories, candidate_records))
+        records.append(_merge_composite_verification(ref, candidate_categories, candidate_records))
     grouped = _group_issue_results(records)
     token_usage = Counter()
     for result in model_results.values():
@@ -1457,7 +1567,7 @@ def judge_classified_issues(
         "slide_classified_path": str(slide_classified_path or ""),
         "generated_at": _now_iso(),
         "current_date": current_date,
-        "categories": {category: CATEGORY_LABELS.get(category, category) for category in ISSUE_TYPES},
+        "categories": {category: CATEGORY_LABELS.get(category, category) for category in ALL_ISSUE_TYPES},
         "model_weights": model_weights,
         "summary": _summary(records, model_results),
         "issues_by_type": grouped,
@@ -1491,7 +1601,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the category-specific final verifier over classified issues.",
     )
-    parser.add_argument("input_json", help="classified_issue_input.v1 JSON path")
+    parser.add_argument("input_json", help="classified_issue_input.v2 JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
     parser.add_argument("--merged-clean", help="merged_clean JSON path")
     parser.add_argument("--slide-textualized", help="slide_textualized JSON path")
