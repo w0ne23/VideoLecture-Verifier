@@ -212,6 +212,55 @@ def _attach_slide_image_urls(items: list[dict[str, Any]]) -> list[dict[str, Any]
     return enriched
 
 
+def _filter_feedback_by_status(items: list[dict[str, Any]], status: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in items
+        if isinstance(item, dict) and str(item.get('status') or '') == status
+    ]
+
+
+def _restore_feedback_display_aliases(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild legacy UI aliases removed from the stored verifier JSON."""
+    restored: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            restored.append(item)
+            continue
+        row = dict(item)
+        problem = dict(row.get('problem') or {})
+        feedback = dict(row.get('professor_feedback') or {})
+        evidence = dict(row.get('evidence') or {})
+
+        summary = problem.get('summary') or feedback.get('summary') or ''
+        why_wrong = problem.get('why_wrong') or feedback.get('why_wrong') or ''
+        recommendation = (
+            problem.get('recommendation')
+            or problem.get('correct_info')
+            or feedback.get('suggested_rephrase')
+            or feedback.get('teaching_note')
+            or ''
+        )
+
+        if recommendation and 'correct_info' not in problem:
+            problem['correct_info'] = recommendation
+        if why_wrong and 'evidence_in_context' not in evidence:
+            evidence['evidence_in_context'] = why_wrong
+        if not feedback and (summary or why_wrong or recommendation):
+            row['professor_feedback'] = {
+                'summary': summary,
+                'why_wrong': why_wrong,
+                'teaching_note': recommendation,
+                'suggested_rephrase': recommendation,
+            }
+        elif feedback:
+            row['professor_feedback'] = feedback
+        row['problem'] = problem
+        row['evidence'] = evidence
+        restored.append(row)
+    return restored
+
+
 def build_content_verification_response(lecture_id: str, stem: str, verifier_path: str, data: dict) -> dict[str, Any]:
     """검증 결과 원본 JSON → API 응답 매핑 (순수 함수).
 
@@ -221,10 +270,22 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
     flow = data.get('claim_decision_flow', {}) or {}
     summary = data.get('claim_decision_flow_summary', {}) or {}
     content_summary = data.get('summary', {}) or summary
-    feedback_items = data.get('feedback_items', []) or []
-    final_claims = flow.get('final_confirmed_claims', []) or data.get('final_confirmed_claims', []) or []
-    needs_review_claims = flow.get('needs_review_claims', []) or data.get('needs_review_claims', []) or []
-    verifier_rejected_claims = flow.get('verifier_rejected_claims', []) or data.get('verifier_rejected_claims', []) or []
+    feedback_items = _restore_feedback_display_aliases(data.get('feedback_items', []) or [])
+    final_claims = (
+        flow.get('final_confirmed_claims', [])
+        or data.get('final_confirmed_claims', [])
+        or _filter_feedback_by_status(feedback_items, 'confirmed')
+    )
+    needs_review_claims = (
+        flow.get('needs_review_claims', [])
+        or data.get('needs_review_claims', [])
+        or _filter_feedback_by_status(feedback_items, 'professor_check')
+    )
+    verifier_rejected_claims = (
+        flow.get('verifier_rejected_claims', [])
+        or data.get('verifier_rejected_claims', [])
+        or _filter_feedback_by_status(feedback_items, 'rejected')
+    )
     slide_errors = _attach_slide_image_urls(data.get('slide_errors', []) or [])
     slide_error_needs_review = _attach_slide_image_urls(data.get('slide_error_needs_review', []) or [])
 

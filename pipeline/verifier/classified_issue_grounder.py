@@ -1900,6 +1900,7 @@ def ground_classified_issues(
 ) -> dict[str, Any]:
     categories = categories or set(GROUNDABLE_CATEGORIES)
     issues = verifier_result.get("all_issues", []) or []
+    verifier_result.pop("issues_by_type", None)
     targets = [issue for issue in issues if isinstance(issue, dict) and _should_ground(issue, categories)]
     token_usage = _empty_token_usage()
     status_counts: Counter[str] = Counter()
