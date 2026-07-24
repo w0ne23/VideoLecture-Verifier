@@ -198,6 +198,20 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+def _attach_slide_image_urls(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        row = dict(item)
+        image_url = make_file_url(row.get('slide_image_path') or row.get('image_path'))
+        if image_url:
+            row['slide_image_url'] = image_url
+        enriched.append(row)
+    return enriched
+
+
 def build_content_verification_response(lecture_id: str, stem: str, verifier_path: str, data: dict) -> dict[str, Any]:
     """검증 결과 원본 JSON → API 응답 매핑 (순수 함수).
 
@@ -211,7 +225,8 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
     final_claims = flow.get('final_confirmed_claims', []) or data.get('final_confirmed_claims', []) or []
     needs_review_claims = flow.get('needs_review_claims', []) or data.get('needs_review_claims', []) or []
     verifier_rejected_claims = flow.get('verifier_rejected_claims', []) or data.get('verifier_rejected_claims', []) or []
-    slide_errors = data.get('slide_errors', []) or []
+    slide_errors = _attach_slide_image_urls(data.get('slide_errors', []) or [])
+    slide_error_needs_review = _attach_slide_image_urls(data.get('slide_error_needs_review', []) or [])
 
     return {
         'lecture_id': str(lecture_id),
@@ -233,7 +248,7 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
             'needs_review': _safe_count(content_summary.get('review_needed_feedback_count', summary.get('needs_review_claim_count', len(needs_review_claims)))),
             'rejected': _safe_count(content_summary.get('rejected_feedback_count', len(verifier_rejected_claims))),
             'slide_errors': _safe_count(content_summary.get('slide_error_count', len(slide_errors))),
-            'slide_error_needs_review': len(data.get('slide_error_needs_review', []) or []),
+            'slide_error_needs_review': len(slide_error_needs_review),
             'verifier_rejected': _safe_count(summary.get('verifier_rejected_claim_count', len(verifier_rejected_claims))),
         },
         'claims': data.get('claims', []) or [],
@@ -245,7 +260,7 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
         'verifier_rejected_claims': verifier_rejected_claims,
         'issues': data.get('issues', []) or [],
         'slide_errors': slide_errors,
-        'slide_error_needs_review': data.get('slide_error_needs_review', []) or [],
+        'slide_error_needs_review': slide_error_needs_review,
         'slide_error_consensus': data.get('slide_error_consensus', {}) or {},
         'slide_error_status': data.get('slide_error_status', ''),
         'slide_error_summary': data.get('slide_error_summary', {}) or {},

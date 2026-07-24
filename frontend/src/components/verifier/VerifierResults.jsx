@@ -1,7 +1,42 @@
 import { useState } from 'react'
 
-// 검증 결과 JSON의 claim 항목은 파이프라인 버전에 따라 필드가 조금씩 다르다.
-// 자주 쓰는 필드는 골라서 보여주고, 전체 내용은 <details>로 항상 확인 가능하게 한다.
+const TYPE_LABELS = {
+  factual_error: '사실 오류',
+  temporal_error: '오래된 내용',
+  scope_overclaim: '과도한 일반화',
+  confusing_explanation: '혼동 가능 설명',
+  composite_issue: '복합 오류',
+}
+
+const STATUS_LABELS = {
+  confirmed: '확정',
+  professor_check: '검토 필요',
+  review_needed: '검토 필요',
+  rejected: '기각',
+  supports_issue: '이슈 근거 있음',
+  refutes_issue: '이슈 반박 근거',
+  insufficient_evidence: '근거 부족',
+  not_applicable: '대상 아님',
+}
+
+const VERDICT_LABELS = {
+  claim_false: '주장 틀림',
+  claim_true: '주장 맞음',
+  unclear: '불명확',
+}
+
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
+function asArray(value) {
+  if (!value) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+function isObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+}
 
 function pick(item, keys) {
   for (const key of keys) {
@@ -14,48 +49,596 @@ function pick(item, keys) {
 function pickNumber(item, keys) {
   for (const key of keys) {
     const value = Number(item?.[key])
-    if (Number.isFinite(value) && value > 0) return value
+    if (Number.isFinite(value)) return value
   }
   return null
 }
 
-function formatTime(seconds) {
-  const total = Math.floor(seconds)
-  const mm = String(Math.floor(total / 60)).padStart(2, '0')
-  const ss = String(total % 60).padStart(2, '0')
-  return `${mm}:${ss}`
+function compactText(value, fallback = '') {
+  if (value === undefined || value === null) return fallback
+  const text = String(value).replace(/\s+/g, ' ').trim()
+  return text || fallback
 }
 
-function ClaimCard({ item, index, tone, onSeek }) {
-  const claimText = pick(item, ['claim', 'claim_text', 'statement', 'text', 'content'])
-  const verdict = pick(item, ['verdict', 'final_verdict', 'decision', 'status'])
-  const issueType = pick(item, ['issue_type', 'issue_category', 'category', 'type'])
-  const explanation = pick(item, ['explanation', 'reason', 'reasoning', 'feedback', 'description', 'summary'])
-  const startTime = pickNumber(item, ['start', 'start_time', 'start_sec', 'timestamp'])
+function uniqueText(value, existing = []) {
+  const text = compactText(value)
+  if (!text) return ''
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  const duplicate = existing.some(item => {
+    const other = compactText(item).replace(/\s+/g, ' ').trim()
+    return other && other === normalized
+  })
+  return duplicate ? '' : text
+}
+
+function formatTime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0))
+  const hh = Math.floor(total / 3600)
+  const mm = Math.floor((total % 3600) / 60)
+  const ss = total % 60
+  if (hh > 0) return `${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+}
+
+function formatPercent(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  return `${num.toFixed(num >= 10 ? 1 : 2)}%`
+}
+
+function formatScore(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  const percent = num <= 1 ? num * 100 : num
+  return `${percent.toFixed(percent >= 10 ? 1 : 2)}점`
+}
+
+function formatPoint(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  return `${num.toFixed(num >= 10 ? 1 : 2)}점`
+}
+
+function formatRatio(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return ''
+  return `${(num * 100).toFixed(1)}%`
+}
+
+function labelForType(key) {
+  return TYPE_LABELS[key] || key || ''
+}
+
+function normalizeCandidateKey(candidate) {
+  if (typeof candidate === 'string') return candidate
+  return candidate?.category || candidate?.issue_type || candidate?.type || candidate?.key || ''
+}
+
+function compositeTypeLabel(item) {
+  const verifier = item.classified_issue_verifier || {}
+  const scoring = item.composite_scoring || verifier.composite_scoring || {}
+  const candidateKeys = [
+    ...asArray(item.composite_candidate_categories),
+    ...asArray(verifier.composite_candidate_categories),
+    ...Object.keys(scoring.normalized_probabilities || {}),
+    ...Object.keys(scoring.raw_probabilities || {}),
+  ]
+    .map(normalizeCandidateKey)
+    .filter(Boolean)
+
+  const labels = [...new Set(candidateKeys.map(labelForType))]
+  if (labels.length) return `복합 오류(${labels.join(', ')})`
+  return item.feedback_label || item.category_label || '복합 오류'
+}
+
+function issueTypeLabel(item) {
+  const type = item.feedback_type || item.category || item.issue_type || item.type
+  if (type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite) {
+    return compositeTypeLabel(item)
+  }
+  return item.feedback_label || item.category_label || labelForType(type)
+}
+
+function issueTypeKey(item) {
+  const type = item.feedback_type || item.category || item.issue_type || item.type
+  if (type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite) {
+    return 'composite_issue'
+  }
+  return type || 'unknown'
+}
+
+function getSeverity(item) {
+  const verifier = item.classified_issue_verifier || {}
+  const percent = pickNumber(
+    {
+      severity_score_percent: item.severity_score_percent,
+      final_severity_percent: item.final_severity_percent,
+      verifier_final_severity_percent: verifier.final_severity_percent,
+    },
+    ['severity_score_percent', 'final_severity_percent', 'verifier_final_severity_percent']
+  )
+  if (percent != null) return percent
+  const score = pickNumber(
+    {
+      severity_score: item.severity_score,
+      final_severity_score: verifier.final_severity_score,
+    },
+    ['severity_score', 'final_severity_score']
+  )
+  return score == null ? null : score * 100
+}
+
+function getGrounding(item) {
+  const evidence = item.evidence || {}
+  const verifier = item.classified_issue_verifier || {}
+  return verifier.web_grounding || item.web_grounding || evidence.web_grounding || {}
+}
+
+function sourceUrl(source) {
+  if (typeof source === 'string') return source
+  return source?.url || source?.source_url || ''
+}
+
+function sourceLabel(source, index) {
+  if (typeof source === 'string') return source
+  return source?.title || source?.domain || source?.url || source?.source_url || `근거 ${index + 1}`
+}
+
+function fileUrlFromStoragePath(path) {
+  if (!path) return ''
+  const value = String(path).replace(/\\/g, '/')
+  if (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('/files/')) return value
+  if (value.startsWith('storage/')) return `/files/${value.slice('storage/'.length)}`
+  const marker = '/storage/'
+  const index = value.indexOf(marker)
+  if (index >= 0) return `/files/${value.slice(index + marker.length)}`
+  return ''
+}
+
+function locationOf(item) {
+  const location = item.location || {}
+  return {
+    slideNumber: item.slide_number || location.slide_number,
+    startTime: pickNumber({ ...item, ...location }, ['start_time', 'start', 'timestamp']),
+    endTime: pickNumber({ ...item, ...location }, ['end_time', 'end']),
+  }
+}
+
+function timeRangeLabel(startTime, endTime) {
+  if (startTime == null) return ''
+  if (endTime == null || endTime <= startTime) return formatTime(startTime)
+  return `${formatTime(startTime)} - ${formatTime(endTime)}`
+}
+
+function DetailRow({ label, value, wide = false }) {
+  if (value === undefined || value === null || value === '') return null
+  return (
+    <div className={cx('claim-detail-row', wide && 'claim-detail-row--wide')}>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  )
+}
+
+function TextBlock({ children }) {
+  if (!children) return null
+  return <p className="claim-detail-text">{children}</p>
+}
+
+function DetailGroup({ title, children }) {
+  if (!children) return null
+  return (
+    <div className="claim-detail-group">
+      <h4>{title}</h4>
+      {children}
+    </div>
+  )
+}
+
+function ScoreGrid({ item }) {
+  const verifier = item.classified_issue_verifier || {}
+  const rows = [
+    ['최종 심각도', formatPoint(getSeverity(item))],
+    ['유효 이슈 평균', formatRatio(verifier.average_is_valid_issue)],
+    ['유형 심각도 평균', formatRatio(verifier.average_category_severity)],
+    ['문맥 해소', formatRatio(verifier.average_context_resolution)],
+    ['문맥 미해소', formatRatio(verifier.average_context_unresolved)],
+    ['모델 불일치', formatRatio(verifier.model_disagreement)],
+  ].filter(([, value]) => value)
+
+  if (!rows.length) return null
+  return (
+    <div className="claim-score-grid">
+      {rows.map(([label, value]) => (
+        <div className="claim-score-cell" key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function CompositeScoringPanel({ item }) {
+  const verifier = item.classified_issue_verifier || {}
+  const scoring = item.composite_scoring || verifier.composite_scoring
+  if (!scoring) return null
+
+  const normalized = scoring.normalized_probabilities || {}
+  const scores = scoring.candidate_scores || {}
+  const contributions = scoring.candidate_contributions || {}
+  const keys = Object.keys(normalized).length
+    ? Object.keys(normalized)
+    : [...new Set([...Object.keys(scores), ...Object.keys(contributions)])]
 
   return (
-    <div className={`claim-card claim-card--${tone}`}>
-      <div className="claim-card-head">
-        <span className="claim-card-index">#{index + 1}</span>
-        {issueType && <span className="claim-tag">{issueType}</span>}
-        {verdict && <span className="claim-tag claim-tag--verdict">{verdict}</span>}
-        {startTime != null && (
-          <button type="button" className="claim-time" onClick={() => onSeek?.(startTime)}>
-            ▶ {formatTime(startTime)}
-          </button>
-        )}
+    <DetailGroup title="복합 오류 점수">
+      <div className="composite-summary">
+        <span>방식: {scoring.method || 'weighted_expected_severity'}</span>
+        {scoring.primary_issue_type_label && <span>대표 유형: {scoring.primary_issue_type_label}</span>}
+        {scoring.weighted_score !== undefined && <span>가중 점수: {formatScore(scoring.weighted_score)}</span>}
       </div>
-      {claimText && <p className="claim-text">{claimText}</p>}
-      {explanation && <p className="claim-explanation">{explanation}</p>}
-      <details className="claim-raw">
-        <summary>원본 JSON</summary>
+      {keys.length > 0 && (
+        <div className="composite-table">
+          <div className="composite-row composite-row--head">
+            <span>세부 유형</span>
+            <span>보정 확률</span>
+            <span>검증 점수</span>
+            <span>기여도</span>
+          </div>
+          {keys.map(key => (
+            <div className="composite-row" key={key}>
+              <span>{labelForType(key)}</span>
+              <span>{formatRatio(normalized[key])}</span>
+              <span>{formatScore(scores[key])}</span>
+              <span>{formatScore(contributions[key])}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </DetailGroup>
+  )
+}
+
+function SearchQueries({ queries }) {
+  if (!queries) return null
+  const rows = isObject(queries)
+    ? Object.entries(queries).flatMap(([model, values]) => asArray(values).map(value => ({ model, value })))
+    : asArray(queries).map(value => ({ model: '', value }))
+
+  if (!rows.length) return null
+  return (
+    <div className="grounding-subblock">
+      <strong>검색어</strong>
+      <ul className="grounding-query-list">
+        {rows.map((row, index) => (
+          <li key={`${row.model}-${row.value}-${index}`}>
+            {row.model && <span>{row.model}</span>}
+            <code>{row.value}</code>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function SourceList({ sources, title = '근거 출처' }) {
+  const items = asArray(sources).filter(sourceUrl)
+  if (!items.length) return null
+  return (
+    <div className="grounding-subblock">
+      <strong>{title}</strong>
+      <div className="grounding-source-list">
+        {items.map((source, index) => {
+          const url = sourceUrl(source)
+          return (
+            <a href={url} target="_blank" rel="noreferrer" key={`${url}-${index}`}>
+              {sourceLabel(source, index)}
+            </a>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function PassageList({ passages }) {
+  const items = asArray(passages)
+  if (!items.length) return null
+  return (
+    <div className="grounding-subblock">
+      <strong>근거 문단</strong>
+      <div className="grounding-passage-list">
+        {items.map((passage, index) => {
+          const url = sourceUrl(passage)
+          return (
+            <div className="grounding-passage" key={`${url || passage.id || 'passage'}-${index}`}>
+              <div className="grounding-passage-head">
+                {passage.stance && <span>{STATUS_LABELS[passage.stance] || passage.stance}</span>}
+                {passage.match_status && <span>match: {passage.match_status}</span>}
+                {passage.match_score !== undefined && <span>{formatRatio(passage.match_score)}</span>}
+              </div>
+              {url && <a href={url} target="_blank" rel="noreferrer">{url}</a>}
+              <TextBlock>{passage.key_sentence || passage.quote_or_paragraph || passage.matched_text}</TextBlock>
+              {passage.why_relevant && <p className="grounding-relevance">{passage.why_relevant}</p>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function VerifiedSources({ trials }) {
+  const verifiedSources = asArray(trials).flatMap(trial => asArray(trial.verified_sources))
+  if (!verifiedSources.length) return null
+  return (
+    <details className="grounding-diagnostics">
+      <summary>출처 fetch/match 진단 {verifiedSources.length}건</summary>
+      <div className="grounding-diagnostic-list">
+        {verifiedSources.map((source, index) => (
+          <div className="grounding-diagnostic" key={`${source.url || 'source'}-${index}`}>
+            <div className="grounding-diagnostic-head">
+              <strong>{source.domain || source.url || `source ${index + 1}`}</strong>
+              {source.fetch_status && <span>{source.fetch_status}</span>}
+              {source.source_priority_label && <span>{source.source_priority_label}</span>}
+              {source.trust_score !== undefined && <span>trust {formatRatio(source.trust_score)}</span>}
+            </div>
+            {source.url && <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>}
+            {source.error && <p>{source.error}</p>}
+            <PassageList passages={source.matched_passages || source.verified_model_passages} />
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function WebGroundingPanel({ item }) {
+  const grounding = getGrounding(item)
+  const evidence = item.evidence || {}
+  if (!grounding || !Object.keys(grounding).length) return null
+
+  const trials = asArray(grounding.trials)
+  const trialPassages = trials.flatMap(trial => asArray(trial.evidence_passages))
+  const passages = grounding.evidence_passages || trialPassages
+  const sources = grounding.evidence_sources?.length ? grounding.evidence_sources : evidence.web_sources
+
+  return (
+    <DetailGroup title="웹 그라운딩">
+      <div className="grounding-status-row">
+        {grounding.status && <span className="claim-tag claim-tag--grounding">{STATUS_LABELS[grounding.status] || grounding.status}</span>}
+        {grounding.claim_verdict && <span className="claim-tag">{VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict}</span>}
+        {grounding.selected_source_priority_label && <span className="claim-tag">{grounding.selected_source_priority_label}</span>}
+        {grounding.selected_source_count !== undefined && <span className="claim-tag">선정 {grounding.selected_source_count}건</span>}
+      </div>
+      <TextBlock>{grounding.reason}</TextBlock>
+      <TextBlock>{grounding.evidence_summary}</TextBlock>
+      <SearchQueries queries={grounding.search_queries} />
+      <SourceList sources={sources} />
+      <PassageList passages={passages} />
+      <VerifiedSources trials={trials} />
+    </DetailGroup>
+  )
+}
+
+function ModelJudgments({ item }) {
+  const verifier = item.classified_issue_verifier || {}
+  const judgments = asArray(verifier.model_judgments || item.model_judgments)
+  const modelResults = item.checks?.severity?.model_results
+  const results = judgments.length
+    ? judgments
+    : Object.entries(modelResults || {}).map(([model, result]) => ({ model, ...result }))
+
+  if (!results.length) return null
+  return (
+    <DetailGroup title="모델별 판단">
+      <div className="model-judgment-list">
+        {results.map((judgment, index) => (
+          <div className="model-judgment" key={`${judgment.model || 'model'}-${judgment.category || ''}-${index}`}>
+            <div className="model-judgment-head">
+              <strong>{judgment.model || judgment.provider || `model ${index + 1}`}</strong>
+              {judgment.category && <span>{labelForType(judgment.category)}</span>}
+              {judgment.judgment && <span>{judgment.judgment}</span>}
+              {judgment.final_model_score !== undefined && <span>{formatScore(judgment.final_model_score)}</span>}
+            </div>
+            <TextBlock>{judgment.reason || judgment.explanation || judgment.summary}</TextBlock>
+            {judgment.minimal_fix && <p className="model-minimal-fix">수정안: {judgment.minimal_fix}</p>}
+          </div>
+        ))}
+      </div>
+    </DetailGroup>
+  )
+}
+
+function ClaimDetail({ item }) {
+  const problem = item.problem || {}
+  const feedback = item.professor_feedback || {}
+  const evidence = item.evidence || {}
+  const verifier = item.classified_issue_verifier || {}
+  const summary = problem.summary || feedback.summary
+  const rawWhyWrong = problem.why_wrong || feedback.why_wrong
+  const rawRecommendation = problem.recommendation || feedback.suggested_rephrase
+  const correctInfo = problem.correct_info
+  const whyWrong = uniqueText(rawWhyWrong, [summary])
+  const recommendation = uniqueText(rawRecommendation, [summary, rawWhyWrong, correctInfo])
+  const teachingNote = uniqueText(feedback.teaching_note, [summary, rawWhyWrong, rawRecommendation, correctInfo])
+  const evidenceInContext = uniqueText(evidence.evidence_in_context, [
+    summary,
+    rawWhyWrong,
+    rawRecommendation,
+    correctInfo,
+    feedback.teaching_note,
+  ])
+
+  return (
+    <div className="claim-detail-body">
+      <DetailGroup title="문제 요약">
+        <dl className="claim-detail-list">
+          <DetailRow label="정규화 주장" value={item.resolved_claim} wide />
+          <DetailRow label="원 발화" value={item.claim_text} wide />
+          <DetailRow label="문제 내용" value={problem.problematic_content} wide />
+          <DetailRow label="요약" value={summary} wide />
+          <DetailRow label="왜 문제인가" value={whyWrong} wide />
+          <DetailRow label="권장 수정" value={recommendation} wide />
+          <DetailRow label="정정 정보" value={correctInfo} wide />
+          <DetailRow label="수업 메모" value={teachingNote} wide />
+          <DetailRow label="문맥 근거" value={evidenceInContext} wide />
+          <DetailRow label="검토 필요" value={verifier.needs_manual_review === true ? '예' : verifier.needs_manual_review === false ? '아니오' : ''} />
+        </dl>
+      </DetailGroup>
+      <DetailGroup title="점수">
+        <ScoreGrid item={item} />
+      </DetailGroup>
+      <CompositeScoringPanel item={item} />
+      <WebGroundingPanel item={item} />
+      <ModelJudgments item={item} />
+      <details className="claim-debug-json">
+        <summary>디버그 JSON</summary>
         <pre>{JSON.stringify(item, null, 2)}</pre>
       </details>
     </div>
   )
 }
 
-function Section({ title, items, tone, onSeek, defaultOpen = true }) {
+function ClaimCard({ item, index, tone, onSeek }) {
+  const [open, setOpen] = useState(false)
+  const claimText = pick(item, ['resolved_claim', 'claim_text', 'claim', 'statement', 'text', 'content'])
+  const status = item.status || item.severity_status || pick(item, ['verdict', 'final_verdict', 'decision'])
+  const severity = getSeverity(item)
+  const grounding = getGrounding(item)
+  const { slideNumber, startTime, endTime } = locationOf(item)
+  const timeLabel = timeRangeLabel(startTime, endTime)
+  const typeLabel = issueTypeLabel(item)
+  const typeKey = issueTypeKey(item)
+
+  const toggle = () => setOpen(prev => !prev)
+  const handleKeyDown = event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    toggle()
+  }
+
+  return (
+    <article className={cx(`claim-card claim-card--${tone}`, open && 'claim-card--open')}>
+      <div
+        className="claim-card-summary"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="claim-card-main">
+          <div className="claim-card-head">
+            <span className="claim-card-index">#{index + 1}</span>
+            {typeLabel && <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${typeKey}`)}>{typeLabel}</span>}
+            {status && <span className="claim-tag claim-tag--verdict">{STATUS_LABELS[status] || status}</span>}
+            {grounding.status && <span className="claim-tag claim-tag--grounding">{STATUS_LABELS[grounding.status] || grounding.status}</span>}
+            {slideNumber && <span className="claim-location-chip">slide {slideNumber}</span>}
+            {startTime != null && (
+              <button
+                type="button"
+                className="claim-time"
+                onClick={event => {
+                  event.stopPropagation()
+                  onSeek?.(startTime)
+                }}
+              >
+                ▶ {timeLabel}
+              </button>
+            )}
+          </div>
+          {claimText && <p className="claim-text">{claimText}</p>}
+        </div>
+        <div className="claim-card-side">
+          {severity != null && (
+            <div className="claim-card-score">
+              <strong>{formatPoint(severity)}</strong>
+              <span>최종 심각도</span>
+            </div>
+          )}
+          <span className={cx('claim-card-toggle', open && 'claim-card-toggle--open')} aria-hidden="true">▾</span>
+        </div>
+      </div>
+      {open && (
+        <div className="claim-detail">
+          <ClaimDetail item={item} />
+        </div>
+      )}
+    </article>
+  )
+}
+
+function SlideErrorCard({ item, index }) {
+  const [open, setOpen] = useState(false)
+  const imageUrl = item.slide_image_url || item.image_url || fileUrlFromStoragePath(item.slide_image_path || item.image_path)
+  const slideTypeKey = item.error_type || 'slide_error'
+  const toggle = () => setOpen(prev => !prev)
+  const handleKeyDown = event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    toggle()
+  }
+
+  return (
+    <article className={cx('claim-card claim-card--slide slide-error-card', open && 'claim-card--open')}>
+      <div
+        className="claim-card-summary"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="claim-card-main">
+          <div className="claim-card-head">
+            <span className="claim-card-index">#{index + 1}</span>
+            <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${slideTypeKey}`)}>{item.error_type_label || '슬라이드 오류'}</span>
+            {item.slide_number && <span className="claim-location-chip">slide {item.slide_number}</span>}
+            {item.confidence !== undefined && <span className="claim-tag">신뢰도 {formatPercent(Number(item.confidence) * 100)}</span>}
+          </div>
+          <p className="slide-error-change slide-error-change--compact">
+            <span>{compactText(item.problematic_text, '-')}</span>
+            <strong>→</strong>
+            <span>{compactText(item.corrected_text, '-')}</span>
+          </p>
+        </div>
+        <div className="claim-card-side">
+          {item.severity_score !== undefined && (
+            <div className="claim-card-score">
+              <strong>{formatScore(item.severity_score)}</strong>
+              <span>심각도</span>
+            </div>
+          )}
+          <span className={cx('claim-card-toggle', open && 'claim-card-toggle--open')} aria-hidden="true">▾</span>
+        </div>
+      </div>
+      {open && (
+        <div className="slide-error-detail">
+          {imageUrl && (
+            <div className="slide-error-image slide-error-image--large">
+              <img src={imageUrl} alt={`slide ${item.slide_number || index + 1}`} loading="lazy" />
+            </div>
+          )}
+          <dl className="claim-detail-list slide-error-detail-list">
+            <DetailRow label="슬라이드 제목" value={item.slide_title} wide />
+            <DetailRow label="오류 유형" value={item.error_type_label || item.error_type} />
+            <DetailRow label="오류 텍스트" value={item.problematic_text} />
+            <DetailRow label="수정 텍스트" value={item.corrected_text} />
+            <DetailRow label="판단 이유" value={item.reason} wide />
+          </dl>
+          <details className="claim-debug-json">
+            <summary>디버그 JSON</summary>
+            <pre>{JSON.stringify(item, null, 2)}</pre>
+          </details>
+        </div>
+      )}
+    </article>
+  )
+}
+
+function Section({ title, items, tone, onSeek, defaultOpen = true, renderItem }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
     <section className="result-section">
@@ -69,7 +652,9 @@ function Section({ title, items, tone, onSeek, defaultOpen = true }) {
           ? <p className="result-empty">항목이 없습니다.</p>
           : <div className="claim-list">
               {items.map((item, index) => (
-                <ClaimCard key={index} item={item} index={index} tone={tone} onSeek={onSeek} />
+                renderItem
+                  ? renderItem(item, index)
+                  : <ClaimCard key={item.feedback_id || item.issue_id || index} item={item} index={index} tone={tone} onSeek={onSeek} />
               ))}
             </div>
       )}
@@ -85,6 +670,7 @@ export default function VerifierResults({ verifier, onSeek }) {
   const needsReview = verifier.needs_review_claims || []
   const rejected = verifier.verifier_rejected_claims || []
   const slideErrors = verifier.slide_errors || []
+  const summary = verifier.summary || {}
 
   return (
     <div className="verifier-results">
@@ -107,16 +693,22 @@ export default function VerifierResults({ verifier, onSeek }) {
         </div>
       </div>
 
-      {verifier.verification_date && (
-        <p className="result-meta">
-          검증 시각: {verifier.verification_date}
-          {Array.isArray(verifier.models) && verifier.models.length > 0 && ` · 모델: ${verifier.models.join(', ')}`}
-        </p>
-      )}
+      <div className="result-meta-panel">
+        {verifier.verification_date && <span>검증 시각: {verifier.verification_date}</span>}
+        {Array.isArray(verifier.models) && verifier.models.length > 0 && <span>모델: {verifier.models.join(', ')}</span>}
+        {summary.grounded_issue_count !== undefined && <span>웹 그라운딩: {summary.grounded_issue_count}건</span>}
+        {summary.web_grounding_adjusted_count !== undefined && <span>점수 조정: {summary.web_grounding_adjusted_count}건</span>}
+      </div>
 
       <Section title="확정 이슈" items={confirmed} tone="confirmed" onSeek={onSeek} />
       <Section title="검토 필요" items={needsReview} tone="review" onSeek={onSeek} />
-      <Section title="슬라이드 오류" items={slideErrors} tone="slide" onSeek={onSeek} />
+      <Section
+        title="슬라이드 오류"
+        items={slideErrors}
+        tone="slide"
+        onSeek={onSeek}
+        renderItem={(item, index) => <SlideErrorCard key={item.slide_error_id || index} item={item} index={index} />}
+      />
       <Section title="기각된 주장" items={rejected} tone="rejected" onSeek={onSeek} defaultOpen={false} />
     </div>
   )

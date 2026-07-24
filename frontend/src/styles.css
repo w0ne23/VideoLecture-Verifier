@@ -126,7 +126,10 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 
 /* ── 검증 결과 ── */
 .verifier-results { display: flex; flex-direction: column; gap: 16px; }
-.result-meta { color: var(--muted); font-size: 0.82rem; margin: 0; }
+.result-meta-panel {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 0.82rem;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+}
 .count-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .count-cell {
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;
@@ -159,12 +162,32 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .claim-card--review { border-left-color: var(--amber); }
 .claim-card--slide { border-left-color: var(--primary); }
 .claim-card--rejected { border-left-color: var(--slate); opacity: 0.85; }
+.claim-card-summary {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  cursor: pointer; outline: none;
+}
+.claim-card-summary:focus-visible { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18); border-radius: 8px; }
+.claim-card-main { min-width: 0; }
 .claim-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .claim-card-index { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
 .claim-tag {
   font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; background: #eef1f5; color: var(--slate);
 }
+.claim-tag--type { background: #eef1f5; color: var(--slate); font-weight: 600; }
+.claim-tag--type-factual_error { background: #fee2e2; color: #b91c1c; }
+.claim-tag--type-temporal_error { background: #fef3c7; color: #a16207; }
+.claim-tag--type-scope_overclaim { background: #dbeafe; color: #1d4ed8; }
+.claim-tag--type-confusing_explanation { background: #ede9fe; color: #6d28d9; }
+.claim-tag--type-composite_issue { background: #ccfbf1; color: #0f766e; }
+.claim-tag--type-text_error { background: #e0f2fe; color: #0369a1; }
+.claim-tag--type-numeric_unit { background: #ffedd5; color: #c2410c; }
+.claim-tag--type-code_syntax { background: #f3e8ff; color: #7e22ce; }
 .claim-tag--verdict { background: #e0e7ff; color: #4338ca; }
+.claim-tag--score { background: #fff7ed; color: #c2410c; font-weight: 600; }
+.claim-tag--grounding { background: #ecfdf5; color: #047857; }
+.claim-location-chip {
+  font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; background: #f4f6f8; color: var(--muted);
+}
 .claim-time {
   font-size: 0.75rem; border: 1px solid var(--border); background: var(--card); border-radius: 999px;
   padding: 2px 10px; cursor: pointer; color: var(--primary);
@@ -172,15 +195,137 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .claim-time:hover { border-color: var(--primary); }
 .claim-text { margin: 8px 0 0; font-size: 0.92rem; font-weight: 600; }
 .claim-explanation { margin: 6px 0 0; font-size: 0.86rem; color: var(--muted); white-space: pre-wrap; }
-.claim-raw { margin-top: 8px; }
-.claim-raw summary { font-size: 0.75rem; color: var(--muted); cursor: pointer; }
-.claim-raw pre {
-  margin: 6px 0 0; padding: 10px; background: #f3f4f6; border-radius: 8px;
-  font-size: 0.72rem; overflow-x: auto; max-height: 300px;
+.claim-card-side {
+  display: flex; align-items: center; gap: 8px; justify-self: end;
 }
+.claim-card-score {
+  min-width: 82px; text-align: right; padding: 2px 0 2px 10px; color: #c2410c;
+}
+.claim-card-score strong { display: block; font-size: 1rem; line-height: 1.1; }
+.claim-card-score span { display: block; margin-top: 1px; font-size: 0.68rem; font-weight: 600; }
+.claim-card-toggle {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  border-radius: 50%; color: var(--muted); transition: transform 0.15s ease, background 0.15s ease;
+}
+.claim-card-summary:hover .claim-card-toggle { background: #eef1f5; }
+.claim-card-toggle--open { transform: rotate(180deg); }
+.claim-detail {
+  margin-top: 12px; padding-top: 2px;
+}
+.claim-detail-body { display: flex; flex-direction: column; gap: 12px; padding-top: 10px; }
+.claim-detail-group { border-top: 1px solid #eef1f5; padding-top: 12px; }
+.claim-detail-group h4 { margin: 0 0 8px; font-size: 0.86rem; color: var(--text); }
+.claim-detail-list {
+  margin: 0; display: grid; grid-template-columns: minmax(92px, 0.24fr) 1fr; gap: 7px 12px;
+}
+.claim-detail-row { display: contents; }
+.claim-detail-row dt { color: var(--muted); font-size: 0.78rem; }
+.claim-detail-row dd { margin: 0; font-size: 0.84rem; white-space: pre-wrap; }
+.claim-detail-row--wide dd { line-height: 1.55; }
+.claim-detail-text { margin: 0; font-size: 0.84rem; color: var(--text); white-space: pre-wrap; }
+
+.claim-score-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px;
+}
+.claim-score-cell {
+  min-height: 58px; border: 1px solid #edf0f4; border-radius: 8px; padding: 9px 10px; background: #fbfcfd;
+}
+.claim-score-cell span { display: block; color: var(--muted); font-size: 0.74rem; }
+.claim-score-cell strong { display: block; margin-top: 2px; font-size: 0.98rem; color: var(--text); }
+
+.composite-summary {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; color: var(--muted); font-size: 0.8rem;
+}
+.composite-table { border: 1px solid #edf0f4; border-radius: 8px; overflow: hidden; }
+.composite-row {
+  display: grid; grid-template-columns: 1.4fr repeat(3, minmax(72px, 0.8fr)); gap: 8px;
+  padding: 8px 10px; border-top: 1px solid #edf0f4; font-size: 0.8rem; align-items: center;
+}
+.composite-row:first-child { border-top: none; }
+.composite-row--head { background: #f8fafc; color: var(--muted); font-size: 0.74rem; font-weight: 600; }
+
+.grounding-status-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.grounding-subblock { margin-top: 10px; }
+.grounding-subblock > strong {
+  display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.76rem;
+}
+.grounding-query-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.grounding-query-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 0.78rem; }
+.grounding-query-list span { color: var(--muted); min-width: 42px; }
+.grounding-query-list code {
+  white-space: normal; word-break: break-word; background: #f3f4f6; border-radius: 6px; padding: 2px 6px;
+}
+.grounding-source-list { display: flex; flex-direction: column; gap: 5px; }
+.grounding-source-list a,
+.grounding-passage a,
+.grounding-diagnostic a {
+  color: var(--primary); font-size: 0.8rem; overflow-wrap: anywhere;
+}
+.grounding-passage-list,
+.grounding-diagnostic-list,
+.model-judgment-list {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.grounding-passage,
+.grounding-diagnostic,
+.model-judgment {
+  border: 1px solid #edf0f4; border-radius: 8px; padding: 9px 10px; background: #fbfcfd;
+}
+.grounding-passage-head,
+.grounding-diagnostic-head,
+.model-judgment-head {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 5px;
+  color: var(--muted); font-size: 0.75rem;
+}
+.grounding-passage-head span,
+.grounding-diagnostic-head span,
+.model-judgment-head span {
+  padding: 1px 7px; border-radius: 999px; background: #eef1f5;
+}
+.grounding-relevance,
+.model-minimal-fix {
+  margin: 6px 0 0; color: var(--muted); font-size: 0.8rem; white-space: pre-wrap;
+}
+.grounding-diagnostics { margin-top: 10px; }
+.grounding-diagnostics summary,
+.claim-debug-json summary {
+  font-size: 0.74rem; color: var(--muted); cursor: pointer;
+}
+.claim-debug-json { margin-top: 2px; }
+.claim-debug-json pre {
+  margin: 6px 0 0; padding: 10px; background: #f3f4f6; border-radius: 8px;
+  font-size: 0.68rem; overflow-x: auto; max-height: 220px;
+}
+
+.slide-error-layout {
+  display: grid; grid-template-columns: minmax(180px, 0.9fr) 1fr; gap: 12px; margin-top: 10px; align-items: start;
+}
+.slide-error-layout--no-image { display: block; }
+.slide-error-detail {
+  display: flex; flex-direction: column; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eef1f5;
+}
+.slide-error-image {
+  border: 1px solid #edf0f4; border-radius: 8px; overflow: hidden; background: #f8fafc;
+}
+.slide-error-image img { display: block; width: 100%; height: auto; max-height: 260px; object-fit: contain; }
+.slide-error-image--large img { max-height: 620px; }
+.slide-error-copy { min-width: 0; }
+.slide-error-change {
+  margin: 0; font-size: 0.94rem; font-weight: 700; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+.slide-error-change strong { color: var(--primary); }
+.slide-error-change--compact { margin-top: 8px; }
+.slide-error-detail-list { margin-top: 0; }
 
 @media (max-width: 640px) {
   .count-grid { grid-template-columns: repeat(2, 1fr); }
+  .claim-card-summary { grid-template-columns: 1fr; }
+  .claim-card-side { justify-self: stretch; justify-content: space-between; }
+  .claim-card-score { text-align: left; }
+  .claim-detail-list { grid-template-columns: 1fr; }
+  .claim-detail-row dt { font-weight: 600; }
+  .composite-row { grid-template-columns: 1fr 1fr; }
+  .slide-error-layout { grid-template-columns: 1fr; }
   .vf-flow { flex-wrap: wrap; row-gap: 14px; }
   .vf-flow-item { flex: 1 1 20%; }
 }
