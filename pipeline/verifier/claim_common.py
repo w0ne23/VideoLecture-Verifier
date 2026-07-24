@@ -140,7 +140,7 @@ def _supports_json_object_response_format(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = ("extract", "judge", "slide_error")
+TOKEN_USAGE_STAGES = ("extract", "judge", "slide_error", "slide_error_transcribe")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",

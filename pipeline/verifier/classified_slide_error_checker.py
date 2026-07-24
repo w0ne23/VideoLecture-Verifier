@@ -648,7 +648,7 @@ def _check_single_slide(
     )
     errors.extend(mech_errors)
     api_calls += mech_calls
-    cc._add_call_usage(token_usage, mech_usage)
+    token_usage = cc._merge_token_usage(token_usage, mech_usage)
     return errors, False, api_calls, token_usage
 
 
