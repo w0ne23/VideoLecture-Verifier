@@ -1126,21 +1126,6 @@ def _issue_result_record(
     }
 
 
-def _group_issue_results(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped = {category: [] for category in ALL_ISSUE_TYPES}
-    for record in records:
-        category = record.get("category")
-        if category in grouped:
-            grouped[category].append(record)
-    for rows in grouped.values():
-        rows.sort(key=lambda item: (
-            -float(item.get("final_severity_score") or 0.0),
-            float((item.get("location") or {}).get("start_time") or 0.0),
-            str(item.get("issue_id") or ""),
-        ))
-    return grouped
-
-
 def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     by_type = Counter(record.get("category") or "unknown" for record in records)
     manual_review_count = sum(1 for record in records if record.get("needs_manual_review"))
@@ -1167,6 +1152,27 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
             }
             for model, result in model_results.items()
         },
+    }
+
+
+def _slim_classified_issue_view(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep final response metadata without duplicating full issue records."""
+    return {
+        key: result.get(key)
+        for key in (
+            "schema_version",
+            "stage",
+            "generated_at",
+            "current_date",
+            "categories",
+            "model_weights",
+            "summary",
+            "model_results",
+            "token_usage",
+            "grounding",
+            "output_path",
+        )
+        if result.get(key) not in (None, "", [], {})
     }
 
 
@@ -1283,20 +1289,12 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "why_wrong": reason,
                     "issue_basis": category_label,
                     "recommendation": minimal_fix,
-                    "correct_info": minimal_fix,
-                },
-                "professor_feedback": {
-                    "summary": reason,
-                    "why_wrong": reason,
-                    "teaching_note": minimal_fix,
-                    "suggested_rephrase": minimal_fix,
                 },
                 "evidence": {
                     "slide_number": location.get("slide_number"),
-                    "evidence_in_context": reason,
                     "web_grounding": web_grounding,
                     "web_sources": grounding_sources,
-                    "source_issues": [issue],
+                    "source_issue_ids": [issue.get("id") or issue_id],
                 },
                 "checks": {
                     "severity": {
@@ -1392,17 +1390,13 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         "claims": claims,
         "feedback_items": feedback_items,
         "views": {
-            "classified_issue_verifier": result,
+            "classified_issue_verifier": _slim_classified_issue_view(result),
         },
-        "final_confirmed_claims": confirmed,
-        "needs_review_claims": review,
-        "verifier_rejected_claims": rejected,
         "claim_decision_flow_summary": {
             "final_confirmed_claim_count": len(confirmed),
             "needs_review_claim_count": len(review),
             "verifier_rejected_claim_count": len(rejected),
         },
-        "issues": all_issues,
         "classified_issue_verifier_path": result.get("output_path", ""),
     }
 
@@ -1549,7 +1543,6 @@ def judge_classified_issues(
             for bundle in candidate_bundles
         }
         records.append(_merge_composite_verification(ref, candidate_categories, candidate_records))
-    grouped = _group_issue_results(records)
     token_usage = Counter()
     for result in model_results.values():
         usage = result.get("token_usage") or {}
@@ -1570,7 +1563,6 @@ def judge_classified_issues(
         "categories": {category: CATEGORY_LABELS.get(category, category) for category in ALL_ISSUE_TYPES},
         "model_weights": model_weights,
         "summary": _summary(records, model_results),
-        "issues_by_type": grouped,
         "all_issues": records,
         "model_results": model_results,
         "token_usage": dict(token_usage),

@@ -840,6 +840,14 @@ def detect_classified_slide_errors(
         -float(item.get("severity_score", 0) or 0),
         str(item.get("problematic_text", "")),
     ))
+    slim_model_results = {
+        model: {
+            key: value
+            for key, value in result.items()
+            if key != "slide_errors"
+        }
+        for model, result in model_results.items()
+    }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -860,6 +868,6 @@ def detect_classified_slide_errors(
         },
         "slide_errors": reportable,
         "raw_slide_errors": all_errors,
-        "model_results": model_results,
+        "model_results": slim_model_results,
         "token_usage": dict(token_usage),
     }

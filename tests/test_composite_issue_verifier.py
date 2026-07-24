@@ -1,4 +1,5 @@
 from pipeline.verifier.classified_issue_verifier import (
+    build_content_verification_view,
     _composite_candidate_categories,
     _merge_composite_verification,
 )
@@ -73,3 +74,38 @@ def test_merge_composite_verification_uses_weighted_expected_score():
         "factual_error": 0.266666,
     }
     assert set(merged["candidate_verifications"].keys()) == {"factual_error", "scope_overclaim"}
+
+
+def test_content_view_omits_duplicate_issue_copies():
+    result = {
+        "generated_at": "2026-07-24T00:00:00+09:00",
+        "model_weights": {"gpt": 1.0},
+        "summary": {},
+        "all_issues": [
+            {
+                "id": "I0001",
+                "issue_id": "I0001",
+                "claim_id": "CL0001",
+                "claim_text": "원문",
+                "resolved_claim": "정리문",
+                "category": "factual_error",
+                "category_label": "사실 오류",
+                "location": {"slide_number": 1},
+                "context": {"context_id": "C1"},
+                "final_severity_score": 0.9,
+                "model_judgments": [],
+            }
+        ],
+    }
+    view = build_content_verification_view(result)
+    item = view["feedback_items"][0]
+
+    assert "issues" not in view
+    assert "final_confirmed_claims" not in view
+    assert "needs_review_claims" not in view
+    assert "verifier_rejected_claims" not in view
+    assert "source_issues" not in item["evidence"]
+    assert item["evidence"]["source_issue_ids"] == ["I0001"]
+    assert "professor_feedback" not in item
+    assert "all_issues" not in view["views"]["classified_issue_verifier"]
+    assert "issues_by_type" not in view["views"]["classified_issue_verifier"]

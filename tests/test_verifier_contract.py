@@ -82,6 +82,55 @@ def test_mapper_contract_with_minimal_fixture():
     assert payload['counts']['slide_errors'] == 1
 
 
+def test_mapper_reconstructs_status_lists_from_feedback_items():
+    raw = {
+        'feedback_items': [
+            {'feedback_id': 'F1', 'status': 'confirmed'},
+            {'feedback_id': 'F2', 'status': 'professor_check'},
+            {'feedback_id': 'F3', 'status': 'rejected'},
+            {'feedback_id': 'F4', 'status': 'rejected'},
+        ],
+        'slide_errors': [],
+    }
+    payload = build_content_verification_response('lec-4', 'stem-4', '/tmp/slim.json', raw)
+    _assert_contract(payload)
+    assert [item['feedback_id'] for item in payload['final_confirmed_claims']] == ['F1']
+    assert [item['feedback_id'] for item in payload['needs_review_claims']] == ['F2']
+    assert [item['feedback_id'] for item in payload['verifier_rejected_claims']] == ['F3', 'F4']
+    assert payload['counts']['final_confirmed'] == 1
+    assert payload['counts']['needs_review'] == 1
+    assert payload['counts']['rejected'] == 2
+
+
+def test_mapper_restores_legacy_feedback_display_aliases():
+    raw = {
+        'feedback_items': [
+            {
+                'feedback_id': 'F1',
+                'status': 'professor_check',
+                'problem': {
+                    'summary': '요약',
+                    'why_wrong': '근거',
+                    'recommendation': '수정안',
+                },
+                'evidence': {},
+            },
+        ],
+        'slide_errors': [],
+    }
+    payload = build_content_verification_response('lec-5', 'stem-5', '/tmp/slim.json', raw)
+    item = payload['feedback_items'][0]
+
+    assert item['problem']['correct_info'] == '수정안'
+    assert item['professor_feedback'] == {
+        'summary': '요약',
+        'why_wrong': '근거',
+        'teaching_note': '수정안',
+        'suggested_rephrase': '수정안',
+    }
+    assert item['evidence']['evidence_in_context'] == '근거'
+
+
 def test_mapper_contract_with_empty_fixture():
     payload = build_content_verification_response('lec-3', 'stem-3', '/tmp/z.json', {})
     _assert_contract(payload)
