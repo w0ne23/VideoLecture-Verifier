@@ -738,6 +738,8 @@ def _response_contract() -> str:
 공통 출력 규칙:
 - is_valid_issue, category_severity, context_resolution은 0.0 이상 1.0 이하 숫자입니다.
 - context_resolution은 문맥이 issue를 해소하는 정도입니다. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨입니다.
+- reason과 minimal_fix는 반드시 한국어로 작성하세요. 영어 원문 용어, API 이름, 공식 문서 표현이 필요하면 한국어 설명 뒤 괄호 안에만 짧게 병기하세요.
+- judgment 같은 enum 값과 JSON key 이름은 지정된 영어 값을 그대로 사용하세요.
 - 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_resolution을 높게 주세요."""
 
 
@@ -799,6 +801,8 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
 - 응답은 JSON 객체 하나만 출력하세요.
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
+- reason과 minimal_fix는 반드시 한국어로 작성하세요. 판단 과정에서 영어 자료나 영어 개념어를 사용해도 되지만, 설명 문장은 한국어로 쓰고 필요한 영어 원문/API명/전문용어만 괄호 안에 짧게 병기하세요.
+- JSON key 이름과 judgment enum 값(valid_issue, partially_resolved, not_issue, insufficient_context)은 영어 그대로 유지하세요.
 - reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
 - 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
