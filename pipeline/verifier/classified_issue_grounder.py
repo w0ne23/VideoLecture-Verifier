@@ -63,10 +63,6 @@ SOURCE_PRIORITY_LABELS = {
     5: "encyclopedia",
 }
 EXCLUDED_SOURCE_LEVELS = {"tutorial", "blog", "forum", "weak_secondary"}
-SOURCE_PRIORITY_POLICY = (
-    "official_docs > standards/government > academic > educational > encyclopedia; "
-    "tutorial/blog/forum sources are fetched and logged but excluded from automatic decisions"
-)
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -267,10 +263,10 @@ Current date: {current_date}
 
 Your task is to check whether external web evidence supports or refutes the issue.
 Only judge externally verifiable facts. Do not overrule lecture-context judgments unless web evidence clearly supports/refutes the factual claim.
-Record the exact search queries you used or would use to find the evidence.
-Use both Korean and English search queries when the lecture claim is Korean. Include at least one high-priority source query and one fallback query for Wikipedia or educational/reference material.
-Record bilingual match terms that connect the Korean lecture claim to likely English source wording.
-For each source URL, include the most relevant sentence or paragraph you relied on. Prefer short passages, but keep enough surrounding context to avoid misleading quote fragments.
+Record only the most useful search queries you used or would use to find the evidence.
+Use both Korean and English search queries when the lecture claim is Korean, but keep the list short.
+Record only the most important bilingual match terms that connect the Korean lecture claim to likely English source wording.
+For supports_issue/refutes_issue only, include short source passages. For insufficient_evidence/grounding_unavailable, do not include source passages or evidence summaries.
 
 Issue category: {issue.get("category", "")}
 Resolved claim: {issue.get("resolved_claim", "")}
@@ -300,12 +296,12 @@ Do not mark a claim false only because a source does not explicitly state it. Us
 If the claim can only be supported or rejected by indirect arithmetic, unofficial blogs, screenshots, or mixed sources, use uncertain unless the official source clearly supplies all required values.
 
 Return exactly these eight lines. Do not use JSON or markdown.
-SEARCH_QUERIES=query1 | query2
+SEARCH_QUERIES=query1 | query2 | query3
 MATCH_TERMS=Korean term | English term | synonym
 CLAIM_VERDICT=claim_true | claim_false | uncertain
 STATUS=supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable
-REASON=one or two Korean sentences explaining the web-grounded judgment
-SOURCES=URL1, URL2
+REASON=one short Korean sentence explaining the web-grounded judgment
+SOURCES=URL1, URL2, URL3
 EVIDENCE_PASSAGES=[{{"url":"URL1","quote_or_paragraph":"source passage","key_sentence":"most important sentence","stance":"supports_issue | refutes_issue | unclear","why_relevant":"why this passage matters"}}]
 SUMMARY=short Korean summary of the evidence
 
@@ -313,6 +309,7 @@ Consistency requirements:
 - If claim_verdict is claim_false, issue_supported must be true and status must be supports_issue.
 - If claim_verdict is claim_true, issue_supported must be false and status must be refutes_issue.
 - If claim_verdict is uncertain, issue_supported must be null and status must be insufficient_evidence.
+- If status is insufficient_evidence or grounding_unavailable, return SEARCH_QUERIES and MATCH_TERMS as empty, SOURCES as empty, EVIDENCE_PASSAGES as [], and SUMMARY as an empty string.
 """
 
 
@@ -320,13 +317,13 @@ def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> st
     prompt = _build_grounding_prompt(issue, current_date)
     json_contract = """Return JSON only:
 {
-  "search_queries": ["query1", "query2"],
+  "search_queries": ["query1", "query2", "query3"],
   "match_terms": ["Korean term", "English term", "synonym"],
   "claim_verdict": "claim_true | claim_false | uncertain",
   "status": "supports_issue | refutes_issue | insufficient_evidence | grounding_unavailable",
   "issue_supported": true,
-  "reason": "one or two Korean sentences explaining the web-grounded judgment",
-  "evidence_sources": ["URL1", "URL2"],
+  "reason": "one short Korean sentence explaining the web-grounded judgment",
+  "evidence_sources": ["URL1", "URL2", "URL3"],
   "evidence_passages": [
     {
       "url": "URL1",
@@ -338,6 +335,7 @@ def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> st
   ],
   "evidence_summary": "short Korean summary of the evidence"
 }
+For insufficient_evidence or grounding_unavailable, keep only status fields: use empty search_queries, match_terms, evidence_sources, evidence_passages, and evidence_summary.
 """
     return re.sub(
         r"Return exactly these eight lines\..*?(?=Consistency requirements:)",
@@ -1300,6 +1298,7 @@ Return JSON only:
   "reason": "one or two Korean sentences",
   "evidence_summary": "short Korean evidence summary"
 }}
+For insufficient_evidence, keep reason to one short Korean sentence and evidence_summary as an empty string.
 """
 
 
@@ -1682,22 +1681,86 @@ def _trial_selected_sources(trial: dict[str, Any], priority: int) -> list[dict[s
     ]
 
 
-def _source_priority_diagnostics(trials: list[dict[str, Any]]) -> dict[str, Any]:
-    counts = Counter()
-    excluded_counts = Counter()
-    for trial in trials:
-        for source in trial.get("verified_sources", []) or []:
-            if not isinstance(source, dict):
+def _trim_text(value: Any, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "..."
+
+
+def _selected_evidence_passages(selected_sources: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        passages = source.get("matched_passages") or source.get("verified_model_passages") or []
+        if not isinstance(passages, list):
+            continue
+        for passage in passages:
+            if not isinstance(passage, dict):
                 continue
-            level = str(source.get("trust_level") or "unknown")
-            if source.get("priority_eligible"):
-                counts[level] += 1
-            elif source.get("direct_match"):
-                excluded_counts[level] += 1
-    return {
-        "eligible_direct_source_counts": dict(counts),
-        "excluded_direct_source_counts": dict(excluded_counts),
-    }
+            sentence = (
+                passage.get("key_sentence")
+                or passage.get("quote_or_paragraph")
+                or passage.get("matched_text")
+                or ""
+            )
+            sentence = _trim_text(sentence, 500)
+            if not sentence:
+                continue
+            key = (url, sentence)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "url": url,
+                "key_sentence": sentence,
+                "stance": _normalize_status(passage.get("stance") or passage.get("status") or ""),
+                "why_relevant": _trim_text(passage.get("why_relevant") or "", 220),
+                "match_status": passage.get("match_status", ""),
+                "match_score": passage.get("match_score"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _compact_grounding_payload(
+    *,
+    status: str,
+    claim_verdict: str,
+    issue_supported: bool | None,
+    reason: str,
+    source_urls: list[str],
+    selected_sources: list[dict[str, Any]],
+    priority_trials: list[dict[str, Any]],
+    status_counts: Counter[str],
+    best_priority: int | None,
+) -> dict[str, Any]:
+    status = _normalize_status(status)
+    base: dict[str, Any] = {"status": status}
+    if status not in {"supports_issue", "refutes_issue"}:
+        return base
+
+    evidence_summary = " / ".join(
+        str(trial.get("evidence_summary") or "").strip()
+        for trial in priority_trials
+        if str(trial.get("evidence_summary") or "").strip()
+    )
+    base.update({
+        "reason": _trim_text(reason, 260),
+        "evidence_sources": source_urls[:3],
+        "evidence_passages": _selected_evidence_passages(selected_sources),
+        "evidence_summary": _trim_text(evidence_summary, 800),
+        "trial_status_counts": dict(status_counts),
+        "selected_source_priority": best_priority,
+        "selected_source_priority_label": SOURCE_PRIORITY_LABELS.get(best_priority, "") if best_priority else "",
+        "selected_source_count": len(selected_sources),
+        "source_verification_policy": "supports/refutes requires fetched URL text with directly matched claim passages",
+    })
+    return base
 
 
 def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1752,32 +1815,17 @@ def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, An
         )
 
     status_counts = Counter(_normalize_status(trial.get("status")) for trial in trials)
-    priority_diagnostics = _source_priority_diagnostics(trials)
-    return {
-        "status": status,
-        "claim_verdict": claim_verdict,
-        "issue_supported": issue_supported,
-        "reason": reason,
-        "evidence_sources": source_urls,
-        "evidence_summary": " / ".join(
-            str(trial.get("evidence_summary") or "").strip()
-            for trial in priority_trials
-            if str(trial.get("evidence_summary") or "").strip()
-        )[:1200],
-        "search_queries": {
-            str(trial.get("model_spec") or trial.get("model") or ""): trial.get("search_queries", [])
-            for trial in trials
-        },
-        "trials": trials,
-        "trial_status_counts": dict(status_counts),
-        "selected_source_priority": best_priority,
-        "selected_source_priority_label": SOURCE_PRIORITY_LABELS.get(best_priority, "") if best_priority else "",
-        "selected_source_count": len(selected_sources),
-        "source_priority_diagnostics": priority_diagnostics,
-        "source_verification_policy": "supports/refutes requires fetched URL text with directly matched claim passages",
-        "source_priority_policy": SOURCE_PRIORITY_POLICY,
-        "excluded_source_levels": sorted(EXCLUDED_SOURCE_LEVELS),
-    }
+    return _compact_grounding_payload(
+        status=status,
+        claim_verdict=claim_verdict,
+        issue_supported=issue_supported,
+        reason=reason,
+        source_urls=source_urls,
+        selected_sources=selected_sources,
+        priority_trials=priority_trials,
+        status_counts=status_counts,
+        best_priority=best_priority,
+    )
 
 
 def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -> tuple[dict[str, Any], dict[str, int]]:
@@ -1992,12 +2040,7 @@ def ground_classified_issues(
                 reason = "factual_error/temporal_error가 아니어서 web grounding을 실행하지 않음"
             else:
                 reason = "web grounding 대상 조건에 맞지 않아 실행하지 않음"
-            issue["web_grounding"] = {
-                "status": "not_applicable",
-                "reason": reason,
-                "evidence_sources": [],
-                "evidence_summary": "",
-            }
+            issue["web_grounding"] = {"status": "not_applicable"}
 
     verifier_result["grounding"] = {
         "enabled": True,
