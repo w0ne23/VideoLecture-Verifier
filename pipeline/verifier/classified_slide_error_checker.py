@@ -119,6 +119,8 @@ def _find_slide_image(img_dir: str | None, slide_no: int) -> Path | None:
         return None
     base = Path(img_dir)
     candidates = (
+        base / f"scene_{slide_no:03d}_base.jpg",
+        base / f"scene_{slide_no:03d}_base.png",
         base / f"slide_{slide_no:03d}_base.jpg",
         base / f"slide_{slide_no:03d}_base.png",
         base / f"slide_{slide_no:03d}_start.jpg",
@@ -127,6 +129,39 @@ def _find_slide_image(img_dir: str | None, slide_no: int) -> Path | None:
         base / f"slide_{slide_no:03d}_end.png",
     )
     return next((path for path in candidates if path.exists()), None)
+
+
+_BASE_VARIANT_RE = re.compile(r"^(scene_\d+|slide_\d+)_.*(\.[A-Za-z0-9]+)$")
+
+
+def _force_base_image_path(
+    image_path: object, img_dir: str | None, slide_no: int
+) -> Path | None:
+    """annot(필기)·build(애니메이션 진행) 변형 이미지가 아니라 항상 base 이미지로
+    판정하도록 강제합니다. annot/build 프레임은 필기나 미완성 애니메이션 상태 때문에
+    텍스트/도형이 겹쳐 보여 visual_defect 오탐을 유발하므로, base 한 장만 채점 대상으로
+    삼습니다. annot/build도 결국 base에서 파생된 프레임이라 base만 봐도 충분합니다."""
+    candidates: list[Path] = []
+    raw = str(image_path or "").strip()
+    if raw:
+        match = _BASE_VARIANT_RE.match(Path(raw).name)
+        if match:
+            candidates.append(Path(raw).parent / f"{match.group(1)}_base{match.group(2)}")
+    if img_dir:
+        base = Path(img_dir)
+        candidates.extend(
+            [
+                base / f"scene_{slide_no:03d}_base.jpg",
+                base / f"scene_{slide_no:03d}_base.png",
+                base / f"slide_{slide_no:03d}_base.jpg",
+                base / f"slide_{slide_no:03d}_base.png",
+            ]
+        )
+    for candidate in candidates:
+        resolved = _existing_path(str(candidate))
+        if resolved and resolved.exists():
+            return resolved
+    return None
 
 
 def _resolve_img_dir(merged_payload: dict[str, Any], merged_path: str | Path | None) -> str | None:
@@ -259,6 +294,9 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 - 아래 OCR 텍스트는 보조 정보일 뿐이며, 이미지와 다르면 이미지를 우선하세요.
 - 내용의 사실성, 더 좋은 표현, 문체 개선, 미적 취향(배치·색상 선택 등 디자인 문제)은 보고하지 마세요.
 - 애매하면 보고하지 마세요.
+- 아래 "번호"는 영상에서 화면이 바뀔 때마다 시스템이 자동으로 매긴 내부 색인일 뿐이며, 슬라이드
+  자료 자체에 인쇄된 페이지·목차 번호와 무관합니다. 이 번호가 슬라이드 이미지 안에 보이는 번호와
+  다르다는 이유로는 절대 오류를 보고하지 마세요.
 
 대상 슬라이드:
 - 번호: {slide_no}
@@ -280,6 +318,8 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
   이 대응 확인은 프로그래밍 코드뿐 아니라 제곱근·분수·지수가 섞인 수식에도 똑같이 적용하세요.
   수식에서는 괄호 기호가 작거나 다른 기호(근호, 분수선 등)와 붙어 있어 놓치기 쉬우니, 여는 기호가
   나올 때마다 그 수식이 끝날 때까지 대응하는 닫는 기호가 실제로 나오는지 끝까지 따라가며 확인하세요.
+  단, 목록 항목의 번호·기호로 쓰인 단독 괄호(예: 항목 앞에 숫자나 문자 뒤에 닫는 괄호 하나만
+  붙는 표기)는 코드나 수식이 아니므로 이 괄호 짝 검사 대상에서 제외하세요.
 - visual_defect: 이미지가 깨지거나 로드되지 않아 내용을 알아볼 수 없는 경우, 텍스트·도형이
   서로 겹쳐 내용을 읽을 수 없는 경우, 콘텐츠가 슬라이드 경계에 잘려 일부가 안 보이는 경우.
   미적 취향의 문제가 아니라 콘텐츠를 읽을 수 없게 만드는 기능적 결함일 때만 보고하세요.
@@ -296,6 +336,9 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 - 조사/어미/접속 표현 교정
 - 외래어를 한국어로 순화하는 교정
 - 쉼표 추가, 문장 자연화, 더 좋은 표현 제안
+- 시스템이 매긴 슬라이드 번호와 슬라이드 이미지에 인쇄된 번호가 다른 경우
+- 번호 매기기·항목 기호로 쓰인 단독 괄호(예: 목록 항목 앞에 숫자나 문자 뒤에 닫는 괄호 하나만
+  오는 표기)를 코드나 수식의 괄호 짝 오류로 보는 것 — 이런 표기는 코드·수식이 아닙니다
 
 출력 형식은 JSON만 허용합니다.
 
@@ -361,6 +404,8 @@ def _build_code_transcription_prompt(slide_no: int, title: str) -> str:
 
 작업:
 - 이 슬라이드 이미지 안에 프로그래밍 코드 또는 괄호가 포함된 수식이 있는지 확인하세요.
+- 목록 항목의 번호·기호로 쓰인 단독 괄호(예: 항목 앞에 숫자나 문자 뒤에 닫는 괄호 하나만 붙는
+  표기)는 코드나 수식이 아니므로 전사 대상이 아닙니다.
 - 있다면, 보이는 그대로 한 글자도 빠짐없이 옮겨 적으세요. 특히 소괄호()·대괄호[]·중괄호{{}}는
   절대 생략하거나 요약하지 말고, 실제 이미지에 있는 개수와 위치 그대로 옮기세요.
 - 옳고 그름을 판단하거나 고치지 마세요. 이미지에 실제로 보이는 그대로 옮겨 적는 것이 유일한 목표입니다.
@@ -400,7 +445,11 @@ def _check_code_syntax_mechanical(
     from . import claim_common as cc
 
     slide_number = _slide_number(slide) or 0
-    img_path = _existing_path(slide.get("image_path")) or _find_slide_image(img_dir, slide_number)
+    img_path = (
+        _force_base_image_path(slide.get("image_path"), img_dir, slide_number)
+        or _existing_path(slide.get("image_path"))
+        or _find_slide_image(img_dir, slide_number)
+    )
     img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
     if not img_bytes:
         return [], 0, cc._empty_token_usage()
@@ -604,7 +653,11 @@ def _check_single_slide(
     title = str(slide.get("title", "") or "")
     slide_text = str(slide.get("slide_text") or slide.get("t1") or "")
     prompt = _build_slide_error_prompt(slide_number, title, slide_text)
-    img_path = _existing_path(slide.get("image_path")) or _find_slide_image(img_dir, slide_number)
+    img_path = (
+        _force_base_image_path(slide.get("image_path"), img_dir, slide_number)
+        or _existing_path(slide.get("image_path"))
+        or _find_slide_image(img_dir, slide_number)
+    )
     img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
     response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
     token_usage = cc._empty_token_usage()
