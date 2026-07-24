@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .issue_type_classifier import (
+    ALL_ISSUE_TYPES,
     COMPOSITE_ISSUE_TYPE,
     ISSUE_TYPES,
     TOKEN_USAGE_FIELDS,
@@ -30,7 +31,7 @@ from .issue_type_classifier import (
 )
 
 
-SCHEMA_VERSION = "classified_issue_verifier.v2"
+SCHEMA_VERSION = "classified_issue_verifier.v3"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 5
@@ -50,6 +51,7 @@ CATEGORY_LABELS = {
     "temporal_error": "오래된 내용",
     "scope_overclaim": "과도한 일반화",
     "confusing_explanation": "혼동 가능 설명",
+    COMPOSITE_ISSUE_TYPE: "복합 오류",
 }
 
 
@@ -348,6 +350,46 @@ def _candidate_bundle_id(base_id: str, category: str) -> str:
     return f"{base_id}::{category}"
 
 
+def _composite_category_label(candidate_categories: list[str]) -> str:
+    labels = [
+        CATEGORY_LABELS.get(category, category)
+        for category in candidate_categories
+        if category in ISSUE_TYPES
+    ]
+    if not labels:
+        return CATEGORY_LABELS[COMPOSITE_ISSUE_TYPE]
+    return f"{CATEGORY_LABELS[COMPOSITE_ISSUE_TYPE]}({', '.join(labels)})"
+
+
+def _normalized_composite_probabilities(
+    candidate_categories: list[str],
+    weighted_scores: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, float]]:
+    raw = {
+        category: _clamp01(weighted_scores.get(category))
+        for category in candidate_categories
+        if category in ISSUE_TYPES
+    }
+    if not raw:
+        return {}, {}
+
+    total = sum(raw.values())
+    if total <= 0.0:
+        equal = round(1.0 / len(raw), 6)
+        normalized = {category: equal for category in raw}
+    else:
+        normalized = {
+            category: round(value / total, 6)
+            for category, value in raw.items()
+        }
+
+    categories = list(normalized)
+    if categories:
+        previous_sum = sum(normalized[category] for category in categories[:-1])
+        normalized[categories[-1]] = round(max(0.0, 1.0 - previous_sum), 6)
+    return raw, normalized
+
+
 def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
     return {
         "id": _candidate_bundle_id(ref["id"], category),
@@ -364,26 +406,63 @@ def _merge_composite_verification(
     candidate_categories: list[str],
     candidate_records: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    selected_category = max(
+    candidate_categories = [
+        category
+        for category in candidate_categories
+        if category in ISSUE_TYPES and category in candidate_records
+    ]
+    if not candidate_categories:
+        raise ValueError(f"composite issue {ref.get('id', '')} has no candidate verification records")
+    issue = ref["issue"]
+    raw_probabilities, normalized_probabilities = _normalized_composite_probabilities(
+        candidate_categories,
+        issue.get("weighted_scores") or {},
+    )
+    candidate_scores = {
+        category: _clamp01(candidate_records[category].get("final_severity_score"))
+        for category in candidate_categories
+    }
+    candidate_contributions = {
+        category: round(normalized_probabilities.get(category, 0.0) * candidate_scores.get(category, 0.0), 6)
+        for category in candidate_categories
+    }
+    final_score = round(sum(candidate_contributions.values()), 6)
+    primary_category = max(
         candidate_categories,
         key=lambda category: (
-            float(candidate_records[category].get("final_severity_score") or 0.0),
+            candidate_contributions.get(category, 0.0),
+            candidate_scores.get(category, 0.0),
+            normalized_probabilities.get(category, 0.0),
             -ISSUE_TYPES.index(category),
         ),
     )
-    selected = dict(candidate_records[selected_category])
-    issue = ref["issue"]
+    selected = dict(candidate_records[primary_category])
+    composite_label = _composite_category_label(candidate_categories)
+    final_status = _status_from_severity(final_score)
     selected.update({
         "original_final_issue_type": COMPOSITE_ISSUE_TYPE,
         "original_final_issue_type_label": "복합 오류",
         "routing_reasons": issue.get("routing_reasons", []),
         "composite_candidate_categories": list(candidate_categories),
         "candidate_verifications": dict(candidate_records),
-        "selected_issue_type": selected_category,
-        "selected_issue_type_label": CATEGORY_LABELS.get(selected_category, selected_category),
-        "selected_from_composite": True,
-        "category": selected_category,
-        "category_label": CATEGORY_LABELS.get(selected_category, selected_category),
+        "primary_issue_type": primary_category,
+        "primary_issue_type_label": CATEGORY_LABELS.get(primary_category, primary_category),
+        "scored_as_composite": True,
+        "composite_scoring": {
+            "method": "weighted_expected_severity",
+            "raw_probabilities": raw_probabilities,
+            "normalized_probabilities": normalized_probabilities,
+            "candidate_scores": candidate_scores,
+            "candidate_contributions": candidate_contributions,
+            "weighted_score": final_score,
+            "primary_issue_type": primary_category,
+            "primary_issue_type_label": CATEGORY_LABELS.get(primary_category, primary_category),
+        },
+        "category": COMPOSITE_ISSUE_TYPE,
+        "category_label": composite_label,
+        "final_severity_score": final_score,
+        "final_severity_percent": round(final_score * 100.0, 2),
+        "needs_manual_review": final_status == "professor_check",
         "id": ref["id"],
     })
     previous = dict(selected.get("previous_classification") or {})
@@ -1044,7 +1123,7 @@ def _issue_result_record(
 
 
 def _group_issue_results(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped = {category: [] for category in ISSUE_TYPES}
+    grouped = {category: [] for category in ALL_ISSUE_TYPES}
     for record in records:
         category = record.get("category")
         if category in grouped:
@@ -1068,8 +1147,8 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
     )
     return {
         "total_issue_count": len(records),
-        "breakdown_by_type": {category: by_type.get(category, 0) for category in ISSUE_TYPES},
-        "composite_resolved_count": sum(1 for record in records if record.get("selected_from_composite")),
+        "breakdown_by_type": {category: by_type.get(category, 0) for category in ALL_ISSUE_TYPES},
+        "composite_resolved_count": sum(1 for record in records if record.get("scored_as_composite")),
         "high_severity_count": high_count,
         "needs_manual_review_count": manual_review_count,
         "model_breakdown": {
@@ -1252,8 +1331,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "average_category_severity",
                 0.0,
             )
-        if issue.get("selected_from_composite"):
-            feedback_items[-1]["classified_issue_verifier"]["selected_from_composite"] = True
+        if issue.get("scored_as_composite"):
+            feedback_items[-1]["classified_issue_verifier"]["scored_as_composite"] = True
             feedback_items[-1]["classified_issue_verifier"]["original_final_issue_type"] = issue.get(
                 "original_final_issue_type",
                 COMPOSITE_ISSUE_TYPE,
@@ -1267,7 +1346,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "candidate_verifications",
                 {},
             )
-            feedback_items[-1]["classified_issue_verifier"]["selected_issue_type"] = issue.get("selected_issue_type", "")
+            feedback_items[-1]["classified_issue_verifier"]["primary_issue_type"] = issue.get("primary_issue_type", "")
+            feedback_items[-1]["classified_issue_verifier"]["composite_scoring"] = issue.get("composite_scoring", {})
 
     confirmed = [item for item in feedback_items if item.get("status") == "confirmed"]
     review = [item for item in feedback_items if item.get("status") == "professor_check"]
@@ -1483,7 +1563,7 @@ def judge_classified_issues(
         "slide_classified_path": str(slide_classified_path or ""),
         "generated_at": _now_iso(),
         "current_date": current_date,
-        "categories": {category: CATEGORY_LABELS.get(category, category) for category in ISSUE_TYPES},
+        "categories": {category: CATEGORY_LABELS.get(category, category) for category in ALL_ISSUE_TYPES},
         "model_weights": model_weights,
         "summary": _summary(records, model_results),
         "issues_by_type": grouped,

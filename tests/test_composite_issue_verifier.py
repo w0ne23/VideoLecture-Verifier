@@ -28,7 +28,7 @@ def test_composite_candidate_categories_model_disagreement_union():
     assert _composite_candidate_categories(issue) == ["temporal_error", "scope_overclaim", "factual_error"]
 
 
-def test_merge_composite_verification_picks_highest_score():
+def test_merge_composite_verification_uses_weighted_expected_score():
     ref = {
         "id": "I0001",
         "issue": {
@@ -38,7 +38,7 @@ def test_merge_composite_verification_picks_highest_score():
     }
     merged = _merge_composite_verification(
         ref,
-        ["factual_error", "scope_overclaim"],
+        ["scope_overclaim", "factual_error"],
         {
             "factual_error": {
                 "final_severity_score": 0.5,
@@ -54,6 +54,22 @@ def test_merge_composite_verification_picks_highest_score():
             },
         },
     )
-    assert merged["selected_issue_type"] == "scope_overclaim"
-    assert merged["selected_from_composite"] is True
+    assert merged["category"] == "composite_issue"
+    assert merged["category_label"] == "복합 오류(과도한 일반화, 사실 오류)"
+    assert merged["final_severity_score"] == 0.64
+    assert merged["final_severity_percent"] == 64.0
+    assert merged["scored_as_composite"] is True
+    assert merged["primary_issue_type"] == "scope_overclaim"
+    assert merged["composite_scoring"]["normalized_probabilities"] == {
+        "scope_overclaim": 0.466667,
+        "factual_error": 0.533333,
+    }
+    assert merged["composite_scoring"]["candidate_scores"] == {
+        "scope_overclaim": 0.8,
+        "factual_error": 0.5,
+    }
+    assert merged["composite_scoring"]["candidate_contributions"] == {
+        "scope_overclaim": 0.373334,
+        "factual_error": 0.266666,
+    }
     assert set(merged["candidate_verifications"].keys()) == {"factual_error", "scope_overclaim"}
