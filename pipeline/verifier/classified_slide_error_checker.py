@@ -10,6 +10,14 @@ stage's own OCR hint, and re-presenting it here would anchor the judgment
 call on the same mistake a second time. Instead, each slide is re-transcribed
 here from the image alone (`_transcribe_slide_text`) before judging, mirroring
 the transcribe-then-judge split already used for code_syntax.
+
+Even with that split, the judging model can still misread the same subtle
+glyph on its own (independent of the transcription), especially on small text
+in a downscaled full-slide image. text_error/numeric_unit candidates are
+therefore re-verified against a cropped, zoomed-in region of the original
+image (`_verify_error_with_crop`) before being finalized, since a focused
+crop avoids the resolution loss a vision API applies when downsampling the
+whole slide.
 """
 
 from __future__ import annotations
@@ -17,12 +25,15 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from io import BytesIO
 import hashlib
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from .issue_type_classifier import (
     TOKEN_USAGE_FIELDS,
@@ -31,7 +42,7 @@ from .issue_type_classifier import (
 )
 
 
-SCHEMA_VERSION = "classified_slide_error_checker.v4"
+SCHEMA_VERSION = "classified_slide_error_checker.v5"
 DEFAULT_MODELS = ("gpt",)
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MIN_SCORE = 0.0
@@ -368,7 +379,8 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
       "corrected_text": "수정 표현 (visual_defect면 빈 문자열)",
       "confidence": 0.0,
       "reason": "한두 문장 근거",
-      "confirmed_after_recheck": true
+      "confirmed_after_recheck": true,
+      "bbox": {{"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}}
     }}
   ]
 }}
@@ -387,6 +399,9 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
    최종 결정한 결과를 담으세요. 재확인 결과 오류가 아니라고 판단되면 그 항목은 배열에서 완전히
    빼세요 — confirmed_after_recheck를 false로 적어서 배열에 남겨두지 마세요. 즉 배열에 실제로
    들어가는 항목은 전부 confirmed_after_recheck가 true여야 합니다.
+9. bbox: problematic_text(또는 visual_defect 위치)가 이미지 안에서 있는 대략적인 사각형 영역을
+   0~1 정규화 좌표로 표시하세요. (x0, y0)는 좌상단, (x1, y1)은 우하단 모서리이며, 이미지 전체
+   너비/높이를 1.0으로 봅니다. 정확하지 않아도 되니 최대한 근접하게 표시하세요.
 """
 
 
@@ -668,11 +683,7 @@ def _is_reportable_slide_error(
         "더 좋은 표현",
         "문체",
         "선택의 의미",
-        "나열",
-        "병렬",
         "쉼표",
-        "구분",
-        "별개",
         "띄어쓰기",
         "공백",
         "줄바꿈",
@@ -754,6 +765,144 @@ def _normalize_error(
     }
 
 
+def _extract_bbox(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = row.get("bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        x0, y0, x1, y1 = (
+            float(bbox.get("x0")),
+            float(bbox.get("y0")),
+            float(bbox.get("x1")),
+            float(bbox.get("y1")),
+        )
+    except (TypeError, ValueError):
+        return None
+    if not all(0.0 <= v <= 1.0 for v in (x0, y0, x1, y1)):
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _crop_and_zoom_image_bytes(
+    image_path: Path,
+    bbox: tuple[float, float, float, float],
+    *,
+    pad_ratio: float = 0.15,
+    min_width: int = 1000,
+) -> bytes | None:
+    """bbox 주변을 여유 있게 크롭해서 확대합니다. 전체 슬라이드를 한 번에 보낼 때는 비전
+    API가 이미지를 내부적으로 다운스케일하면서 작은 글자의 디테일을 뭉갤 수 있는데, 문제
+    구간만 잘라 확대해 다시 보내면 그 구간이 다운스케일의 영향을 덜 받아 더 선명하게
+    보입니다."""
+    try:
+        image = Image.open(image_path)
+        image.load()
+    except Exception:
+        return None
+    width, height = image.size
+    x0, y0, x1, y1 = bbox
+    # bbox 자체가 한 단어처럼 아주 좁으면 bbox 크기에 비례한 여백만으로는 주변 문맥이
+    # 부족해 잘려 나가기 쉽다(글자가 안 보여 "판독 불가"로 되돌아옴). 전체 이미지 폭의
+    # 일정 비율을 최소 여백으로 강제해 항상 읽을 수 있는 크기의 크롭을 확보한다.
+    pad_x = max((x1 - x0) * pad_ratio, 0.04)
+    pad_y = max((y1 - y0) * pad_ratio, 0.04)
+    left = max(0, int((x0 - pad_x) * width))
+    top = max(0, int((y0 - pad_y) * height))
+    right = min(width, int((x1 + pad_x) * width))
+    bottom = min(height, int((y1 + pad_y) * height))
+    if right - left < 4 or bottom - top < 4:
+        return None
+    crop = image.convert("RGB").crop((left, top, right, bottom))
+    if crop.width < min_width:
+        scale = min_width / crop.width
+        crop = crop.resize((min_width, max(1, int(crop.height * scale))), Image.LANCZOS)
+    buf = BytesIO()
+    crop.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+def _build_crop_verify_prompt(problematic_text: str, corrected_text: str, error_type: str) -> str:
+    return f"""당신은 강의 슬라이드에서 발견된 오류 후보를 확대된 이미지로 최종 확인하는
+검수자입니다.
+
+이전 단계에서 아래 오류 후보가 보고되었습니다:
+- error_type: {error_type}
+- 문제로 지목된 표기: "{problematic_text}"
+- 제안된 수정: "{corrected_text}"
+
+지금 보여주는 이미지는 그 부분을 확대(zoom)한 것입니다. 한 글자씩 주의 깊게 읽고 그대로
+옮겨 적은 뒤(actual_text), 그 결과를 근거로 오류 후보가 실제로 유효한지 판단하세요.
+
+verdict 값 정의 (이 단어 뜻 그대로 사용하세요):
+- "error_confirmed": actual_text가 "문제로 지목된 표기"와 같고, 그것이 실제로 잘못된 표기가
+  맞습니다 → 오류 신고를 그대로 유지합니다.
+- "not_an_error": 확대해서 다시 보니 실제로는 "{corrected_text}"처럼 이미 올바르게 쓰여 있거나,
+  애초에 오류가 아니었습니다 → 오류 신고를 취소합니다.
+- "inconclusive": 이미지가 잘리거나 흐려서 판단할 근거가 부족합니다 → 오류 신고를 그대로
+  유지합니다(판단 보류).
+
+출력 형식은 JSON만 허용합니다.
+
+```json
+{{
+  "actual_text": "확대 이미지에서 실제로 보이는 글자 그대로",
+  "verdict": "error_confirmed | not_an_error | inconclusive"
+}}
+```
+
+JSON 외 텍스트는 출력하지 마세요.
+"""
+
+
+def _verify_error_with_crop(
+    *,
+    model: str,
+    image_path: Path,
+    bbox: tuple[float, float, float, float],
+    error: dict[str, Any],
+    max_tokens: int,
+) -> tuple[bool, int, dict[str, Any]]:
+    from . import claim_common as cc
+
+    crop_bytes = _crop_and_zoom_image_bytes(image_path, bbox)
+    if not crop_bytes:
+        return True, 0, cc._empty_token_usage()
+
+    verify_model = cc._resolve_stage_model("slide_error_transcribe") or model
+    prompt = _build_crop_verify_prompt(
+        error.get("problematic_text", ""), error.get("corrected_text", ""), error.get("error_type", "")
+    )
+    response_format = (
+        {"type": "json_object"} if cc._supports_json_object_response_format(verify_model) else None
+    )
+    token_usage = cc._empty_token_usage()
+    api_calls = 0
+
+    for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
+        text, call_usage = cc._call_llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            image_bytes=crop_bytes,
+            thinking_budget=0,
+            response_format=response_format,
+            stage="slide_error_transcribe",
+        )
+        api_calls += 1
+        cc._add_call_usage(token_usage, call_usage)
+        try:
+            payload = json.loads(_strip_json_fence(text))
+            verdict = str(payload.get("verdict", "") or "").strip().lower()
+            confirmed = verdict != "not_an_error"
+            return confirmed, api_calls, token_usage
+        except Exception:
+            if attempt < cc.VERIFIER_PARSE_RETRIES:
+                continue
+    return True, api_calls, token_usage
+
+
 def _check_single_slide(
     *,
     model: str,
@@ -805,8 +954,23 @@ def _check_single_slide(
                 if not isinstance(row, dict):
                     continue
                 error = _normalize_error(row, slide=slide, slide_number=slide_number, model=model)
-                if error:
-                    errors.append(error)
+                if not error:
+                    continue
+                if error.get("error_type") in {"text_error", "numeric_unit"} and img_path and img_path.exists():
+                    bbox = _extract_bbox(row)
+                    if bbox:
+                        confirmed, verify_calls, verify_usage = _verify_error_with_crop(
+                            model=model,
+                            image_path=img_path,
+                            bbox=bbox,
+                            error=error,
+                            max_tokens=max_tokens,
+                        )
+                        api_calls += verify_calls
+                        cc._add_call_usage(token_usage, verify_usage)
+                        if not confirmed:
+                            continue
+                errors.append(error)
             break
         except Exception:
             if attempt < cc.VERIFIER_PARSE_RETRIES:
