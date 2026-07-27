@@ -13,6 +13,11 @@ from sqlalchemy import text
 
 from app.config import LOCAL_STORAGE_DIR, PIPELINE_ROOT
 from app.db import AsyncSessionLocal
+from app.logging_utils import (
+    attach_pipeline_log_handler,
+    detach_pipeline_log_handler,
+    reset_root_logging_handlers,
+)
 from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY
 from app.services.job_service import update_job_stage_sync
 
@@ -88,26 +93,31 @@ def pipeline_process(
             update_job_stage_sync(job_id, stages_array, _stage_text(stage_key, status))
             logger.info('[%s] Progress: %s -> %s', job_id, stage_key, status)
 
+        reset_root_logging_handlers()
         with log_file_path.open('w', encoding='utf-8', buffering=1) as log_file:
-            with redirect_stdout(log_file), redirect_stderr(log_file):
-                import pipeline.main as pipeline_main
+            log_handler = attach_pipeline_log_handler(log_file)
+            try:
+                with redirect_stdout(log_file), redirect_stderr(log_file):
+                    import pipeline.main as pipeline_main
 
-                update_job_stage_sync(
-                    job_id,
-                    [{'stage': key, 'status': value} for key, value in stages_state.items()],
-                    '파이프라인을 시작합니다.',
-                )
-                args = pipeline_main.get_parser().parse_args([
-                    '--input', str(video_path),
-                    '--output', str(output_dir),
-                    '--slides', str(slides_dir),
-                    '--lecture-id', lecture_id,
-                    *(['--title', title] if title else []),
-                    *(['--uploaded-at', uploaded_at] if uploaded_at else []),
-                ])
-                args.job_type = JOB_TYPE_VERIFY
-                os.environ['PYTHONUNBUFFERED'] = '1'
-                pipeline_main.run_pipeline(args, progress_callback=on_progress)
+                    update_job_stage_sync(
+                        job_id,
+                        [{'stage': key, 'status': value} for key, value in stages_state.items()],
+                        '파이프라인을 시작합니다.',
+                    )
+                    args = pipeline_main.get_parser().parse_args([
+                        '--input', str(video_path),
+                        '--output', str(output_dir),
+                        '--slides', str(slides_dir),
+                        '--lecture-id', lecture_id,
+                        *(['--title', title] if title else []),
+                        *(['--uploaded-at', uploaded_at] if uploaded_at else []),
+                    ])
+                    args.job_type = JOB_TYPE_VERIFY
+                    os.environ['PYTHONUNBUFFERED'] = '1'
+                    pipeline_main.run_pipeline(args, progress_callback=on_progress)
+            finally:
+                detach_pipeline_log_handler(log_handler)
 
         return True, str(output_dir), None
     except BaseException as exc:
