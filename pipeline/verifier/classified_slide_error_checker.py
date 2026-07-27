@@ -1,8 +1,15 @@
 """Slide error checker for the classified issue pipeline.
 
 The classified pipeline keeps its own output shape. The slide image is the
-source of truth, OCR text is only a hint, and whitespace/layout/style
-suggestions are not reportable slide errors.
+source of truth, and whitespace/layout/style suggestions are not reportable
+slide errors.
+
+Earlier stages' OCR-derived text (t1/slide_text) is never passed straight
+into the error-judging prompt: it can already contain misreads from that
+stage's own OCR hint, and re-presenting it here would anchor the judgment
+call on the same mistake a second time. Instead, each slide is re-transcribed
+here from the image alone (`_transcribe_slide_text`) before judging, mirroring
+the transcribe-then-judge split already used for code_syntax.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from .issue_type_classifier import (
 )
 
 
-SCHEMA_VERSION = "classified_slide_error_checker.v3"
+SCHEMA_VERSION = "classified_slide_error_checker.v4"
 DEFAULT_MODELS = ("gpt",)
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MIN_SCORE = 0.0
@@ -290,8 +297,17 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
     return f"""당신은 강의 슬라이드에서 눈에 보이는 오류를 찾는 검수자입니다.
 
 중요:
-- 슬라이드 이미지가 원본입니다.
-- 아래 OCR 텍스트는 보조 정보일 뿐이며, 이미지와 다르면 이미지를 우선하세요.
+- 슬라이드 이미지가 유일한 원본이자 진실입니다.
+- 아래 "1차 전사 텍스트"는 별도 모델이 이 이미지를 보고 미리 옮겨 적어둔 참고용 초안일 뿐이며,
+  자동 인식 과정에서 생긴 오독을 포함할 수 있습니다. 특히 한글은 자모 하나 차이(예: 늬/니, 왜/외,
+  웨/훼)를 자동 인식이 잘못 읽는 경우가 흔합니다.
+- text_error, numeric_unit 등 철자·표기 오류를 판단할 때 이 1차 전사 텍스트를 정답 기준으로 삼지
+  마세요. 반드시 슬라이드 이미지 속 글자를 네가 직접 다시 읽어서 판단하세요.
+- 1차 전사 텍스트와 이미지가 다르게 보인다면, 그것은 100% 1차 전사(자동 인식)의 실수이지 슬라이드의
+  오류가 아닙니다. 이런 차이 자체는 절대 오류로 보고하지 마세요.
+- text_error를 보고하려면, problematic_text는 1차 전사 텍스트를 그대로 옮기지 말고 네가 이미지에서
+  직접 확인한 글자를 근거로 작성하세요. 이미지 속 글자가 실제로 잘못 쓰여 있다고 스스로 확신할 때만
+  보고하세요.
 - 내용의 사실성, 더 좋은 표현, 문체 개선, 미적 취향(배치·색상 선택 등 디자인 문제)은 보고하지 마세요.
 - 애매하면 보고하지 마세요.
 - 아래 "번호"는 영상에서 화면이 바뀔 때마다 시스템이 자동으로 매긴 내부 색인일 뿐이며, 슬라이드
@@ -300,8 +316,8 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 
 대상 슬라이드:
 - 번호: {slide_no}
-- OCR 제목: {title}
-- OCR 본문:
+- 1차 전사 제목(참고용, 오류 가능): {title}
+- 1차 전사 본문(참고용, 오류 가능):
 {slide_text[:3000]}
 
 보고할 것 (error_type별 기준):
@@ -325,7 +341,8 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
   미적 취향의 문제가 아니라 콘텐츠를 읽을 수 없게 만드는 기능적 결함일 때만 보고하세요.
 
 보고하지 말 것:
-- OCR이 잘못 읽은 텍스트 자체
+- 1차 전사(자동 인식)가 잘못 읽은 텍스트 자체 — 이미지 속 글자가 실제로 맞게 쓰여 있다면 1차
+  전사와 다르더라도 오류가 아닙니다
 - 용어 선택/문체/표현 선호
 - 사실 오류나 개념 오류 (단, 강의 맥락과 무관하게 이미 하나의 값으로 고정된 수치가 명백히 틀리게
   적힌 경우는 예외입니다 — numeric_unit으로 보고하세요)
@@ -350,7 +367,8 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
       "problematic_text": "문제가 있는 원문 또는 위치·대상 설명",
       "corrected_text": "수정 표현 (visual_defect면 빈 문자열)",
       "confidence": 0.0,
-      "reason": "한두 문장 근거"
+      "reason": "한두 문장 근거",
+      "confirmed_after_recheck": true
     }}
   ]
 }}
@@ -365,6 +383,10 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 6. JSON 외 텍스트 금지.
 7. 슬라이드 하나에 오류가 여러 개 있을 수 있습니다. 하나를 찾았다고 바로 멈추지 말고, 슬라이드 전체를
    끝까지 마저 확인해서 발견되는 오류를 모두 slide_errors 배열에 각각 출력하세요.
+8. confirmed_after_recheck: 배열에 넣기 직전에 이미지를 한 번 더 확인해서 "정말로 오류가 맞는지"
+   최종 결정한 결과를 담으세요. 재확인 결과 오류가 아니라고 판단되면 그 항목은 배열에서 완전히
+   빼세요 — confirmed_after_recheck를 false로 적어서 배열에 남겨두지 마세요. 즉 배열에 실제로
+   들어가는 항목은 전부 confirmed_after_recheck가 true여야 합니다.
 """
 
 
@@ -394,6 +416,33 @@ def _find_bracket_mismatch(text: str) -> str | None:
     if stack:
         return f"닫히지 않은 여는 기호가 남아 있습니다: {''.join(stack)}"
     return None
+
+
+def _build_text_transcription_prompt(slide_no: int, title_hint: str) -> str:
+    return f"""당신은 강의 슬라이드 이미지 속 텍스트를 있는 그대로 옮겨 적는 전사자입니다.
+
+대상 슬라이드 번호: {slide_no}
+참고용 제목 힌트(부정확할 수 있으니 참고만 하세요): {title_hint}
+
+작업:
+- 이 슬라이드 이미지에 보이는 제목과 본문 텍스트를 처음부터 끝까지 빠짐없이 옮겨 적으세요.
+- 옳고 그름을 판단하거나 고치지 마세요. 이미지에 실제로 보이는 글자 그대로 옮기는 것이 유일한 목표입니다.
+- 한글 자모 하나 차이로 헷갈리기 쉬운 글자(예: 늬/니, 왜/외, 웨/훼)는 획을 하나씩 확인하듯 주의
+  깊게 보고 옮겨 적으세요.
+- 표/도형/그림 안의 텍스트도 함께 옮겨 적으세요.
+- 텍스트가 전혀 없으면 빈 문자열을 출력하세요.
+
+출력 형식은 JSON만 허용합니다.
+
+```json
+{{
+  "title": "이미지에 보이는 그대로의 제목",
+  "body": "이미지에 보이는 그대로의 본문 텍스트"
+}}
+```
+
+JSON 외 텍스트는 출력하지 마세요.
+"""
 
 
 def _build_code_transcription_prompt(slide_no: int, title: str) -> str:
@@ -527,6 +576,62 @@ def _check_code_syntax_mechanical(
     return [], api_calls, token_usage
 
 
+def _transcribe_slide_text(
+    *,
+    model: str,
+    slide: dict[str, Any],
+    img_dir: str | None,
+    max_tokens: int,
+) -> tuple[str, str, int, dict[str, Any]]:
+    """이미지만 보고 제목/본문을 새로 전사합니다. 이전 단계(t1 추출)에서 OCR 힌트에
+    이끌려 잘못 옮겨졌을 수 있는 텍스트를 오탈자 판정 프롬프트에 그대로 넘기면, 그 오독이
+    두 번째 판정 단계에도 앵커링되어 실제로는 이미지에 맞게 적힌 글자를 오류로 보고하는
+    문제가 생긴다. 그래서 판정용 텍스트를 기존 slide_text(t1)에서 가져오지 않고, OCR 힌트
+    없이 이미지만 보는 별도 호출로 다시 뽑는다."""
+    from . import claim_common as cc
+
+    slide_number = _slide_number(slide) or 0
+    img_path = (
+        _force_base_image_path(slide.get("image_path"), img_dir, slide_number)
+        or _existing_path(slide.get("image_path"))
+        or _find_slide_image(img_dir, slide_number)
+    )
+    img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
+    if not img_bytes:
+        return "", "", 0, cc._empty_token_usage()
+
+    transcribe_model = cc._resolve_stage_model("slide_error_transcribe") or model
+    title_hint = str(slide.get("title", "") or "")
+    prompt = _build_text_transcription_prompt(slide_number, title_hint)
+    response_format = (
+        {"type": "json_object"} if cc._supports_json_object_response_format(transcribe_model) else None
+    )
+    token_usage = cc._empty_token_usage()
+    api_calls = 0
+
+    for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
+        text, call_usage = cc._call_llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            image_bytes=img_bytes,
+            thinking_budget=0,
+            response_format=response_format,
+            stage="slide_error_transcribe",
+        )
+        api_calls += 1
+        cc._add_call_usage(token_usage, call_usage)
+        try:
+            payload = json.loads(_strip_json_fence(text))
+            title = str(payload.get("title", "") or "").strip()
+            body = str(payload.get("body", "") or "").strip()
+            return title, body, api_calls, token_usage
+        except Exception:
+            if attempt < cc.VERIFIER_PARSE_RETRIES:
+                continue
+    return "", "", api_calls, token_usage
+
+
 def _is_reportable_slide_error(
     problematic: str,
     corrected: str,
@@ -575,8 +680,9 @@ def _is_reportable_slide_error(
     )
     if any(marker in r for marker in style_markers):
         return False
-    if "중복" in r and re.search(r"(을|를|이|가|은|는)\s+\S+(을|를|이|가|은|는)", p):
+    if "중복" in r and re.search(r"(을|를|이|가|은|는)\s+\S+(은|는|이|가|을|를)", p):
         return False
+
     return True
 
 
@@ -604,6 +710,14 @@ def _normalize_error(
     reason = str(row.get("reason", "") or "").strip()
     confidence = _clamp01(row.get("confidence"))
     if confidence < 0.80:
+        return None
+    confirmed_raw = row.get("confirmed_after_recheck", True)
+    confirmed = confirmed_raw if isinstance(confirmed_raw, bool) else str(confirmed_raw).strip().lower() not in {
+        "false",
+        "no",
+        "0",
+    }
+    if not confirmed:
         return None
     error_type = _normalize_error_type(row.get("error_type"), problematic, corrected)
     if not _is_reportable_slide_error(problematic, corrected, reason, error_type):
@@ -650,8 +764,16 @@ def _check_single_slide(
     from . import claim_common as cc
 
     slide_number = _slide_number(slide) or 0
-    title = str(slide.get("title", "") or "")
-    slide_text = str(slide.get("slide_text") or slide.get("t1") or "")
+    fallback_title = str(slide.get("title", "") or "")
+    fallback_text = str(slide.get("slide_text") or slide.get("t1") or "")
+    transcribed_title, transcribed_text, transcribe_calls, transcribe_usage = _transcribe_slide_text(
+        model=model,
+        slide=slide,
+        img_dir=img_dir,
+        max_tokens=max_tokens,
+    )
+    title = transcribed_title or fallback_title
+    slide_text = transcribed_text or fallback_text
     prompt = _build_slide_error_prompt(slide_number, title, slide_text)
     img_path = (
         _force_base_image_path(slide.get("image_path"), img_dir, slide_number)
@@ -660,8 +782,8 @@ def _check_single_slide(
     )
     img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
     response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
-    token_usage = cc._empty_token_usage()
-    api_calls = 0
+    token_usage = transcribe_usage
+    api_calls = transcribe_calls
 
     errors: list[dict[str, Any]] | None = None
     for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
