@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -59,7 +59,6 @@ class Lecture(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String, nullable=True)
     description = Column(Text, nullable=True)
-    is_verified = Column(Boolean, nullable=False, default=False, server_default='false')
     video_path = Column(Text, nullable=False)
     output_dir = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

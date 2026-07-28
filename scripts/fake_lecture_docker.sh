@@ -13,7 +13,7 @@
 #   scripts/fake_lecture_docker.sh verify-only <lecture_id> [title]
 #     -> 해당 lecture_id로 Lecture(없으면 생성) + pending ProcessingJob(verify_only)을
 #        DB에 넣는다. 워커가 집어가서 전처리는 스킵하고 검증만 새로 돈다.
-#        완료되면 GET /lectures/<lecture_id>/verifier 로 확인 가능.
+#        완료되면 GET /lectures/<lecture_id>/result 로 확인 가능.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -92,7 +92,7 @@ asyncio.run(main())
     echo "워커가 몇 초 안에 집어갑니다. 상태 확인:"
     echo "  curl http://localhost:8003/lectures/${lecture_id}"
     echo "결과 확인:"
-    echo "  curl http://localhost:8003/lectures/${lecture_id}/verifier"
+    echo "  curl http://localhost:8003/lectures/${lecture_id}/result"
     ;;
 
   *)

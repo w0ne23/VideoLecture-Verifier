@@ -1,7 +1,6 @@
 import json
 import shutil
 import uuid
-from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,20 +10,13 @@ from sqlalchemy.orm import selectinload
 
 from app.models import (
     JOB_STATUS_DONE,
-    JOB_STATUS_ERROR,
     JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
     JOB_TYPE_VERIFY,
-    JOB_TYPE_VERIFY_ONLY,
     Lecture,
     ProcessingJob,
     normalize_job_type,
 )
-from app.services.storage_service import lecture_output_dir, make_file_url, resolve_storage_path
-
-
-def normalize_domain_value(value: str | None) -> str:
-    return (value or 'etc').strip() or 'etc'
+from app.services.storage_service import make_file_url, resolve_storage_path
 
 
 async def _get_lecture(db: AsyncSession, lecture_id: str | uuid.UUID) -> Lecture | None:
@@ -40,42 +32,30 @@ async def _get_lecture(db: AsyncSession, lecture_id: str | uuid.UUID) -> Lecture
     return result.scalar_one_or_none()
 
 
-async def get_job(db: AsyncSession, job_id: str) -> ProcessingJob | None:
-    try:
-        ident = uuid.UUID(str(job_id))
-    except (TypeError, ValueError):
-        return None
-    result = await db.execute(select(ProcessingJob).where(ProcessingJob.id == ident))
-    return result.scalar_one_or_none()
+async def get_current_job(db: AsyncSession, lecture_id: str) -> ProcessingJob | None:
+    """lecture의 현재(최신) job을 반환한다. lecture당 실행 중 job은 최대 하나이므로
+    job_id 없이 lecture_id만으로 스트리밍 추적이 가능하다."""
+    lecture = await _get_lecture(db, lecture_id)
+    return lecture.last_job if lecture else None
 
 
-async def get_latest_job(db: AsyncSession, lecture_id: str) -> ProcessingJob | None:
-    try:
-        ident = uuid.UUID(str(lecture_id))
-    except (TypeError, ValueError):
-        return None
-    result = await db.execute(
-        select(ProcessingJob)
-        .where(ProcessingJob.lecture_id == ident)
-        .order_by(ProcessingJob.created_at.desc())
-        .limit(1)
+def build_job(lecture_id, mode: str | None = None) -> ProcessingJob:
+    """업로드·재시도 공통 job 삽입 단위.
+
+    'Job 없는 Lecture'가 존재하지 않는다는 불변조건을, 두 생성 경로(POST /lectures의
+    합성 연산, POST /lectures/{id}/jobs의 원시 연산)가 이 함수 하나를 공유함으로써 구조로 보장한다.
+    호출자는 반환된 job을 같은 트랜잭션에서 db.add 한다.
+
+    job_type은 mode에 따라 정해진다 — verify가 기본이고 verify_only도 만들 수 있다.
+    """
+    return ProcessingJob(
+        id=uuid.uuid4(),
+        lecture_id=lecture_id,
+        job_type=normalize_job_type(mode, JOB_TYPE_VERIFY),
+        status=JOB_STATUS_PENDING,
+        current_stage='검증 파이프라인을 시작합니다.',
+        pipeline_stages=[],
     )
-    return result.scalar_one_or_none()
-
-
-async def get_latest_job_by_mode(db: AsyncSession, lecture_id: str, mode: str) -> ProcessingJob | None:
-    canonical = normalize_job_type(mode)
-    try:
-        ident = uuid.UUID(str(lecture_id))
-    except (TypeError, ValueError):
-        return None
-    result = await db.execute(
-        select(ProcessingJob)
-        .where(ProcessingJob.lecture_id == ident, ProcessingJob.job_type == canonical)
-        .order_by(ProcessingJob.created_at.desc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
 
 
 def _job_dict(job: ProcessingJob | None) -> dict[str, Any] | None:
@@ -96,22 +76,18 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return None
-    stem = str(lecture.id)
+    job = lecture.last_job
     return {
         'id': str(lecture.id),
-        'title': lecture.title or stem,
+        'title': lecture.title or str(lecture.id),
         'description': lecture.description or '',
-        'video_path': lecture.video_path,
         'video_url': make_file_url(lecture.video_path),
-        'output_dir': str(resolve_storage_path(lecture.output_dir) or ''),
-        'stem': stem,
-        'is_verified': bool(lecture.is_verified),
         'created_at': lecture.created_at.isoformat() if lecture.created_at else None,
-        'job': _job_dict(lecture.last_job),
+        'job': _job_dict(job),
     }
 
 
-async def list_jobs(db: AsyncSession, status_filter: str | None = None) -> list[dict[str, Any]]:
+async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> list[dict[str, Any]]:
     result = await db.execute(
         select(Lecture)
         .options(selectinload(Lecture.processing_jobs))
@@ -132,48 +108,21 @@ async def list_jobs(db: AsyncSession, status_filter: str | None = None) -> list[
             'current_stage': job.current_stage if job else None,
             'error_message': job.error_message if job else None,
             'pipeline_stages': job.pipeline_stages or [] if job else [],
-            'is_verified': bool(lecture.is_verified),
             'created_at': lecture.created_at.isoformat() if lecture.created_at else None,
         })
     return rows
 
 
-async def retry_lecture(db: AsyncSession, lecture_id: str, mode: str | None = None) -> dict[str, Any] | None:
+async def create_job(db: AsyncSession, lecture_id: str, mode: str | None = None) -> dict[str, Any] | None:
+    """기존 Lecture에 새 Job(재시도)을 생성하는 원시 연산. build_job을 공유한다."""
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return None
-    job_type = normalize_job_type(mode, JOB_TYPE_VERIFY)
-    job = ProcessingJob(
-        id=uuid.uuid4(),
-        lecture_id=lecture.id,
-        job_type=job_type,
-        status=JOB_STATUS_PENDING,
-        current_stage='검증 파이프라인을 다시 시작합니다.',
-        error_message=None,
-        pipeline_stages=[],
-    )
+    job = build_job(lecture.id, mode)
     db.add(job)
     await db.commit()
     await db.refresh(job)
     return {'status': 'success', 'job_id': str(job.id), 'job_type': job.job_type}
-
-
-async def confirm_verified_lecture(db: AsyncSession, lecture_id: str) -> dict[str, Any] | None:
-    lecture = await _get_lecture(db, lecture_id)
-    if not lecture:
-        return None
-    latest_job = lecture.last_job
-    if not latest_job or latest_job.status not in {JOB_STATUS_DONE}:
-        raise HTTPException(status_code=409, detail='No completed verification is ready for review')
-    lecture.is_verified = True
-    latest_job.current_stage = '검토 완료'
-    await db.commit()
-    return {
-        'status': 'success',
-        'lecture_id': str(lecture.id),
-        'job_id': str(latest_job.id),
-        'is_verified': True,
-    }
 
 
 async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
@@ -333,13 +282,23 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
     }
 
 
-async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
-    detail = await get_lecture_detail(db, lecture_id)
-    if not detail:
-        raise HTTPException(status_code=404, detail='Lecture result not found')
+async def get_verified_result(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
+    """GET /lectures/{id}/result 전용. job이 done인 lecture의 검증 결과를 반환한다.
 
-    output_dir = Path(detail['output_dir'])
-    stem = str(detail['stem'])
+    /lectures/{id}(job 상태 조회)와 독립된 라우트에서만 호출되므로, 실패를 그대로
+    HTTPException으로 던져도 job 상태 조회에는 영향이 없다.
+    """
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
+        raise HTTPException(status_code=404, detail='Lecture not found')
+    job = lecture.last_job
+    if not job or job.status != JOB_STATUS_DONE:
+        raise HTTPException(status_code=404, detail='Verification result not ready')
+
+    stem = str(lecture.id)
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if not output_dir:
+        raise HTTPException(status_code=404, detail='Content verification file not found')
     analyzer_dir = output_dir / f'{stem}_analyzer'
     candidates = [
         analyzer_dir / f'{stem}_content_verification.json',
@@ -350,10 +309,8 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> dict[st
     verifier_path = next((path for path in candidates if path.exists()), None)
     if not verifier_path:
         raise HTTPException(status_code=404, detail='Content verification file not found')
-
     try:
         data = json.loads(verifier_path.read_text(encoding='utf-8'))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f'Error reading content verification: {exc}') from exc
-
-    return build_content_verification_response(str(detail['id']), stem, str(verifier_path), data)
+    return build_content_verification_response(str(lecture.id), stem, str(verifier_path), data)

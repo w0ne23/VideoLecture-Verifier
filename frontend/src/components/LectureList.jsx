@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { listJobs } from '../lib/api'
+import { listLectures } from '../lib/api'
 
 const STATUS_LABELS = {
   pending: '대기 중',
@@ -17,7 +17,7 @@ export default function LectureList({ onSelect, refreshKey = 0 }) {
     let cancelled = false
     setIsLoading(true)
 
-    listJobs()
+    listLectures()
       .then(rows => {
         if (!cancelled) {
           setLectures(rows)
@@ -45,10 +45,7 @@ export default function LectureList({ onSelect, refreshKey = 0 }) {
       {lectures.map(lecture => (
         <li key={lecture.id}>
           <button type="button" className="lecture-row" onClick={() => onSelect(lecture.id)}>
-            <span className="lecture-title">
-              {lecture.title}
-              {lecture.is_verified && <span className="lecture-verified">검토 완료</span>}
-            </span>
+            <span className="lecture-title">{lecture.title}</span>
             <span className={`status-chip status-chip--${lecture.status}`}>
               {STATUS_LABELS[lecture.status] || lecture.status}
             </span>
