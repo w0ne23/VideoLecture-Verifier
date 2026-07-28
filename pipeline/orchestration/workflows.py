@@ -55,19 +55,31 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     write_timings('pipeline_start')
     paths = output_paths(stem, output_dir, slides_dir)
 
-    if job_type not in {helpers.JOB_TYPE_VERIFY, helpers.JOB_TYPE_VERIFIED_UPLOAD, helpers.JOB_TYPE_LEGACY_FULL}:
+    if job_type not in {
+        helpers.JOB_TYPE_VERIFY,
+        helpers.JOB_TYPE_VERIFY_ONLY,
+        helpers.JOB_TYPE_VERIFIED_UPLOAD,
+        helpers.JOB_TYPE_LEGACY_FULL,
+    }:
         raise RuntimeError(f'VeriLec supports verify workflow only, got: {job_type}')
 
-    preprocess_result = run_preprocess_pipeline(
-        args,
-        stem=stem,
-        output_dir=output_dir,
-        slides_dir=slides_dir,
-        paths=paths,
-        timings=timings,
-        notify_stage=notify_stage,
-        helpers=helpers,
-    )
+    if job_type == helpers.JOB_TYPE_VERIFY_ONLY:
+        # 전처리 산출물이 이미 있다는 전제 하에, 재전처리 없이 이전 실행이 남긴
+        # manifest(`{stem}_preprocess_result.json`)에서 preprocess_result를 복원한다.
+        # merged_clean.json을 손으로 편집해 검증만 다시 태우고 싶을 때(예: 오류 주입
+        # 테스트) 전처리 API 비용을 반복하지 않기 위한 경로다.
+        preprocess_result = helpers.load_preprocess_result_from_outputs(stem, output_dir, paths)
+    else:
+        preprocess_result = run_preprocess_pipeline(
+            args,
+            stem=stem,
+            output_dir=output_dir,
+            slides_dir=slides_dir,
+            paths=paths,
+            timings=timings,
+            notify_stage=notify_stage,
+            helpers=helpers,
+        )
 
     verifier_result = run_verifier_pipeline(
         args,

@@ -18,7 +18,7 @@ from app.logging_utils import (
     detach_pipeline_log_handler,
     reset_root_logging_handlers,
 )
-from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY
+from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY, JOB_TYPE_VERIFY_ONLY
 from app.services.job_service import update_job_stage_sync
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,13 @@ def pipeline_process(
         slides_dir.mkdir(parents=True, exist_ok=True)
 
         stages_state = {key: 'wait' for key in PIPELINE_STAGE_KEYS}
+        if job_type == JOB_TYPE_VERIFY_ONLY:
+            # verify_only는 이전 실행이 남긴 전처리 산출물을 그대로 재사용하는 것이
+            # 전제라, 전처리 3단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로
+            # 영원히 남겨두면 프론트에 전처리가 안 끝난 것처럼 보이므로 시작 시점에
+            # 바로 완료 처리한다.
+            for key in ('preprocess_extract_media', 'preprocess_textualize_transcribe', 'preprocess_enrich_audio_annotation'):
+                stages_state[key] = 'done'
 
         def on_progress(stage_key: str, status: str):
             if stage_key in stages_state:
@@ -113,7 +120,7 @@ def pipeline_process(
                         *(['--title', title] if title else []),
                         *(['--uploaded-at', uploaded_at] if uploaded_at else []),
                     ])
-                    args.job_type = JOB_TYPE_VERIFY
+                    args.job_type = job_type
                     os.environ['PYTHONUNBUFFERED'] = '1'
                     pipeline_main.run_pipeline(args, progress_callback=on_progress)
             finally:
@@ -147,10 +154,11 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
         input_path = None
         uploaded_at = None
         title = ''
+        job_type_val = JOB_TYPE_VERIFY
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(text("""
-                SELECT pj.id, pj.lecture_id, l.video_path, l.created_at, l.title
+                SELECT pj.id, pj.lecture_id, pj.job_type, l.video_path, l.created_at, l.title
                 FROM processing_jobs pj
                 JOIN lectures l ON l.id = pj.lecture_id
                 WHERE pj.status = 'pending'
@@ -163,6 +171,7 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
                 lecture_id_val = job['lecture_id']
                 input_path = job['video_path']
                 title = job['title'] or ''
+                job_type_val = job['job_type'] or JOB_TYPE_VERIFY
                 uploaded_at = job['created_at'].isoformat() if job['created_at'] else None
                 await db.execute(text("""
                     UPDATE processing_jobs
@@ -183,7 +192,7 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
                 str(job_id_val),
                 str(lecture_id_val),
                 str(input_path),
-                JOB_TYPE_VERIFY,
+                job_type_val,
                 uploaded_at,
                 title,
                 worker_index,
