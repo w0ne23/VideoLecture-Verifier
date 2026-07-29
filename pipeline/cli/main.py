@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from pipeline import main as pipeline_main
+from pipeline.logging_utils import pipeline_log_context
 
 
 def _pipeline_args(input_path: str, output_dir: str, title: str = ''):
@@ -20,13 +21,15 @@ def _pipeline_args(input_path: str, output_dir: str, title: str = ''):
 
 
 def run_video(args):
-    pipeline_main.run_pipeline(_pipeline_args(args.input, args.output, args.title))
+    with pipeline_log_context(args.output):
+        pipeline_main.run_pipeline(_pipeline_args(args.input, args.output, args.title))
 
 
 def run_verify(args):
     from pipeline.verifier.run_all import run_classified_issue_pipeline
 
-    run_classified_issue_pipeline(args.merged_clean, output_dir=args.output)
+    with pipeline_log_context(args.output):
+        run_classified_issue_pipeline(args.merged_clean, output_dir=args.output)
 
 
 def build_parser():

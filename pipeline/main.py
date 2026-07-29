@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import librosa
+from .logging_utils import pipeline_log_context
 from .utils import resolve_pipeline_package_root
 
 logging.basicConfig(
@@ -1354,7 +1355,8 @@ def main():
         print(f"❌ 입력 영상 없음: {args.input}")
         sys.exit(1)
 
-    run_pipeline(args)
+    with pipeline_log_context(args.output):
+        run_pipeline(args)
 
 
 if __name__ == "__main__":

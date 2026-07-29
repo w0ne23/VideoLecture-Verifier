@@ -6,19 +6,14 @@ import os
 import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from sqlalchemy import text
 
 from app.config import LOCAL_STORAGE_DIR, PIPELINE_ROOT
 from app.db import AsyncSessionLocal
-from app.logging_utils import (
-    attach_pipeline_log_handler,
-    detach_pipeline_log_handler,
-    reset_root_logging_handlers,
-)
 from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY, JOB_TYPE_VERIFY_ONLY
+from pipeline.logging_utils import pipeline_log_context
 from app.services.job_service import update_job_stage_sync
 
 logger = logging.getLogger(__name__)
@@ -80,8 +75,6 @@ def pipeline_process(
 
         output_dir = LOCAL_STORAGE_DIR / 'results' / lecture_id
         slides_dir = output_dir / 'slides'
-        log_file_path = output_dir / 'pipeline.log'
-        output_dir.mkdir(parents=True, exist_ok=True)
         slides_dir.mkdir(parents=True, exist_ok=True)
 
         stages_state = {key: 'wait' for key in PIPELINE_STAGE_KEYS}
@@ -100,31 +93,25 @@ def pipeline_process(
             update_job_stage_sync(job_id, stages_array, _stage_text(stage_key, status))
             logger.info('[%s] Progress: %s -> %s', job_id, stage_key, status)
 
-        reset_root_logging_handlers()
-        with log_file_path.open('w', encoding='utf-8', buffering=1) as log_file:
-            log_handler = attach_pipeline_log_handler(log_file)
-            try:
-                with redirect_stdout(log_file), redirect_stderr(log_file):
-                    import pipeline.main as pipeline_main
+        with pipeline_log_context(output_dir):
+            import pipeline.main as pipeline_main
 
-                    update_job_stage_sync(
-                        job_id,
-                        [{'stage': key, 'status': value} for key, value in stages_state.items()],
-                        '파이프라인을 시작합니다.',
-                    )
-                    args = pipeline_main.get_parser().parse_args([
-                        '--input', str(video_path),
-                        '--output', str(output_dir),
-                        '--slides', str(slides_dir),
-                        '--lecture-id', lecture_id,
-                        *(['--title', title] if title else []),
-                        *(['--uploaded-at', uploaded_at] if uploaded_at else []),
-                    ])
-                    args.job_type = job_type
-                    os.environ['PYTHONUNBUFFERED'] = '1'
-                    pipeline_main.run_pipeline(args, progress_callback=on_progress)
-            finally:
-                detach_pipeline_log_handler(log_handler)
+            update_job_stage_sync(
+                job_id,
+                [{'stage': key, 'status': value} for key, value in stages_state.items()],
+                '파이프라인을 시작합니다.',
+            )
+            args = pipeline_main.get_parser().parse_args([
+                '--input', str(video_path),
+                '--output', str(output_dir),
+                '--slides', str(slides_dir),
+                '--lecture-id', lecture_id,
+                *(['--title', title] if title else []),
+                *(['--uploaded-at', uploaded_at] if uploaded_at else []),
+            ])
+            args.job_type = job_type
+            os.environ['PYTHONUNBUFFERED'] = '1'
+            pipeline_main.run_pipeline(args, progress_callback=on_progress)
 
         return True, str(output_dir), None
     except BaseException as exc:
