@@ -76,10 +76,6 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .lecture-row:hover { border-color: var(--primary); }
 .lecture-title { font-weight: 600; }
 .lecture-stage { grid-column: 1 / -1; color: var(--muted); font-size: 0.82rem; }
-.lecture-verified {
-  margin-left: 8px; font-size: 0.7rem; padding: 2px 8px; border-radius: 999px;
-  background: #dcfce7; color: var(--green); font-weight: 600;
-}
 .status-chip { font-size: 0.75rem; padding: 3px 10px; border-radius: 999px; background: #eef1f5; color: var(--slate); }
 .status-chip--running { background: #dbeafe; color: var(--primary); }
 .status-chip--done { background: #dcfce7; color: var(--green); }

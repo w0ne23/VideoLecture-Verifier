@@ -144,12 +144,12 @@ BASE = os.getenv('VERILEC_API_BASE', 'http://localhost:8010')
 
 def _live_verifier_payload():
     try:
-        with urllib.request.urlopen(BASE + '/jobs', timeout=3) as res:
+        with urllib.request.urlopen(BASE + '/lectures', timeout=3) as res:
             lectures = json.loads(res.read().decode('utf-8'))
         done = next((row for row in lectures if row.get('status') == 'done'), None)
         if not done:
             return None
-        with urllib.request.urlopen(f"{BASE}/results/{done['id']}/verifier", timeout=5) as res:
+        with urllib.request.urlopen(f"{BASE}/lectures/{done['id']}/result", timeout=5) as res:
             return json.loads(res.read().decode('utf-8'))
     except Exception:
         return None
@@ -158,5 +158,5 @@ def _live_verifier_payload():
 def test_live_endpoint_matches_contract():
     payload = _live_verifier_payload()
     if payload is None:
-        pytest.skip('백엔드 미기동 또는 완료된 강의 없음')
+        pytest.skip('백엔드 미기동 또는 완료된 강의 없음 또는 result 미생성')
     _assert_contract(payload)

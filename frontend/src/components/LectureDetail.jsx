@@ -15,7 +15,6 @@ export default function LectureDetail({ lectureId, onExit }) {
     errorMessage,
     isLoading,
     isMutating,
-    isVerified,
     actions,
   } = useJobStream(lectureId, { onExit })
 
@@ -34,7 +33,6 @@ export default function LectureDetail({ lectureId, onExit }) {
       <div className="detail-head">
         <button type="button" className="btn" onClick={onExit}>← 목록으로</button>
         <h2>{lecture.title || lectureId}</h2>
-        {isVerified && <span className="lecture-verified">검토 완료</span>}
       </div>
 
       {lecture.video_url && (
@@ -63,11 +61,6 @@ export default function LectureDetail({ lectureId, onExit }) {
       {errorMessage && phase !== PHASES.ERROR && <p className="error-text">{errorMessage}</p>}
 
       <div className="button-row detail-actions">
-        {phase === PHASES.VERIFY_READY && !isVerified && (
-          <button type="button" className="btn btn--primary" disabled={isMutating} onClick={actions.confirmReview}>
-            검토 완료 처리
-          </button>
-        )}
         {(phase === PHASES.VERIFY_READY || phase === PHASES.ERROR) && (
           <button type="button" className="btn" disabled={isMutating} onClick={actions.restart}>
             다시 검증

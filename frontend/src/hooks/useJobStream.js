@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PHASES, normalizePipelineStages } from '../components/verifier/verifierConstants'
 import {
-  confirmLectureVerification,
   deleteLecture,
   getLectureDetail,
-  getLectureVerifier,
+  getLectureResult,
   jobStreamUrl,
   checkHealth,
   retryLecture as retryJobRequest,
@@ -15,7 +14,6 @@ const EMPTY_LECTURE = {
   id: '',
   title: '',
   video_url: '',
-  is_verified: false,
   status: '',
 }
 
@@ -23,7 +21,6 @@ const EMPTY_LECTURE = {
 // 라우터 의존을 없애고, 목록 복귀는 onExit 콜백으로 위임한다.
 export function useJobStream(lectureId, { onExit } = {}) {
   const eventSourceRef = useRef(null)
-  const activeJobIdRef = useRef(null)
   const verifierLoadedRef = useRef(false)
   const ignoreNextStreamErrorRef = useRef(false)
   const healthTimerRef = useRef(null)
@@ -36,8 +33,6 @@ export function useJobStream(lectureId, { onExit } = {}) {
   const [errorMessage, setErrorMessage] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isMutating, setIsMutating] = useState(false)
-
-  const isVerified = Boolean(lecture.is_verified)
 
   function stopHealthCheck() {
     if (!healthTimerRef.current) return
@@ -80,27 +75,24 @@ export function useJobStream(lectureId, { onExit } = {}) {
     }, 3000)
   }
 
-  function loadVerifierIfReady(status) {
+  // result는 GET /lectures/{id}/result의 독립 응답이다. done 도달 시에만 이 엔드포인트를 부른다.
+  function loadVerificationIfReady(status) {
     if (phaseFromStatus(status) !== PHASES.VERIFY_READY || verifierLoadedRef.current) return
     verifierLoadedRef.current = true
-    getLectureVerifier(lectureId)
-      .then(result => {
-        if (result) setVerifier(result)
-        else verifierLoadedRef.current = false
-      })
+    getLectureResult(lectureId)
+      .then(result => setVerifier(result))
       .catch(() => {
         verifierLoadedRef.current = false
       })
   }
 
-  function connectJob(jobId = '') {
+  function connectJob() {
     if (!lectureId) return
 
     closeEventSource()
-    activeJobIdRef.current = jobId || null
     ignoreNextStreamErrorRef.current = false
 
-    const eventSource = new EventSource(jobStreamUrl(lectureId, jobId))
+    const eventSource = new EventSource(jobStreamUrl(lectureId))
     eventSourceRef.current = eventSource
     startHealthCheck()
 
@@ -108,9 +100,8 @@ export function useJobStream(lectureId, { onExit } = {}) {
       try {
         const payload = JSON.parse(event.data)
         if (payload.error) throw new Error(payload.error)
-        if (activeJobIdRef.current && payload.job_id && payload.job_id !== activeJobIdRef.current) return
 
-        const nextPhase = phaseFromStatus(payload.lecture_status)
+        const nextPhase = phaseFromStatus(payload.status)
         setPhase(nextPhase)
         setCurrentStage(payload.current_stage || '')
         setErrorMessage(prev =>
@@ -120,13 +111,13 @@ export function useJobStream(lectureId, { onExit } = {}) {
           ...prev,
           id: prev.id || lectureId,
           job_id: payload.job_id || prev.job_id,
-          status: payload.lecture_status || prev.status,
+          status: payload.status || prev.status,
         }))
         setPipelineStages(prev => mergeStageStatus(prev, payload.pipeline_stages || []))
 
-        loadVerifierIfReady(payload.lecture_status)
+        loadVerificationIfReady(payload.status)
 
-        if (isTerminalStatus(payload.lecture_status)) {
+        if (isTerminalStatus(payload.status)) {
           closeEventSource({ ignoreStreamError: true })
         }
       } catch (error) {
@@ -162,9 +153,10 @@ export function useJobStream(lectureId, { onExit } = {}) {
         const job = detail.job || {}
         const nextPhase = phaseFromStatus(job.status)
 
+        // lectureId가 바뀌면 이전 강의의 result가 남지 않도록 초기화한다.
         verifierLoadedRef.current = false
-        setLecture({ ...EMPTY_LECTURE, ...detail, status: job.status || '' })
         setVerifier(null)
+        setLecture({ ...EMPTY_LECTURE, ...detail, status: job.status || '' })
         setPhase(nextPhase)
         setCurrentStage(job.current_stage || '')
         setErrorMessage(job.error_message || (nextPhase === PHASES.ERROR ? job.current_stage || '' : ''))
@@ -175,7 +167,7 @@ export function useJobStream(lectureId, { onExit } = {}) {
           setPipelineStages(markAllStages(job.status === 'done' ? 'done' : 'wait'))
         }
 
-        loadVerifierIfReady(job.status)
+        loadVerificationIfReady(job.status)
         if (!isTerminalStatus(job.status)) connectJob()
       } catch (error) {
         if (!cancelled) {
@@ -209,7 +201,7 @@ export function useJobStream(lectureId, { onExit } = {}) {
       const result = await retryJobRequest(lectureId)
       setLecture(prev => ({ ...prev, job_id: result.job_id || prev.job_id, status: 'pending' }))
       setIsMutating(false)
-      connectJob(result.job_id)
+      connectJob()
     } catch (error) {
       setIsMutating(false)
       setErrorMessage(String(error?.message || error))
@@ -234,20 +226,6 @@ export function useJobStream(lectureId, { onExit } = {}) {
     }
   }
 
-  async function confirmReview() {
-    if (!lectureId || isMutating) return
-    setIsMutating(true)
-    setErrorMessage('')
-    try {
-      await confirmLectureVerification(lectureId)
-      setLecture(prev => ({ ...prev, is_verified: true }))
-      setIsMutating(false)
-    } catch (error) {
-      setIsMutating(false)
-      setErrorMessage(String(error?.message || error))
-    }
-  }
-
   return {
     phase,
     lecture,
@@ -257,7 +235,6 @@ export function useJobStream(lectureId, { onExit } = {}) {
     errorMessage,
     isLoading,
     isMutating,
-    isVerified,
-    actions: { restart, remove, confirmReview },
+    actions: { restart, remove },
   }
 }

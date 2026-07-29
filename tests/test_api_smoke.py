@@ -34,13 +34,13 @@ def test_health():
     assert body == {'status': 'ok'}
 
 
-def test_jobs_returns_list():
-    status, body = _get('/jobs')
+def test_lectures_returns_list():
+    status, body = _get('/lectures')
     assert status == 200
     assert isinstance(body, list)
 
 
 def test_unknown_lecture_is_404():
     with pytest.raises(urllib.error.HTTPError) as exc:
-        _get('/results/00000000-0000-0000-0000-000000000000')
+        _get('/lectures/00000000-0000-0000-0000-000000000000')
     assert exc.value.code == 404
