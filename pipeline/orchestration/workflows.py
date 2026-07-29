@@ -15,10 +15,21 @@ def _print_generated_files(output_files: list[str]) -> None:
         print(f"    {'✓' if path.exists() else '✗'}  {path}")
 
 
+class _TimingsDict(dict):
+    """각 stage 함수는 캐시된 산출물을 발견해 건너뛸 때 elapsed=0.0을 돌려준다.
+    run_pipeline이 실행마다 기존 timings.json 값을 이어받게 되면서, 이 0.0을
+    그대로 덮어쓰면 실제로 그 stage가 돌았을 때 기록된 소요 시간이 스킵될 때마다
+    지워진다. 새 값이 0.0이고 기존에 0이 아닌 값이 있으면 갱신을 무시해서, 실제로
+    다시 실행된 stage의 시간만 갱신되고 스킵된 stage는 마지막 실측치를 유지한다."""
+
+    def __setitem__(self, key, value):
+        if value == 0.0 and self.get(key, 0.0) != 0.0:
+            return
+        super().__setitem__(key, value)
+
+
 def run_pipeline(args, progress_callback=None, *, helpers):
     total_start = time.time()
-    timings: dict[str, float] = {}
-    stage_status: dict[str, str] = {}
 
     def notify_stage(stage_key, status):
         if progress_callback:
@@ -37,16 +48,35 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     slides_dir.mkdir(parents=True, exist_ok=True)
     timing_path = output_dir / 'pipeline_timings.json'
 
+    # verify_only처럼 이전 실행의 산출물을 재사용하는 job은 전처리를 다시 태우지
+    # 않는다. 그렇다고 이전 실행이 기록해 둔 전처리 소요 시간까지 지우면 안 되므로,
+    # 기존 timings.json이 있으면 그 내용을 이어받아 이번 실행에서 갱신되는 stage만
+    # 덮어쓰고 나머지는 그대로 보존한다. run_history에는 실행할 때마다(예: 전처리
+    # 1회 + verify_only 1회) 각각의 소요 시간이 항목으로 쌓인다.
+    existing_payload: dict = {}
+    if timing_path.exists():
+        try:
+            existing_payload = json.loads(timing_path.read_text(encoding='utf-8'))
+        except Exception:
+            existing_payload = {}
+
+    started_at_epoch = existing_payload.get('started_at_epoch', total_start)
+    timings: dict[str, float] = _TimingsDict(existing_payload.get('timings') or {})
+    stage_status: dict[str, str] = dict(existing_payload.get('stage_status') or {})
+    run_history: list[dict] = list(existing_payload.get('run_history') or [])
+
     def write_timings(current_stage: str | None = None) -> None:
+        now = time.time()
         payload = {
             'stem': stem,
             'status': 'done' if current_stage == 'pipeline_done' else 'running',
             'current_stage': current_stage,
-            'started_at_epoch': total_start,
-            'updated_at_epoch': time.time(),
-            'elapsed_total_sec': time.time() - total_start,
+            'started_at_epoch': started_at_epoch,
+            'updated_at_epoch': now,
+            'elapsed_total_sec': now - total_start,
             'timings': timings,
             'stage_status': stage_status,
+            'run_history': run_history,
         }
         tmp_path = timing_path.with_suffix('.json.tmp')
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -104,4 +134,10 @@ def run_pipeline(args, progress_callback=None, *, helpers):
         r10.get('claim_report', ''),
     ]
     _print_generated_files(output_files)
+    run_history.append({
+        'job_type': job_type,
+        'started_at_epoch': total_start,
+        'completed_at_epoch': time.time(),
+        'elapsed_sec': time.time() - total_start,
+    })
     write_timings('pipeline_done')
