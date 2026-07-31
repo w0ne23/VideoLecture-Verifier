@@ -66,10 +66,17 @@ def _claim_extract_max_workers(default: int | None = None) -> int:
 
 def _claim_extract_prompt_profile() -> str:
     raw = str(os.getenv("VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE", "auto") or "auto").strip().lower()
+    if raw in {"generic", "portable", "free"}:
+        return "generic"
     if raw in {"gpt", "gpt_strict", "gpt-strict", "openai_strict", "openai-strict"}:
         return "gpt_strict"
     if raw in {"default", "base", "common", "none", "off"}:
         return "default"
+
+    from . import claim_common as cv
+
+    if cv._model_mode() == "generic":
+        return "generic"
 
     model = (
         os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
@@ -82,12 +89,13 @@ def _claim_extract_prompt_profile() -> str:
 
 
 def _model_specific_extract_rules() -> str:
-    if _claim_extract_prompt_profile() != "gpt_strict":
+    profile = _claim_extract_prompt_profile()
+    if profile not in {"gpt_strict", "generic"}:
         return ""
     return """
-### GPT 계열 추가 규칙
-GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문장 조각이나 강의 진행 발언까지 claim으로 만들 수 있습니다.
-따라서 아래 규칙을 우선 적용하세요.
+### 빠뜨림 방지 지시 관련 추가 규칙
+"검사 대상을 빠뜨리지 말라"는 지시를 과하게 해석하면 문장 조각이나 강의 진행 발언까지 claim으로
+만들어버릴 수 있습니다. 어떤 모델을 쓰든 아래 규칙을 우선 적용하세요.
 
 1. 출력 기준
 - claim은 학생이 그대로 외웠을 때 참/거짓을 검증할 수 있는 **완성 명제**여야 합니다.

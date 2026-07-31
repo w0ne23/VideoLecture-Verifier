@@ -29,6 +29,22 @@ from utils import api_call_with_retry, is_retryable_api_error
 # ── LLM 추상화 레이어 ────────────────────────────────────────
 
 
+def _model_mode() -> str:
+    """전역 모델 선택 모드.
+
+    - fixed: 지금처럼 스테이지별로 미리 튜닝된 모델·프롬프트 조합만 사용합니다.
+    - generic: 사용자가 자유롭게 고른 임의 모델에도 무난히 동작하도록, 특정 모델을
+      전제하지 않는 일반화된 프롬프트를 사용합니다.
+
+    모델 이름만으로는 "고정 카탈로그의 이 모델"과 "자유 모드에서 고른 같은 이름의
+    모델"을 구분할 수 없어서, 스테이지별 자동판단과 별개로 이 전역 스위치를 둡니다.
+    """
+    raw = str(os.getenv("VERIFIER_MODEL_MODE", "fixed") or "fixed").strip().lower()
+    if raw in {"generic", "free", "portable"}:
+        return "generic"
+    return "fixed"
+
+
 def _default_judge_model(base_model: str) -> str:
     base = str(base_model or "").strip()
     if base == "gpt-5.4-mini":
