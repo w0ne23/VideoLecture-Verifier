@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -78,3 +78,16 @@ class Lecture(Base):
     @property
     def last_job(self):
         return self.processing_jobs[-1] if self.processing_jobs else None
+
+
+class ModelSettings(Base):
+    """관리자가 검증 파이프라인에서 쓸 모델을 지정한 설정. 항상 id=1 한 행만 쓰는
+    싱글턴이다. stage_models가 비어있으면 자동 배정(fixed 프로필), 값이 있으면
+    직접 설정(generic 프로필)으로 취급한다 — 둘을 나타내는 별도 컬럼을 두지 않아서
+    "모드는 auto인데 값은 남아있는" 식의 불일치가 애초에 생기지 않는다."""
+
+    __tablename__ = 'model_settings'
+
+    id = Column(Integer, primary_key=True, default=1)
+    stage_models = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

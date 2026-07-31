@@ -15,6 +15,7 @@ from app.db import AsyncSessionLocal
 from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY, JOB_TYPE_VERIFY_ONLY
 from pipeline.logging_utils import pipeline_log_context
 from app.services.job_service import update_job_stage_sync
+from app.services.model_settings_service import fetch_stage_models_sync
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,14 @@ def pipeline_process(
     os.chdir(pipeline_root)
 
     try:
+        # 관리자가 설정 화면에서 지정한 모델이 있으면 그 값을, 없으면 지금까지처럼
+        # .env 기본값을 쓴다. 이 프로세스 안에서만 os.environ을 갱신하므로 다른
+        # 동시 작업이나 부모 프로세스에는 영향을 주지 않는다.
+        stage_models = fetch_stage_models_sync()
+        for env_key, value in stage_models.items():
+            os.environ[env_key] = value
+        os.environ['VERIFIER_MODEL_MODE'] = 'generic' if stage_models else 'fixed'
+
         from app.services.storage_service import resolve_storage_path
         video_path = resolve_storage_path(input_path)
 
