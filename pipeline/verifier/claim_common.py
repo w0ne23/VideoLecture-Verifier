@@ -19,6 +19,7 @@ from config import (
     get_anthropic_client,
     get_deepseek_client,
     get_gemini_client_sequence,
+    get_ollama_client,
     get_openai_client,
     get_xai_client,
     resolve_anthropic_model,
@@ -124,6 +125,13 @@ def _is_deepseek_model(model: str) -> bool:
     return spec.startswith("deepseek") or spec.startswith("deepseek:")
 
 
+def _is_ollama_model(model: str) -> bool:
+    spec = str(model or "").strip().lower()
+    # 로컬로 받는 모델(Qwen/EXAONE/Gemma 등)은 이름만으로는 어느 프로바이더인지
+    # 구분할 수 없으므로, xAI/DeepSeek과 동일하게 명시적 접두사를 요구한다.
+    return spec.startswith("ollama:") or spec.startswith("ollama/")
+
+
 def _resolve_xai_model(model: str) -> str:
     spec = str(model or "").strip()
     lowered = spec.lower()
@@ -146,6 +154,16 @@ def _resolve_deepseek_model(model: str) -> str:
     return spec
 
 
+def _resolve_ollama_model(model: str) -> str:
+    spec = str(model or "").strip()
+    lowered = spec.lower()
+    if lowered.startswith("ollama:"):
+        return spec.split(":", 1)[1].strip()
+    if lowered.startswith("ollama/"):
+        return spec.split("/", 1)[1].strip()
+    return spec
+
+
 def _supports_json_object_response_format(model: str) -> bool:
     lowered = str(model or "").strip().lower()
     return (
@@ -153,6 +171,7 @@ def _supports_json_object_response_format(model: str) -> bool:
         or lowered.startswith("grok")
         or lowered.startswith(("xai:", "xai/"))
         or lowered.startswith("deepseek")
+        or lowered.startswith(("ollama:", "ollama/"))
     )
 
 
@@ -308,6 +327,16 @@ def _deepseek_api_retry_config() -> tuple[int, float]:
     return max(1, max_retries), max(0.0, initial_wait)
 
 
+def _ollama_request_timeout() -> float:
+    raw = os.getenv("VERIFIER_OLLAMA_TIMEOUT_SEC", "") or "300"
+    try:
+        # 모델을 새로 메모리에 올리는 콜드스타트가 클라우드 API보다 훨씬 오래 걸릴 수
+        # 있어 기본값을 DeepSeek(180초)보다 넉넉하게 잡는다.
+        return max(30.0, float(raw))
+    except (TypeError, ValueError):
+        return 300.0
+
+
 def _join_system_and_prompt(system_prompt: str | None, prompt: str) -> str:
     if not system_prompt:
         return prompt
@@ -410,6 +439,25 @@ def _extract_deepseek_usage(resp, model: str, stage: str) -> dict:
         "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
         "tool_input_tokens": 0,
         "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
+    }
+
+
+def _extract_ollama_usage(resp, model: str, stage: str) -> dict:
+    usage = getattr(resp, "usage", None)
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    return {
+        "provider": "ollama",
+        "model": model,
+        "stage": stage,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": 0,
+        "tool_input_tokens": 0,
+        "cached_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "total_tokens": total_tokens or input_tokens + output_tokens,
     }
@@ -629,6 +677,50 @@ def _call_llm(
         max_retries, initial_wait = _deepseek_api_retry_config()
         resp = api_call_with_retry(call_api, max_retries=max_retries, initial_wait=initial_wait)
         return resp.choices[0].message.content or "", _extract_deepseek_usage(resp, resolved_model, stage)
+
+    # ── Ollama (로컬 LLM: Qwen/EXAONE/Gemma 등) ──────────────
+    if _is_ollama_model(model):
+        import base64
+
+        resolved_model = _resolve_ollama_model(model)
+        client = get_ollama_client()
+        if client is None:
+            raise RuntimeError("Ollama 클라이언트를 만들 수 없습니다 (openai 패키지 확인 필요).")
+
+        image_payloads = []
+        if image_bytes_list:
+            image_payloads.extend([b for b in image_bytes_list if b])
+        elif image_bytes:
+            image_payloads.append(image_bytes)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if image_payloads:
+            content = []
+            for img in image_payloads:
+                b64 = base64.b64encode(img).decode()
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            content.append({"type": "text", "text": prompt})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        def call_api():
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temp,
+            )
+            if response_format is not None:
+                kwargs["response_format"] = response_format
+            # 로컬 추론이라 콜드스타트(모델 최초 로드)가 느릴 수 있어 타임아웃을 넉넉히 둔다.
+            return client.chat.completions.create(**kwargs, timeout=_ollama_request_timeout())
+
+        resp = api_call_with_retry(call_api)
+        return resp.choices[0].message.content or "", _extract_ollama_usage(resp, resolved_model, stage)
 
     # ── Anthropic ───────────────────────────────────────────
     if _is_anthropic_model(model):

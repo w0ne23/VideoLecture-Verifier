@@ -59,6 +59,9 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# Ollama는 인증이 필요 없지만 OpenAI SDK가 빈 문자열 키를 거부하므로 더미 값을 쓴다.
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
 
 # ──────────────────────────────────────────────────────────────
 # API 클라이언트 (lazy init)
@@ -193,6 +196,19 @@ def get_deepseek_client():
         lambda: (
             OpenAI(api_key=current_key, base_url=current_base_url)
             if current_key and OpenAI is not None
+            else None
+        ),
+    )
+
+
+def get_ollama_client():
+    current_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
+    current_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
+    return _cached_client(
+        "ollama", f"{current_key}|{current_base_url}",
+        lambda: (
+            OpenAI(api_key=current_key, base_url=current_base_url)
+            if OpenAI is not None
             else None
         ),
     )
