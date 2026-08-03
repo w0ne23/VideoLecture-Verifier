@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { uploadLecture } from '../lib/api'
+import { uploadLecture } from '../api/pipeline'
 
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''

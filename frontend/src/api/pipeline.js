@@ -1,9 +1,4 @@
-const API_BASE = '/api'
-
-async function readError(res, fallback) {
-  const data = await res.json().catch(() => null)
-  return (data && (data.detail || data.error)) || (await res.text().catch(() => '')) || fallback
-}
+import { API_BASE, readError } from './client'
 
 export async function uploadLecture({ file, title, description = '' }) {
   const formData = new FormData()

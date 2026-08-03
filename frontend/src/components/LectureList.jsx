@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { listLectures } from '../lib/api'
+import { listLectures } from '../api/pipeline'
 
 const STATUS_LABELS = {
   pending: '대기 중',
