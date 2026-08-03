@@ -45,7 +45,6 @@ JUDGMENTS = {
     "not_issue",
     "insufficient_context",
 }
-
 CATEGORY_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
@@ -80,9 +79,9 @@ CATEGORY_SCORE_GUIDES = {
     "factual_error": {
         "is_valid_issue": (
             "resolved_claim이 정의, 용어, 동작 원리, 관계, 순서, 수식, 인과관계 측면에서 "
-            "객관적으로 틀렸을 가능성을 평가하세요. 문맥과 슬라이드를 포함해도 같은 잘못된 "
-            "명제가 남아 있으면 높게 주고, 문맥상 표현이 바로 정정되었거나 정확한 의미로 "
-            "좁혀지면 낮게 주세요. 영문/외래어 용어를 한글로 옮긴 발음 표기, 음차, 전사 "
+            "객관적으로 틀린 명제를 실제로 포함하는지 평가하세요. 문맥과 슬라이드를 포함해도 같은 잘못된 "
+            "명제가 남아 있으면 높게 주세요. 강의자가 앞 발화의 오류를 명시적으로 취소·대체하여 "
+            "정정한 경우에만 그 해소를 반영하세요. 영문/외래어 용어를 한글로 옮긴 발음 표기, 음차, 전사 "
             "흔들림만 문제이고 문맥상 어떤 원어와 개념을 가리키는지 명확하면 사실 오류로 "
             "높게 채점하지 마세요. 수치 표현에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 "
             "있고 그 수치가 핵심 개념이 아니라 보조 설명, 감각적 환산, 예시로 쓰였으며 "
@@ -96,9 +95,10 @@ CATEGORY_SCORE_GUIDES = {
             "표현은 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 context와 슬라이드 텍스트가 잘못된 의미를 얼마나 정정, 보완, "
-            "조건화하는지 평가하세요. 명시적 정정이나 충분한 보완이 있으면 높게 주고, "
-            "문맥을 봐도 같은 오류가 그대로 남으면 낮게 주세요."
+            "앞뒤 전사 context에서 강의자가 잘못된 의미를 얼마나 명시적으로 정정·취소·대체하는지 "
+            "평가하세요. 뒤에서 올바른 공식이나 결과를 별도로 설명한 것만으로는 앞 오류가 해소되지 않으며, "
+            "슬라이드에 정확한 내용이 있어도 발화와 충돌할 뿐 강의자가 이를 정정하지 않았다면 "
+            "해소로 보지 마세요."
         ),
     },
     "temporal_error": {
@@ -128,8 +128,9 @@ CATEGORY_SCORE_GUIDES = {
             "높게 주세요. 잠깐 헷갈릴 수 있으나 뒤 학습에 거의 영향을 주지 않는 표현은 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요. 같은 슬라이드나 인접 context에서 "
-            "정확한 의미가 충분히 설명되면 높게 주고, 모호한 표현만 남아 있으면 낮게 주세요."
+            "앞뒤 전사 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요. 인접 context에서 강의자가 "
+            "정확한 의미를 충분히 설명하면 높게 주고, 슬라이드와 발화가 충돌하여 어느 쪽이 맞는지 "
+            "학습자가 판단해야 한다면 해소로 보지 마세요."
         ),
     },
     "scope_overclaim": {
@@ -148,9 +149,9 @@ CATEGORY_SCORE_GUIDES = {
             "하지만 그 과잉 단정 표현을 포함하여도, 통상적으로 맞는 지식이고, 일반적으로 맞는 설명이면 점수를 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 context와 슬라이드가 조건, 예외, 적용 대상, 범위를 충분히 복원하는지 평가하세요. "
-            "문맥상 범위 단정이 명확히 완화되거나 교육상 맥락에서 허용 가능한 설명으로 귀결되면 높게 주고, "
-            "닫힌 범위가 그대로 남으면 낮게 주세요."
+            "앞뒤 전사 context에서 강의자가 조건, 예외, 적용 대상, 범위를 충분히 복원하는지 평가하세요. "
+            "발화상 범위 단정이 명확히 완화되거나 교육상 맥락에서 허용 가능한 설명으로 귀결되면 높게 주고, "
+            "슬라이드에만 정확한 범위가 있고 발화의 닫힌 범위가 정정되지 않았다면 낮게 주세요."
         ),
     },
 }
@@ -199,7 +200,14 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
 def _default_models() -> list[str]:
     _load_env()
     configured = _split_csv(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODELS"))
-    return configured or list(DEFAULT_MODELS)
+    models = configured or list(DEFAULT_MODELS)
+    verifier_gpt_model = os.getenv("CLASSIFIED_ISSUE_VERIFIER_GPT_MODEL", "").strip()
+    if verifier_gpt_model:
+        models = [
+            verifier_gpt_model if str(model).strip().lower() in {"gpt", "openai"} else model
+            for model in models
+        ]
+    return models
 
 
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -251,6 +259,19 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
         return {}
     payload = json.loads(target.read_text(encoding="utf-8"))
     return payload if isinstance(payload, dict) else {}
+
+
+def _web_evidence_lookup(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for item in payload.get("evidence_items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        if candidate_id:
+            lookup[candidate_id] = item
+    return lookup
 
 
 def _slide_number(issue: dict[str, Any]) -> int | None:
@@ -658,14 +679,96 @@ def _build_context_bundle(
 def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
     issue = item.get("issue") or {}
     context_bundle = item.get("context_bundle") if isinstance(item.get("context_bundle"), dict) else {}
-    return {
+    brief = {
         "id": item.get("id"),
         "issue_id": issue.get("issue_id", ""),
         "claim_id": issue.get("claim_id", ""),
         "claim_text": issue.get("claim_text", ""),
         "resolved_claim": issue.get("resolved_claim", ""),
+        "basis_code": issue.get("basis_code", ""),
         "target_context_ids": context_bundle.get("target_context_ids", []),
     }
+    web_evidence = item.get("web_evidence") if isinstance(item.get("web_evidence"), dict) else {}
+    evidence = web_evidence.get("evidence") if isinstance(web_evidence.get("evidence"), list) else []
+    evidence_status = str(web_evidence.get("status") or "").strip()
+    compact_evidence = []
+    relations: set[str] = set()
+    if evidence_status == "verified":
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            key_sentence = str(row.get("key_sentence") or "").strip()
+            if not key_sentence:
+                continue
+            relation = str(row.get("relation_to_claim") or "").strip()
+            if relation not in {"supports_claim", "contradicts_claim"}:
+                continue
+            relations.add(relation)
+            relevance = str(row.get("document_relevance") or "").strip().lower()
+            if relevance not in {"direct", "partial"}:
+                relevance = "direct"
+            compact_evidence.append({
+                "source_type": str(
+                    row.get("assessed_source_class")
+                    or row.get("source_priority_label")
+                    or ""
+                ).strip(),
+                "source_strength": str(
+                    row.get("source_strength") or "strong"
+                ).strip(),
+                "relevance": relevance,
+                "claim_relation": relation,
+                "key_sentence": key_sentence,
+            })
+            if len(compact_evidence) >= 3:
+                break
+    if compact_evidence:
+        compact_web_evidence = {
+            "status": "verified",
+            "evidence": compact_evidence,
+        }
+        if len(relations) == 1:
+            compact_web_evidence["claim_relation"] = next(iter(relations))
+            for row in compact_evidence:
+                row.pop("claim_relation", None)
+        brief["web_evidence"] = compact_web_evidence
+    elif evidence_status == "insufficient_evidence":
+        partial_rows = (
+            web_evidence.get("partial_evidence")
+            if isinstance(web_evidence.get("partial_evidence"), list)
+            else []
+        )
+        compact_partial_evidence = []
+        for row in partial_rows:
+            if not isinstance(row, dict):
+                continue
+            key_sentence = str(row.get("key_sentence") or "").strip()
+            if not key_sentence:
+                continue
+            compact_partial_evidence.append({
+                "source_type": str(
+                    row.get("assessed_source_class")
+                    or row.get("source_priority_label")
+                    or ""
+                ).strip(),
+                "source_strength": str(
+                    row.get("source_strength") or "supporting"
+                ).strip(),
+                "relevance": "partial",
+                "key_sentence": key_sentence,
+            })
+            if len(compact_partial_evidence) >= 2:
+                break
+        brief["web_evidence"] = {
+            "status": "insufficient_evidence",
+            "evidence": compact_partial_evidence,
+        }
+    elif evidence_status == "grounding_unavailable":
+        brief["web_evidence"] = {
+            "status": "grounding_unavailable",
+            "evidence": [],
+        }
+    return brief
 
 
 def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -718,9 +821,7 @@ def _prompt_payload(items: list[dict[str, Any]]) -> str:
 
 
 def _response_contract() -> str:
-    return """응답은 JSON 객체 하나만 출력하세요. markdown fence는 쓰지 마세요.
-모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
-
+    return """JSON 객체만 출력하세요. 모든 입력 id를 한 번씩 포함하세요.
 {
   "judgments": [
     {
@@ -734,105 +835,70 @@ def _response_contract() -> str:
     }
   ]
 }
-
-공통 출력 규칙:
-- is_valid_issue, category_severity, context_resolution은 0.0 이상 1.0 이하 숫자입니다.
-- context_resolution은 문맥이 issue를 해소하는 정도입니다. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨입니다.
-- reason과 minimal_fix는 반드시 한국어로 작성하세요. 영어 원문 용어, API 이름, 공식 문서 표현이 필요하면 한국어 설명 뒤 괄호 안에만 짧게 병기하세요.
-- judgment 같은 enum 값과 JSON key 이름은 지정된 영어 값을 그대로 사용하세요.
-- 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_resolution을 높게 주세요."""
+점수는 0.0~1.0입니다. reason과 minimal_fix는 한국어로 작성하고 enum과 key는 그대로 사용하세요."""
 
 
 def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
     description = CATEGORY_DESCRIPTIONS.get(category, "")
     score_guide = CATEGORY_SCORE_GUIDES.get(category, {})
-    return f"""당신은 강의 verifier의 최종 FACT check 심사자입니다.
+    return f"""당신은 분류가 끝난 강의 이슈 후보의 최종 verifier입니다.
+현재 날짜: {current_date}
+대상 분류: {CATEGORY_LABELS.get(category, category)} ({category})
+정의: {description}
 
-오늘 날짜: {current_date}
+목표
+- 입력 후보를 다른 유형으로 재분류하지 말고 대상 분류 안에서만 판정하세요.
+- claim_text, resolved_claim, 같은 슬라이드 전사와 slide_text를 함께 읽어 학생에게 최종적으로 남는 의미를 판단하세요.
+- resolved_claim이 원문보다 강하거나 넓으면 원문 문맥을 우선하세요.
+- slide_text는 claim의 대상·관계·조건을 해석하고 발화와의 충돌을 찾는 보조 자료입니다.
+  전사와 슬라이드가 일치한다는 사실만으로 claim이 참이라고 판단하지 마세요.
 
-공통 문맥 해소 판단 순서:
-0. resolved_claim과 claim_text/target context의 관계를 먼저 확인하세요.
-   resolved_claim이 target context의 최종 전달 의미를 올바르게 정리한 문장이고,
-   claim_text의 어색함이 말실수, 전사 흔들림, 즉시 재표현, 자기수정 수준이라면
-   claim_text의 표면적 어색함만으로 점수를 높이지 마세요.
-   반대로 resolved_claim이 target context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
-   resolved_claim의 강해진 부분을 그대로 믿지 말고 target context 기준으로 낮게 판단하세요.
-   외래어·고유명사 등의 전사 흔들림으로 보이고, 그 표기를 자연스러운 원어 표기로 보정했을 때
-   강의 설명이 사실적으로 맞다면 이는 오류가 아닙니다. 이 경우 반드시 `judgment="not_issue"`,
-   `is_valid_issue=0`, `category_severity=0`으로 출력하세요. 단, 표기를 보정한 뒤에도 설명 자체가
-   틀리거나 강의자가 실제로 다른 대상·용어를 설명한 독립적 문맥 근거가 있으면 이 규칙을 적용하지 마세요.
-1. 먼저 target context 안에서 claim이 실제로 어떤 의미로 사용되었는지 판단하세요.
-2. 바로 앞뒤 context가 같은 대상, 같은 관계, 같은 조건을 설명하는 경우에만 해소 근거로 사용하세요.
-3. 같은 context 또는 바로 인접 context에서 같은 대상의 속성, 조건, 반환값, 구성요소를 이어서 설명하는 경우,
-   앞선 claim만 단독으로 판단하지 말고 이어지는 설명까지 포함해 최종적으로 학생에게 남는 의미를 판단하세요.
-   이어지는 설명이 앞선 claim의 누락된 부분을 명확히 보완하여 전체 설명이 일반 도메인 지식 기준으로 자연스럽게 맞아진다면,
-   context_resolution을 높게 줄 수 있습니다.
-   다만 이어지는 설명이 단순히 같은 주제를 말하는 수준이거나, 앞선 claim의 핵심 오류를 직접 보완하지 못한다면
-   문맥 해소로 보지 마세요.
-4. 문맥이 단순히 같은 주제를 말하거나 일반 배경을 제공하는 정도라면 해소 근거로 보지 마세요.
-5. 문맥이 claim의 강한 표현을 예시, 대비, 강조, 교육적 단순화로 좁혀 주면 context_resolution을 높게 주세요.
-6. 반대로 문맥이 같은 강한 표현을 반복하거나 강화하면 context_resolution을 낮게 주세요.
-7. 문맥이 양쪽으로 읽히면, claim 자체가 일반적으로 맞는 설명인지 먼저 보세요. 일반적으로 맞는 설명이면 해소 쪽으로, 일반적으로 틀린 설명이면 미해소 쪽으로 판단하세요.
-8. slide_text는 target claim을 해석하고 문맥 해소 여부를 판단하기 위한 보조 근거입니다.
-   slide_text에 관련 개념이나 강한 표현이 있다는 이유만으로 is_valid_issue를 높이지 마세요.
-   slide_text가 target claim의 대상, 관계, 조건, 범위를 더 정확하게 설명하면 context_resolution을 높게 주세요.
-   다만 slide_text 자체가 target claim과 같은 잘못된 명제를 직접 반복하거나 강화할 때만 issue를 높이는 근거로 사용할 수 있습니다.
-9. 잘못된 용어/분류명을 직접 발화한 경우, 뒤에서 상위 범주나 포함 관계를 설명하더라도 그 설명이 해당 용어/분류명 자체를 바로잡는지 확인하세요.
-   해당 용어가 직접 정정되지 않았고, 학생이 그 대상을 잘못된 범주명으로 외울 가능성이 남으면 context_resolution을 낮게 주세요.
-   다만 뒤 문맥이나 slide_text가 같은 대상을 더 정확한 용어로 명시하고, 잘못된 용어가 단순 말실수나 재표현 과정으로 해소되면 context_resolution을 높게 줄 수 있습니다.
-   단, 영문/외래어 용어의 한글 발음 표기, 음차, 전사 흔들림만 있고 문맥상 지칭하는 원어와 개념이 명확하면 잘못된 용어/분류명 오류로 보지 마세요.
-10. 수치 claim에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 있고, 해당 수치가 핵심 학습 대상이 아니라 보조 설명, 감각적 환산, 예시로 쓰인 경우에는 정확한 수치와 차이가 있어도 일반적으로 통용되는 근사인지 먼저 판단하세요.
-   일반적으로 통용되는 근사이면 사실 오류로 높게 채점하지 말고, 문맥상 정확한 수치 판단이 핵심일 때만 높게 채점하세요.
+문맥·근거 규칙
+1. 같은 대상의 인접 설명이 claim을 명시적으로 정정·조건화·한정하면 context_resolution을 높이고,
+   단순 배경 설명이거나 같은 오류를 반복하면 높이지 마세요.
+   명시적 정정은 앞 발화가 잘못되었음을 밝히거나 그 발화를 취소·대체하는 연결이 드러나는 경우입니다.
+   뒤에서 올바른 공식·계산·결과를 제시한 것만으로는 앞 오류를 사실상 정정한 것으로 간주하지 마세요.
+   정확한 slide_text와 잘못된 발화가 충돌하더라도 강의자가 발화를 명시적으로 정정하지 않았다면
+   오류가 해소된 것이 아닙니다. 학습자에게 상충하는 정보가 남으므로 is_valid_issue와
+   category_severity를 유지하고 context_resolution을 높이지 마세요.
+2. 문맥상 ASR 흔들림·외래어 음차로 인해 문제가 생긴 것이라면 이슈로 보지 마세요. 비핵심 수치의 통용 가능한
+   근사는 허용하되, 핵심 계산·정의·범위에 영향을 주면 검증하세요.
+   특히 외래어·고유명사를 자연스러운 원어로 보정하면 설명이 맞고 다른 대상을 뜻한다는 문맥 근거가 없으면
+   not_issue, is_valid_issue=0, category_severity=0으로 판정하세요.
+   강의자가 사실·정의·계산·범위를 명확히 잘못 말한 경우에는 단순한 말실수라는 이유로 제외하지 마세요.
+   뒤에서 올바른 내용을 설명하더라도 앞의 오류를 명시적으로 정정하지 않았다면 이슈를 유지하세요.
+3. web_evidence.status="verified"의 key_sentence와 claim_relation은 검증된 외부 근거이지만 최종 판정은 아닙니다.
+4. status="insufficient_evidence"의 문장은 명시된 범위에서만 사용하세요. 다만 그 문장과 현재 날짜,
+   claim의 수치·단위 또는 다른 근거로 결과가 결정론적으로 계산·도출되면 근거로 사용할 수 있으며,
+   reason에 계산 또는 논리 연결을 적으세요.
+5. direct는 단독 근거가 될 수 있습니다. partial은 누락 범위까지 확대하지 마세요. strong은 단독 사용 가능하고,
+   supporting은 다른 근거를 보조할 때만 사용하세요. 빈 evidence나 grounding_unavailable은 어느 방향의 증거도 아닙니다.
+6. factual_error·temporal_error를 인정하려면 정확한 사실·정의·계산·직접 반례를 제시하세요.
+   이를 특정할 수 없으면 추측하지 말고 insufficient_context로 판정하세요.
 
-입력으로 제공되는 정보:
-- claim의 도메인/서브도메인
-- resolved_claim과 원문 claim_text (전사본에서, claim단위로 구성하여 제공, resolved_claim은 지시어를 보강한 claim, claim_text는 원문기반 claim)
-- 해당 context와 앞뒤 context (전사본을 문맥 단위로 나누어 제공)
-- 해당 슬라이드의 slide_text(merged_clean에서 제공되는 기본 슬라이드 텍스트)
+점수
+- is_valid_issue: 대상 분류의 실제 이슈인 정도
+- category_severity: 학생의 오개념·적용 판단에 미치는 심각도
+- context_resolution: 강의자의 앞뒤 전사 설명이 이슈를 명시적으로 해소한 정도
+- 문맥이 일부 해소하면 주로 context_resolution에 반영하고, 애초에 이슈가 아니면 is_valid_issue도 낮추세요.
 
-출력 점수:
-- is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0 issue일수록 1에 수렴.
-- category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0 심각할수록 1에 수렴.
-- context_resolution: 제공된 문맥이 issue를 얼마나 해소하는지. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨.
+분류별 기준
+- is_valid_issue: {score_guide.get("is_valid_issue", "")}
+- category_severity: {score_guide.get("category_severity", "")}
+- context_resolution: {score_guide.get("context_resolution", "")}
 
-판정 라벨:
-- valid_issue: 이 분류 기준에서 유효한 issue
-- partially_resolved: issue 가능성은 있으나 문맥으로 일부 해소됨
-- not_issue: 이 분류 기준에서는 issue가 아님
-- insufficient_context: 제공 자료만으로 판단하기 어려움
+라벨
+- valid_issue: 유효한 이슈
+- partially_resolved: 이슈가 있으나 문맥이 일부 해소
+- not_issue: 이 분류의 이슈가 아님
+- insufficient_context: 제공 자료로 판정 불가
 
-중요:
-- 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
-- 응답은 JSON 객체 하나만 출력하세요.
-- 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
-- reason과 minimal_fix는 반드시 한국어로 작성하세요. 판단 과정에서 영어 자료나 영어 개념어를 사용해도 되지만, 설명 문장은 한국어로 쓰고 필요한 영어 원문/API명/전문용어만 괄호 안에 짧게 병기하세요.
-- JSON key 이름과 judgment enum 값(valid_issue, partially_resolved, not_issue, insufficient_context)은 영어 그대로 유지하세요.
-- reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
-- minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
-- 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
-- 문맥 해소를 이유로 is_valid_issue와 category_severity를 동시에 과도하게 낮추지 마세요.
-- 다만 문맥을 포함했을 때 애초에 issue가 성립하지 않는다면 is_valid_issue도 낮출 수 있습니다.
+reason은 한국어 1~2문장으로 결론, 정확한 근거·계산, 문맥 해소 여부를 포함하세요.
+minimal_fix는 필요한 경우만 짧게 작성하세요.
 
 {_response_contract()}
 
-판정 분류: {CATEGORY_LABELS.get(category, category)} ({category})
-
-아래 분류 설명과 점수별 판단 기준은 이 요청에서 유일하게 적용할 기준입니다.
-다른 분류로 재분류하지 말고, 이 분류 기준 안에서만 issue의 유효성, 심각성, 문맥 해소 정도를 판단하세요.
-
-판정 분류 설명:
-{description}
-
-이 분류에서 is_valid_issue 판단 기준:
-{score_guide.get("is_valid_issue", "")}
-
-이 분류에서 category_severity 판단 기준:
-{score_guide.get("category_severity", "")}
-
-이 분류에서 context_resolution 판단 기준:
-{score_guide.get("context_resolution", "")}
-
-입력 issue:
+입력:
 {_prompt_payload(items)}
 """
 
@@ -924,7 +990,13 @@ def _call_model_for_batch(
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     prompt = _build_prompt(category, batch, current_date)
-    text, usage, resolved = _call_llm(model_spec=model, prompt=prompt, max_tokens=max_tokens)
+    text, usage, resolved = _call_llm(
+        model_spec=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        web_search=False,
+    )
+
     try:
         rows = _parse_response(text)
         by_id = {str(row.get("id") or ""): row for row in rows if isinstance(row, dict)}
@@ -1110,6 +1182,7 @@ def _issue_result_record(
             "context_bundle": ref.get("context_bundle", {}),
         },
         "previous_classification": {
+            "basis_code": issue.get("basis_code", ""),
             "weighted_scores": issue.get("weighted_scores", {}),
             "ensemble_confidence": issue.get("ensemble_confidence", 0.0),
             "low_margin": bool(issue.get("low_margin")),
@@ -1126,6 +1199,7 @@ def _issue_result_record(
         "model_disagreement": disagreement,
         "model_disagreement_needs_review": needs_manual_review,
         "needs_manual_review": final_status == "professor_check",
+        "web_evidence": ref.get("web_evidence", {}),
         "model_judgments": verdicts,
     }
 
@@ -1153,6 +1227,10 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
                 "parse_failed_count": sum(
                     1 for row in result.get("judgments", []) or [] if row.get("status") != "ok"
                 ),
+                "web_search_requests": int(result.get("web_search_requests", 0) or 0),
+                "web_search_judgment_count": sum(
+                    1 for row in result.get("judgments", []) or [] if row.get("web_search_used")
+                ),
             }
             for model, result in model_results.items()
         },
@@ -1173,7 +1251,7 @@ def _slim_classified_issue_view(result: dict[str, Any]) -> dict[str, Any]:
             "summary",
             "model_results",
             "token_usage",
-            "grounding",
+            "web_evidence",
             "output_path",
         )
         if result.get(key) not in (None, "", [], {})
@@ -1225,32 +1303,23 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 model_row["context_resolution"] = row.get("context_resolution", 0.0)
             if "context_unresolved" in row:
                 model_row["context_unresolved"] = row.get("context_unresolved", 0.0)
+            if "web_search_used" in row:
+                model_row["web_search_used"] = bool(row.get("web_search_used"))
+                model_row["web_evidence_status"] = row.get("web_evidence_status", "not_used")
+                model_row["evidence_sources"] = row.get("evidence_sources", [])
             model_judgments.append(model_row)
         reason = " / ".join(
             row.get("reason", "")
             for row in model_judgments
             if str(row.get("reason", "")).strip()
         )
-        web_grounding = issue.get("web_grounding") if isinstance(issue.get("web_grounding"), dict) else {}
-        grounding_reason = str(web_grounding.get("reason") or "").strip()
-        grounding_sources = web_grounding.get("evidence_sources") if isinstance(web_grounding.get("evidence_sources"), list) else []
-        grounding_adjustment = (
-            issue.get("web_grounding_adjustment")
-            if isinstance(issue.get("web_grounding_adjustment"), dict)
-            else {}
-        )
-        grounding_delta = grounding_adjustment.get("delta")
-        grounding_delta_text = ""
-        if isinstance(grounding_delta, (int, float)):
-            grounding_delta_text = f" ({grounding_delta:+.3f})"
-        if web_grounding.get("status") == "refutes_issue" and grounding_reason:
-            reason = f"웹 근거로 점수 감산{grounding_delta_text}: {grounding_reason}" + (
-                f" / 기존 모델 판단: {reason}" if reason else ""
-            )
-        elif web_grounding.get("status") == "supports_issue" and grounding_reason:
-            reason = f"웹 근거로 점수 가산{grounding_delta_text}: {grounding_reason}" + (
-                f" / 기존 모델 판단: {reason}" if reason else ""
-            )
+        web_evidence = issue.get("web_evidence") if isinstance(issue.get("web_evidence"), dict) else {}
+        evidence_rows = web_evidence.get("evidence") if isinstance(web_evidence.get("evidence"), list) else []
+        evidence_sources = [
+            str(row.get("url") or "")
+            for row in evidence_rows
+            if isinstance(row, dict) and str(row.get("url") or "").strip()
+        ]
         minimal_fix = next(
             (
                 row.get("minimal_fix", "")
@@ -1296,8 +1365,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 },
                 "evidence": {
                     "slide_number": location.get("slide_number"),
-                    "web_grounding": web_grounding,
-                    "web_sources": grounding_sources,
+                    "web_evidence": web_evidence,
+                    "web_sources": evidence_sources,
                     "source_issue_ids": [issue.get("id") or issue_id],
                 },
                 "checks": {
@@ -1316,7 +1385,7 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "average_context_resolution": issue.get("average_context_resolution", 0.0),
                     "model_disagreement": issue.get("model_disagreement", 0.0),
                     "needs_manual_review": bool(issue.get("needs_manual_review")),
-                    "web_grounding": web_grounding,
+                    "web_evidence": web_evidence,
                 },
             }
         )
@@ -1367,16 +1436,14 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         "breakdown_by_type": dict(breakdown),
     }
     source_summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    for key in (
-        "grounded_issue_count",
-        "grounding_status_counts",
-        "web_grounding_adjusted_count",
-        "web_grounding_supports_adjusted_count",
-        "web_grounding_refutes_adjusted_count",
-        "web_grounding_total_score_delta",
-    ):
-        if key in source_summary:
-            summary[key] = source_summary[key]
+    evidence_meta = result.get("web_evidence") if isinstance(result.get("web_evidence"), dict) else {}
+    evidence_summary = evidence_meta.get("summary") if isinstance(evidence_meta.get("summary"), dict) else {}
+    if evidence_meta.get("enabled"):
+        summary["web_evidence_target_count"] = int(evidence_summary.get("target_count", 0) or 0)
+        summary["web_evidence_verified_count"] = int(evidence_summary.get("verified_count", 0) or 0)
+        summary["web_evidence_insufficient_count"] = int(
+            evidence_summary.get("insufficient_evidence_count", 0) or 0
+        )
 
     return {
         "schema_version": "content_verification.v2",
@@ -1421,6 +1488,8 @@ def judge_classified_issues(
     limit: int | None = None,
     dry_run: bool = False,
     model_weights_spec: str | None = None,
+    web_evidence_payload: dict[str, Any] | None = None,
+    web_evidence_path: str | Path | None = None,
 ) -> dict[str, Any]:
     _load_env()
     standard_refs, composite_refs = _flatten_issues(payload, limit=limit)
@@ -1429,9 +1498,10 @@ def judge_classified_issues(
     context_by_id, contexts_by_slide = _build_context_lookup(merged_payload)
     domain = str(merged_payload.get("domain") or "")
     subdomain = str(merged_payload.get("subdomain") or "")
+    evidence_lookup = _web_evidence_lookup(web_evidence_payload)
 
     def _make_bundles(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
+        bundles = [
             _build_context_bundle(
                 ref,
                 domain=domain,
@@ -1443,6 +1513,11 @@ def judge_classified_issues(
             )
             for ref in refs
         ]
+        for bundle in bundles:
+            evidence = evidence_lookup.get(str(bundle.get("id") or ""))
+            if isinstance(evidence, dict):
+                bundle["web_evidence"] = evidence
+        return bundles
 
     standard_bundles = _make_bundles(standard_refs)
     composite_plans: list[tuple[dict[str, Any], list[str], list[dict[str, Any]]]] = []
@@ -1525,6 +1600,22 @@ def judge_classified_issues(
 
         for result in model_results.values():
             usages = result.pop("token_usage_by_batch", [])
+            result["web_search_requests"] = sum(
+                int(usage.get("web_search_requests", 0) or 0)
+                for usage in usages
+            )
+            result["web_search_queries"] = list(dict.fromkeys(
+                str(query)
+                for usage in usages
+                for query in usage.get("web_search_queries", []) or []
+                if str(query).strip()
+            ))
+            result["web_search_sources"] = list(dict.fromkeys(
+                str(source)
+                for usage in usages
+                for source in usage.get("web_search_sources", []) or []
+                if str(source).strip()
+            ))
             result["token_usage"] = _aggregate_token_usage(usages)
 
     model_weights = _parse_model_weights(model_weights_spec, models, model_results)
@@ -1570,6 +1661,36 @@ def judge_classified_issues(
         "all_issues": records,
         "model_results": model_results,
         "token_usage": dict(token_usage),
+        "web_evidence": {
+            "enabled": bool(web_evidence_payload),
+            "source_path": str(web_evidence_path or ""),
+            "summary": (
+                web_evidence_payload.get("summary", {})
+                if isinstance(web_evidence_payload, dict)
+                else {}
+            ),
+            "token_usage": (
+                web_evidence_payload.get("token_usage", {})
+                if isinstance(web_evidence_payload, dict)
+                else {}
+            ),
+        },
+        "web_search": {
+            "enabled": any(
+                int(result.get("web_search_requests", 0) or 0) > 0
+                for result in model_results.values()
+            ),
+            "request_count": sum(
+                int(result.get("web_search_requests", 0) or 0)
+                for result in model_results.values()
+            ),
+            "judgment_count": sum(
+                1
+                for result in model_results.values()
+                for row in result.get("judgments", []) or []
+                if row.get("web_search_used")
+            ),
+        },
     }
 
 

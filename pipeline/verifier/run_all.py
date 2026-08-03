@@ -1158,8 +1158,9 @@ def run_classified_issue_pipeline(
     final_verifier_max_workers = _env_int(
         "CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", shared_max_workers
     )
-    grounding_max_workers = _env_int(
-        "CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", shared_max_workers
+    evidence_max_workers = _env_int(
+        "CLASSIFIED_ISSUE_EVIDENCE_MAX_WORKERS",
+        _env_int("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", shared_max_workers),
     )
     slide_error_max_workers = _env_int(
         "CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", shared_max_workers
@@ -1168,7 +1169,7 @@ def run_classified_issue_pipeline(
         "  verifier 병렬 설정: "
         f"shared={shared_max_workers}, classifier_per_model={issue_type_max_workers}, "
         f"final_per_model={final_verifier_max_workers}, "
-        f"grounding_per_model={grounding_max_workers}, "
+        f"evidence={evidence_max_workers}, "
         f"slide_error_per_model={slide_error_max_workers}",
         flush=True,
     )
@@ -1223,7 +1224,7 @@ def run_classified_issue_pipeline(
         _default_output_path as _verifier_default_output_path,
         _default_models as _verifier_default_models,
     )
-    from .classified_issue_grounder import ground_classified_issues
+    from .classified_issue_grounder import collect_pre_verifier_evidence_batched
     from .classified_slide_error_checker import (
         detect_classified_slide_errors,
     )
@@ -1262,6 +1263,39 @@ def run_classified_issue_pipeline(
         raise
     notify("verifier_issue_classification", "done")
 
+    evidence_enabled = os.getenv("CLASSIFIED_ISSUE_EVIDENCE_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    evidence_output_path = out_dir / f"{base_stem}_classified_issue_evidence.json"
+    evidence_result: dict = {}
+    if evidence_enabled:
+        notify("verifier_web_grounding", "run")
+        try:
+            if _json_file_exists(evidence_output_path):
+                print(f"  ⏭  pre-verifier web evidence — 출력 파일 존재, 스킵")
+                print(f"     {evidence_output_path}")
+                evidence_result = _load_json_file(evidence_output_path)
+            else:
+                evidence_result = collect_pre_verifier_evidence_batched(
+                    classified_input,
+                    input_path=classified_input_path,
+                    merged_clean_path=merged_file,
+                    current_date=current_date or datetime.now().date().isoformat(),
+                    max_workers=evidence_max_workers,
+                    max_tokens=int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MAX_TOKENS", "600")),
+                )
+                evidence_output_path.write_text(
+                    json.dumps(evidence_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception:
+            notify("verifier_web_grounding", "error")
+            raise
+        notify("verifier_web_grounding", "done")
+
     verifier_output_path = _verifier_default_output_path(classified_input_path)
     notify("verifier_final_verification", "run")
     try:
@@ -1286,6 +1320,8 @@ def run_classified_issue_pipeline(
                 max_workers=final_verifier_max_workers,
                 context_window=5,
                 model_weights_spec=verifier_model_weights,
+                web_evidence_payload=evidence_result,
+                web_evidence_path=evidence_output_path if evidence_enabled else None,
             )
             verifier_result["output_path"] = str(verifier_output_path)
             verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1293,37 +1329,6 @@ def run_classified_issue_pipeline(
         notify("verifier_final_verification", "error")
         raise
     notify("verifier_final_verification", "done")
-
-    grounding_enabled = os.getenv("CLASSIFIED_ISSUE_GROUNDING_ENABLED", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    grounding_output_path = out_dir / f"{base_stem}_classified_issue_grounding.json"
-    if grounding_enabled:
-        notify("verifier_web_grounding", "run")
-        try:
-            if _json_file_exists(grounding_output_path):
-                print(f"  ⏭  classified issue grounding — 출력 파일 존재, 스킵")
-                print(f"     {grounding_output_path}")
-                verifier_result = _load_json_file(grounding_output_path)
-                verifier_result["output_path"] = str(verifier_output_path)
-            else:
-                verifier_result = ground_classified_issues(
-                    verifier_result,
-                    current_date=current_date or datetime.now().date().isoformat(),
-                    max_workers=grounding_max_workers,
-                    max_tokens=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")),
-                )
-                verifier_result["output_path"] = str(verifier_output_path)
-                grounding_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            notify("verifier_web_grounding", "error")
-            raise
-        notify("verifier_web_grounding", "done")
-    else:
-        verifier_result["grounding"] = {"enabled": False, "grounded_issue_count": 0, "status_counts": {}}
 
     content_view = build_content_verification_view(verifier_result)
     slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
@@ -1378,8 +1383,9 @@ def run_classified_issue_pipeline(
         "issue_judge": issue_judge_result.get("issue_judge_merged", ""),
         "issue_types": str(issue_type_output_path),
         "classified_issues": str(classified_input_path),
+        "classified_issue_evidence": str(evidence_output_path) if evidence_enabled else "",
         "classified_issue_verifier": str(verifier_output_path),
-        "classified_issue_grounding": str(grounding_output_path) if grounding_enabled else "",
+        "classified_issue_grounding": "",
         "slide_errors": str(slide_error_output_path),
     }
     result_json_path = out_dir / f"{base_stem}_verification_final.json"

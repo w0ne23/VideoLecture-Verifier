@@ -670,9 +670,13 @@ def _call_llm(
             kwargs = dict(
                 model=resolved_model,
                 max_tokens=max_tokens,
-                temperature=temp,
                 messages=[{"role": "user", "content": content}],
             )
+            # Sonnet 5 rejects the legacy sampling parameter with HTTP 400.
+            # Keep it for older Anthropic models, whose behaviour already relies
+            # on the configured verifier temperature.
+            if "sonnet-5" not in resolved_model.lower():
+                kwargs["temperature"] = temp
             if system_prompt:
                 system_block = {"type": "text", "text": system_prompt}
                 cache_control = _anthropic_prompt_cache_control()
