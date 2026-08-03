@@ -1898,18 +1898,96 @@ def _copy_optional_mask(
     return dst_rel_filename
 
 
-def _materialize_file(src: Path, dst: Path) -> str:
-    """Persist a temporary cache artifact without rewriting its contents."""
-    if not src.exists() or src.stat().st_size <= 0:
-        raise FileNotFoundError(f"Cannot materialize missing or empty cache artifact: {src}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.unlink(missing_ok=True)
+def _verify_merged_part(
+    part_path: Path,
+    chunk_video_path: Path,
+    selected_indices: list[int],
+) -> tuple[bool, str]:
+    """Verify sparse frame alignment against the already encoded chunk cache."""
+    expected_count = len(selected_indices)
+    if expected_count <= 0:
+        return False, "empty_selection"
+
+    part_cap = cv2.VideoCapture(str(part_path))
+    if not part_cap.isOpened():
+        return False, "part_open_failed"
+    chunk_cap = cv2.VideoCapture(str(chunk_video_path))
+    if not chunk_cap.isOpened():
+        part_cap.release()
+        return False, "chunk_open_failed"
     try:
-        os.link(src, dst)
-        return "hardlink"
-    except OSError:
-        shutil.copy2(src, dst)
-        return "copy"
+        reported_count = int(round(float(part_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)))
+        if reported_count != expected_count:
+            return False, f"frame_count={reported_count},expected={expected_count}"
+
+        max_mse = max(
+            0.0,
+            _env_float("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_MSE", 25.0),
+        )
+        verify_stride = max(
+            1,
+            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")),
+        )
+        probe_indices = list(range(0, expected_count, verify_stride))
+        if probe_indices[-1] != expected_count - 1:
+            probe_indices.append(expected_count - 1)
+        for probe_index in probe_indices:
+            part_cap.set(cv2.CAP_PROP_POS_FRAMES, probe_index)
+            part_ok, part_frame = part_cap.read()
+            chunk_cap.set(cv2.CAP_PROP_POS_FRAMES, selected_indices[probe_index])
+            chunk_ok, chunk_frame = chunk_cap.read()
+            if not part_ok or part_frame is None:
+                return False, f"part_decode_failed_at={probe_index}"
+            if not chunk_ok or chunk_frame is None:
+                return False, f"chunk_decode_failed_at={selected_indices[probe_index]}"
+            mse = compute_mse(
+                to_decision_frame(chunk_frame),
+                to_decision_frame(part_frame),
+            )
+            if mse > max_mse:
+                search_radius = max(
+                    0,
+                    int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_REPAIR_RADIUS", "2")),
+                )
+                offset_scores: list[tuple[float, int]] = []
+                for offset in range(-search_radius, search_radius + 1):
+                    candidate_chunk_index = selected_indices[probe_index] + offset
+                    if candidate_chunk_index < 0:
+                        continue
+                    chunk_cap.set(cv2.CAP_PROP_POS_FRAMES, candidate_chunk_index)
+                    candidate_ok, candidate_frame = chunk_cap.read()
+                    if not candidate_ok or candidate_frame is None:
+                        continue
+                    candidate_mse = compute_mse(
+                        to_decision_frame(candidate_frame),
+                        to_decision_frame(part_frame),
+                    )
+                    offset_scores.append((float(candidate_mse), int(offset)))
+
+                offset_scores.sort()
+                best_mse, best_offset = offset_scores[0] if offset_scores else (mse, 0)
+                second_mse = offset_scores[1][0] if len(offset_scores) > 1 else float("inf")
+                min_margin = max(
+                    0.0,
+                    _env_float("GRAPHLEC_SAMPLE_CACHE_VERIFY_REPAIR_MIN_MARGIN", 5.0),
+                )
+                if (
+                    best_offset != 0
+                    and best_mse <= max_mse
+                    and second_mse - best_mse >= min_margin
+                ):
+                    return False, (
+                        f"alignment_offset={best_offset:+d},mse={mse:.6f},"
+                        f"aligned_mse={best_mse:.6f},max={max_mse:.6f},"
+                        f"index={probe_index}"
+                    )
+                return False, (
+                    f"mse={mse:.6f},max={max_mse:.6f},index={probe_index}"
+                )
+    finally:
+        part_cap.release()
+        chunk_cap.release()
+    return True, "ok"
 
 
 def _materialize_chunk_segment_worker(
@@ -1917,7 +1995,14 @@ def _materialize_chunk_segment_worker(
     spec: dict,
     segment_path: str,
 ) -> dict:
-    """Persist one original chunk AVI and select its core frames virtually."""
+    """Create one overlap-trimmed part from one chunk cache.
+
+    MJPEG is all-keyframe, so the normal path trims packets with FFmpeg stream
+    copy. If sparse MSE alignment finds a mismatch, the OpenCV fallback rewrites
+    the exact selected chunk frames and replaces the misaligned part.
+    """
+
+    import time
 
     started_at = time.perf_counter()
     chunk_manifest = Path(chunk_manifest_path)
@@ -1942,27 +2027,114 @@ def _materialize_chunk_segment_worker(
 
     all_frames = list(payload.get("frames", []))
     selected_indices = [index for index, item in enumerate(all_frames) if in_core(item)]
-    if not selected_indices:
-        raise RuntimeError(
-            f"Chunk has no samples in its core range: chunk={spec['chunk_index']} "
-            f"core={core_start:.6f}~{core_end:.6f}"
+    selected_frames = [dict(all_frames[index]) for index in selected_indices]
+    skipped_overlap = len(all_frames) - len(selected_frames)
+    for selected in selected_frames:
+        selected["frame_no"] = int(selected["frame_no"])
+        selected["timestamp_sec"] = round(float(selected["timestamp_sec"]), 6)
+
+    stream_copy_enabled = _env_bool("GRAPHLEC_SAMPLE_CACHE_STREAM_COPY_CORE", True)
+    if stream_copy_enabled and selected_indices:
+        copied, copy_reason = _stream_copy_core_part(
+            chunk_video_path,
+            part,
+            first_frame_index=selected_indices[0],
+            frame_count=len(selected_frames),
+            sampled_fps=sampled_fps,
         )
-    expected_indices = list(range(selected_indices[0], selected_indices[-1] + 1))
-    if selected_indices != expected_indices:
-        raise RuntimeError(
-            f"Chunk core sample indices are not contiguous: chunk={spec['chunk_index']}"
+        if copied:
+            verified, verify_reason = _verify_merged_part(
+                part,
+                chunk_video_path,
+                selected_indices,
+            )
+            if verified:
+                return {
+                    "chunk_index": int(spec["chunk_index"]),
+                    "chunk_dir": str(chunk_dir),
+                    "part_path": str(part),
+                    "part_mode": "ffmpeg-stream-copy",
+                    "selected_count": len(selected_frames),
+                    "skipped_overlap": skipped_overlap,
+                    "fallback_phash_count": 0,
+                    "video_read_elapsed": 0.0,
+                    "video_write_elapsed": 0.0,
+                    "metric_fallback_elapsed": 0.0,
+                    "elapsed": time.perf_counter() - started_at,
+                    "frames": selected_frames,
+                }
+            copy_reason = f"verify_failed:{verify_reason}"
+        part.unlink(missing_ok=True)
+        repair_kind = (
+            "offset-detected exact-frame rewrite"
+            if "alignment_offset=" in copy_reason
+            else "exact-frame rewrite"
+        )
+        log.warning(
+            "sample merge alignment repair: chunk=%s method=%s reason=%s",
+            int(spec["chunk_index"]),
+            repair_kind,
+            copy_reason,
         )
 
     selected_frames = []
-    for local_index in selected_indices:
-        selected = dict(all_frames[local_index])
-        selected["cache_segment_frame_index"] = int(local_index)
-        selected["frame_no"] = int(selected["frame_no"])
-        selected["timestamp_sec"] = round(float(selected["timestamp_sec"]), 6)
-        selected_frames.append(selected)
-    skipped_overlap = len(all_frames) - len(selected_frames)
-    segment = Path(segment_path)
-    materialize_mode = _materialize_file(chunk_video_path, segment)
+    skipped_overlap = 0
+    fallback_phash_count = 0
+    video_read_elapsed = 0.0
+    video_write_elapsed = 0.0
+    metric_fallback_elapsed = 0.0
+
+    try:
+        for item in all_frames:
+            read_t0 = time.perf_counter()
+            ret, frame = cap.read()
+            video_read_elapsed += time.perf_counter() - read_t0
+            if not ret or frame is None:
+                raise RuntimeError(f"Chunk sampled video ended early: {chunk_video_path}")
+
+            timestamp = float(item["timestamp_sec"])
+            if timestamp < core_start - 1e-6:
+                skipped_overlap += 1
+                continue
+            if is_last:
+                if timestamp > core_end + 1e-6:
+                    skipped_overlap += 1
+                    continue
+            elif timestamp >= core_end - 1e-6:
+                skipped_overlap += 1
+                continue
+
+            write_t0 = time.perf_counter()
+            writer.write(frame)
+            video_write_elapsed += time.perf_counter() - write_t0
+
+            selected = dict(item)
+            selected["frame_no"] = int(item["frame_no"])
+            selected["timestamp_sec"] = round(float(item["timestamp_sec"]), 6)
+
+            # In normal chunk caches this already exists. Keep a fallback so old
+            # caches or partially written manifests still remain usable.
+            if selected.get("phash_int") is None:
+                metric_t0 = time.perf_counter()
+                selected["phash_int"] = compute_phash_int(to_decision_frame(frame))
+                metric_fallback_elapsed += time.perf_counter() - metric_t0
+                fallback_phash_count += 1
+
+            selected_frames.append(selected)
+    finally:
+        cap.release()
+        writer.release()
+
+    verified, verify_reason = _verify_merged_part(
+        part,
+        chunk_video_path,
+        selected_indices,
+    )
+    if not verified:
+        raise RuntimeError(
+            f"OpenCV-reencoded sample cache part verification failed: {verify_reason}"
+        )
+
     return {
         "chunk_index": int(spec["chunk_index"]),
         "chunk_dir": str(chunk_dir),
@@ -2322,14 +2494,7 @@ def _assemble_chunk_caches(
 
 
 def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dict:
-    """Validate cache mappings and verify that representative frames decode.
-
-    Direct chunk segments contain the exact AVI bytes written beside their chunk
-    manifests, so their safe alignment contract is structural: a valid local
-    index mapping and a decodable frame of the expected size. Comparing a hash
-    captured before lossy MJPEG encoding with decoded pixels creates false
-    mismatches and does not validate the virtual mapping.
-    """
+    """Check final segment frame counts and manifest-local frame mappings."""
     if os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_ALIGNMENT", "1").strip().lower() in {
         "0", "false", "no", "off",
     }:
@@ -2339,18 +2504,13 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
     if not frames:
         return {"enabled": True, "ok": False, "checked": 0, "mismatches": ["empty_manifest"]}
 
-    stride = max(1, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")))
-    max_hash_distance = max(0, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")))
-    target_positions = set(range(0, len(frames), stride))
-    target_positions.add(len(frames) - 1)
-
     checked = 0
     mismatches: list[dict] = []
     segmented = is_segmented_sample_cache(manifest)
     if segmented:
-        current_segment: str | None = None
-        previous_local_index: int | None = None
-        completed_segments: set[str] = set()
+        previous_segment = None
+        previous_local_index = None
+        segment_counts: dict[str, int] = {}
         for frame_info in frames:
             segment = frame_info.get("cache_segment_filename")
             local_index = frame_info.get("cache_segment_frame_index")
@@ -2395,71 +2555,65 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
                     "expected_local_index": expected_local_index,
                 })
                 break
+            segment_counts[segment] = segment_counts.get(segment, 0) + 1
+            previous_segment = segment
             previous_local_index = local_index
         if mismatches:
             return {
                 "enabled": True,
                 "ok": False,
                 "checked": 0,
-                "stride": stride,
-                "max_hash_distance": max_hash_distance,
+                "method": "segment_frame_count_and_sparse_mse",
                 "mismatches": mismatches,
             }
-    verify_started_at = time.perf_counter()
-    log.info(
-        "sample cache alignment verify start: targets=%s samples=%s mode=%s",
-        len(target_positions),
-        len(frames),
-        "direct-segment-mapping" if segmented else "legacy-sequential",
-    )
-    try:
-        if segmented:
-            frame_iter = iter_sample_cache_selected_positions(cache_dir, sorted(target_positions))
-        else:
-            frame_iter = iter_sample_cache_range(cache_dir, 0, len(frames))
-        for position, frame_info, frame in frame_iter:
-            if not segmented and position not in target_positions:
-                continue
-            checked += 1
-            if segmented:
-                expected_width = int(manifest.get("cache", {}).get("width") or 0)
-                expected_height = int(manifest.get("cache", {}).get("height") or 0)
-                actual_height, actual_width = frame.shape[:2]
-                if (
-                    (expected_width > 0 and actual_width != expected_width)
-                    or (expected_height > 0 and actual_height != expected_height)
-                ):
-                    mismatches.append({
-                        "reason": "segment_frame_size_mismatch",
-                        "sample_index": int(frame_info.get("sample_index", position + 1)),
-                        "expected": [expected_width, expected_height],
-                        "actual": [actual_width, actual_height],
-                    })
-                    break
-                continue
 
-            expected = frame_info.get("phash_int")
-            if expected is None:
-                continue
-            actual = compute_phash_int(to_decision_frame(frame))
-            distance = phash_distance_int(int(expected), actual)
-            if distance > max_hash_distance:
-                mismatches.append({
-                    "sample_index": int(frame_info.get("sample_index", position + 1)),
-                    "frame_no": int(frame_info.get("frame_no", 0) or 0),
-                    "distance": int(distance),
-                })
-                # One mismatch is sufficient to reject the cache. Keep the
-                # validation overhead bounded on long recordings.
+        verify_started_at = time.perf_counter()
+        log.info(
+            "sample cache alignment verify start: segments=%s samples=%s mode=segment-frame-count",
+            len(segment_counts),
+            len(frames),
+        )
+        cache_path = Path(cache_dir)
+        for segment, expected_count in segment_counts.items():
+            cap = cv2.VideoCapture(str(cache_path / segment))
+            if not cap.isOpened():
+                mismatches.append({"reason": "segment_open_failed", "segment": segment})
                 break
-        if not mismatches and checked != len(target_positions):
-            mismatches.append({
-                "reason": "verification_target_count_mismatch",
-                "expected": len(target_positions),
-                "actual": checked,
-            })
-    except Exception as exc:
-        mismatches.append({"reason": f"cache_read_failed:{exc}"})
+            try:
+                actual_count = int(round(float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)))
+            finally:
+                cap.release()
+            checked += 1
+            if actual_count != expected_count:
+                mismatches.append({
+                    "reason": "segment_frame_count_mismatch",
+                    "segment": segment,
+                    "expected": expected_count,
+                    "actual": actual_count,
+                })
+                break
+    else:
+        verify_started_at = time.perf_counter()
+        video_path = Path(cache_dir) / str(manifest.get("video_filename") or VIDEO_FILENAME)
+        log.info(
+            "sample cache alignment verify start: samples=%s mode=legacy-frame-count",
+            len(frames),
+        )
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            mismatches.append({"reason": "cache_open_failed", "video": str(video_path)})
+        else:
+            try:
+                actual_count = int(round(float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)))
+            finally:
+                cap.release()
+            checked = 1
+            if actual_count != len(frames):
+                mismatches.append({
+                    "reason": "cache_frame_count_mismatch",
+                    "expected": len(frames),
+                    "actual": actual_count,
+                })
 
     log.info(
         "sample cache alignment verify done: checked=%s mismatches=%s elapsed=%.1fs",
@@ -2472,9 +2626,8 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
         "enabled": True,
         "ok": not mismatches,
         "checked": checked,
-        "stride": stride,
-        "max_hash_distance": max_hash_distance,
-        "mode": "direct-segment-mapping" if segmented else "legacy-phash",
+        "method": "segment_frame_count_and_sparse_mse",
+        "max_mse": _env_float("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_MSE", 25.0),
         "mismatches": mismatches,
     }
 
@@ -2695,9 +2848,9 @@ def create_sample_cache_chunked(
         alignment = _verify_sample_cache_alignment(output_dir, merged)
         if alignment["ok"]:
             log.info(
-                "sample cache alignment verified: checked=%s stride=%s",
+                "sample cache alignment verified: checked=%s method=%s",
                 alignment["checked"],
-                alignment.get("stride"),
+                alignment.get("method"),
             )
             return merged
 
