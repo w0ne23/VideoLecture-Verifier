@@ -9,6 +9,7 @@ export const PIPELINE_NODES = [
   { id: 'issue_judge', label: '이슈 후보 판단', stageKey: 'verifier_issue_judge', stageLabel: '이슈 후보 판단' },
   { id: 'issue_classification', label: '이슈 유형 분류', stageKey: 'verifier_issue_classification', stageLabel: '이슈 유형 분류' },
   { id: 'final_verification', label: '멀티 LLM 검증', stageKey: 'verifier_final_verification', stageLabel: '멀티 LLM 검증' },
+  { id: 'web_grounding', label: '웹 근거 검증', stageKey: 'verifier_web_grounding', stageLabel: '웹 근거 검증' },
   { id: 'slide_review', label: '슬라이드 오류', stageKey: 'verify_slide_errors', stageLabel: '슬라이드 오류 검사' },
 ]
 

@@ -81,6 +81,7 @@ VERIFIER_DETAIL_STAGE_KEYS = [
     "verifier_issue_judge",
     "verifier_issue_classification",
     "verifier_final_verification",
+    "verifier_web_grounding",
     "verify_slide_errors",
 ]
 # 외부 라이브러리 노이즈 로그 억제

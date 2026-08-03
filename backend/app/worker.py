@@ -28,6 +28,7 @@ PIPELINE_STAGE_KEYS = [
     'verifier_issue_judge',
     'verifier_issue_classification',
     'verifier_final_verification',
+    'verifier_web_grounding',
     'verify_slide_errors',
 ]
 
@@ -40,6 +41,7 @@ PIPELINE_STAGE_LABELS = {
     'verifier_issue_judge': '이슈 후보 판단',
     'verifier_issue_classification': '이슈 유형 분류',
     'verifier_final_verification': '멀티 LLM 검증',
+    'verifier_web_grounding': '웹 근거 검증',
     'verify_slide_errors': '슬라이드 오류 검사',
 }
 

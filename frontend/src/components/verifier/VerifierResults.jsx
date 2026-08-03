@@ -15,8 +15,16 @@ const STATUS_LABELS = {
   rejected: '기각',
   supports_issue: '이슈 근거 있음',
   refutes_issue: '이슈 반박 근거',
+  verified: '웹 근거 확인',
   insufficient_evidence: '근거 부족',
+  grounding_unavailable: '웹 근거 확인 실패',
   not_applicable: '대상 아님',
+}
+
+const RELATION_LABELS = {
+  supports_claim: '강의 주장 뒷받침',
+  contradicts_claim: '강의 주장 반박',
+  irrelevant: '직접 관련 없음',
 }
 
 const VERDICT_LABELS = {
@@ -171,7 +179,15 @@ function getSeverity(item) {
 function getGrounding(item) {
   const evidence = item.evidence || {}
   const verifier = item.classified_issue_verifier || {}
-  return verifier.web_grounding || item.web_grounding || evidence.web_grounding || {}
+  return (
+    verifier.web_evidence
+    || evidence.web_evidence
+    || item.web_evidence
+    || verifier.web_grounding
+    || item.web_grounding
+    || evidence.web_grounding
+    || {}
+  )
 }
 
 function sourceUrl(source) {
@@ -355,12 +371,20 @@ function PassageList({ passages }) {
             <div className="grounding-passage" key={`${url || passage.id || 'passage'}-${index}`}>
               <div className="grounding-passage-head">
                 {passage.stance && <span>{STATUS_LABELS[passage.stance] || passage.stance}</span>}
+                {passage.relation_to_claim && (
+                  <span>{RELATION_LABELS[passage.relation_to_claim] || passage.relation_to_claim}</span>
+                )}
                 {passage.match_status && <span>match: {passage.match_status}</span>}
                 {passage.match_score !== undefined && <span>{formatRatio(passage.match_score)}</span>}
+                {passage.relation_confidence !== undefined && (
+                  <span>관계 {formatRatio(passage.relation_confidence)}</span>
+                )}
               </div>
               {url && <a href={url} target="_blank" rel="noreferrer">{url}</a>}
               <TextBlock>{passage.key_sentence || passage.quote_or_paragraph || passage.matched_text}</TextBlock>
-              {passage.why_relevant && <p className="grounding-relevance">{passage.why_relevant}</p>}
+              {(passage.why_relevant || passage.relation_reason) && (
+                <p className="grounding-relevance">{passage.why_relevant || passage.relation_reason}</p>
+              )}
             </div>
           )
         })}
@@ -401,8 +425,17 @@ function WebGroundingPanel({ item }) {
 
   const trials = asArray(grounding.trials)
   const trialPassages = trials.flatMap(trial => asArray(trial.evidence_passages))
-  const passages = grounding.evidence_passages || trialPassages
-  const sources = grounding.evidence_sources?.length ? grounding.evidence_sources : evidence.web_sources
+  const compactEvidence = asArray(grounding.evidence)
+  const passages = grounding.evidence_passages?.length
+    ? grounding.evidence_passages
+    : compactEvidence.length
+      ? compactEvidence
+      : trialPassages
+  const sources = grounding.evidence_sources?.length
+    ? grounding.evidence_sources
+    : compactEvidence.length
+      ? compactEvidence
+      : evidence.web_sources
 
   return (
     <DetailGroup title="웹 그라운딩">
@@ -410,7 +443,9 @@ function WebGroundingPanel({ item }) {
         {grounding.status && <span className="claim-tag claim-tag--grounding">{STATUS_LABELS[grounding.status] || grounding.status}</span>}
         {grounding.claim_verdict && <span className="claim-tag">{VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict}</span>}
         {grounding.selected_source_priority_label && <span className="claim-tag">{grounding.selected_source_priority_label}</span>}
-        {grounding.selected_source_count !== undefined && <span className="claim-tag">선정 {grounding.selected_source_count}건</span>}
+        {(grounding.selected_source_count !== undefined || compactEvidence.length > 0) && (
+          <span className="claim-tag">선정 {grounding.selected_source_count ?? compactEvidence.length}건</span>
+        )}
       </div>
       <TextBlock>{grounding.reason}</TextBlock>
       <TextBlock>{grounding.evidence_summary}</TextBlock>

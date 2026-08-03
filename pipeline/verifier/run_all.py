@@ -1128,7 +1128,7 @@ def run_classified_issue_pipeline(
     issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     issue_type_batch_size: int = ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
     verifier_batch_size: int = CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
-    max_workers: int = 1,
+    max_workers: int | None = None,
     max_tokens: int = 8192,
     stage_notify: Callable[[str, str], None] | None = None,
 ) -> dict:
@@ -1139,12 +1139,40 @@ def run_classified_issue_pipeline(
     category-specific issue verifier -> web-friendly verification_final.json.
     """
 
+    # The backend calls this function directly instead of entering CLI main().
+    # Keep verifier output visible in both pipeline.log and Docker logs.
+    _enable_docker_log_tee()
+
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
         raise FileNotFoundError(f"merged_clean 파일 없음: {merged_file}")
     base_stem = _base_stem(merged_file)
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # The full video pipeline does not pass worker counts explicitly. Resolve
+    # them here so it uses the same per-model concurrency as the standalone
+    # verifier commands instead of silently falling back to one worker.
+    shared_max_workers = _env_int("VERIFIER_STAGE_MAX_WORKERS", max_workers or 12)
+    issue_type_max_workers = _env_int("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", shared_max_workers)
+    final_verifier_max_workers = _env_int(
+        "CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", shared_max_workers
+    )
+    evidence_max_workers = _env_int(
+        "CLASSIFIED_ISSUE_EVIDENCE_MAX_WORKERS",
+        _env_int("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", shared_max_workers),
+    )
+    slide_error_max_workers = _env_int(
+        "CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", shared_max_workers
+    )
+    print(
+        "  verifier 병렬 설정: "
+        f"shared={shared_max_workers}, classifier_per_model={issue_type_max_workers}, "
+        f"final_per_model={final_verifier_max_workers}, "
+        f"evidence={evidence_max_workers}, "
+        f"slide_error_per_model={slide_error_max_workers}",
+        flush=True,
+    )
 
     def notify(stage: str, status: str) -> None:
         if not stage_notify:
@@ -1176,7 +1204,7 @@ def run_classified_issue_pipeline(
             current_date=current_date,
             issue_judge_min_confidence=issue_judge_min_confidence,
             issue_judge_batch_size=issue_judge_batch_size,
-            issue_judge_max_workers=max_workers,
+            issue_judge_max_workers=shared_max_workers,
         )
     except Exception:
         notify("verifier_issue_judge", "error")
@@ -1196,7 +1224,7 @@ def run_classified_issue_pipeline(
         _default_output_path as _verifier_default_output_path,
         _default_models as _verifier_default_models,
     )
-    from .classified_issue_grounder import ground_classified_issues
+    from .classified_issue_grounder import collect_pre_verifier_evidence_batched
     from .classified_slide_error_checker import (
         detect_classified_slide_errors,
     )
@@ -1224,7 +1252,7 @@ def run_classified_issue_pipeline(
                 batch_size=max(1, issue_type_batch_size),
                 current_date=current_date or datetime.now().date().isoformat(),
                 max_tokens=max(256, max_tokens),
-                max_workers=max(1, max_workers),
+                max_workers=issue_type_max_workers,
                 model_weights_spec=issue_type_model_weights,
             )
             issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1234,6 +1262,39 @@ def run_classified_issue_pipeline(
         notify("verifier_issue_classification", "error")
         raise
     notify("verifier_issue_classification", "done")
+
+    evidence_enabled = os.getenv("CLASSIFIED_ISSUE_EVIDENCE_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    evidence_output_path = out_dir / f"{base_stem}_classified_issue_evidence.json"
+    evidence_result: dict = {}
+    if evidence_enabled:
+        notify("verifier_web_grounding", "run")
+        try:
+            if _json_file_exists(evidence_output_path):
+                print(f"  ⏭  pre-verifier web evidence — 출력 파일 존재, 스킵")
+                print(f"     {evidence_output_path}")
+                evidence_result = _load_json_file(evidence_output_path)
+            else:
+                evidence_result = collect_pre_verifier_evidence_batched(
+                    classified_input,
+                    input_path=classified_input_path,
+                    merged_clean_path=merged_file,
+                    current_date=current_date or datetime.now().date().isoformat(),
+                    max_workers=evidence_max_workers,
+                    max_tokens=int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MAX_TOKENS", "600")),
+                )
+                evidence_output_path.write_text(
+                    json.dumps(evidence_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception:
+            notify("verifier_web_grounding", "error")
+            raise
+        notify("verifier_web_grounding", "done")
 
     verifier_output_path = _verifier_default_output_path(classified_input_path)
     notify("verifier_final_verification", "run")
@@ -1256,9 +1317,11 @@ def run_classified_issue_pipeline(
                 batch_size=max(1, verifier_batch_size),
                 current_date=current_date or datetime.now().date().isoformat(),
                 max_tokens=max(256, max_tokens),
-                max_workers=max(1, max_workers),
+                max_workers=final_verifier_max_workers,
                 context_window=5,
                 model_weights_spec=verifier_model_weights,
+                web_evidence_payload=evidence_result,
+                web_evidence_path=evidence_output_path if evidence_enabled else None,
             )
             verifier_result["output_path"] = str(verifier_output_path)
             verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1266,37 +1329,6 @@ def run_classified_issue_pipeline(
         notify("verifier_final_verification", "error")
         raise
     notify("verifier_final_verification", "done")
-
-    grounding_enabled = os.getenv("CLASSIFIED_ISSUE_GROUNDING_ENABLED", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    grounding_output_path = out_dir / f"{base_stem}_classified_issue_grounding.json"
-    if grounding_enabled:
-        notify("verifier_web_grounding", "run")
-        try:
-            if _json_file_exists(grounding_output_path):
-                print(f"  ⏭  classified issue grounding — 출력 파일 존재, 스킵")
-                print(f"     {grounding_output_path}")
-                verifier_result = _load_json_file(grounding_output_path)
-                verifier_result["output_path"] = str(verifier_output_path)
-            else:
-                verifier_result = ground_classified_issues(
-                    verifier_result,
-                    current_date=current_date or datetime.now().date().isoformat(),
-                    max_workers=max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", str(max_workers)))),
-                    max_tokens=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")),
-                )
-                verifier_result["output_path"] = str(verifier_output_path)
-                grounding_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            notify("verifier_web_grounding", "error")
-            raise
-        notify("verifier_web_grounding", "done")
-    else:
-        verifier_result["grounding"] = {"enabled": False, "grounded_issue_count": 0, "status_counts": {}}
 
     content_view = build_content_verification_view(verifier_result)
     slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
@@ -1315,7 +1347,7 @@ def run_classified_issue_pipeline(
                 slide_textualized_path=slide_textualized_path,
                 slide_classified_path=slide_classified_path,
                 batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
-                max_workers=max(1, int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", str(max_workers)))),
+                max_workers=slide_error_max_workers,
                 max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
                 current_date=current_date or datetime.now().date().isoformat(),
             )
@@ -1351,8 +1383,9 @@ def run_classified_issue_pipeline(
         "issue_judge": issue_judge_result.get("issue_judge_merged", ""),
         "issue_types": str(issue_type_output_path),
         "classified_issues": str(classified_input_path),
+        "classified_issue_evidence": str(evidence_output_path) if evidence_enabled else "",
         "classified_issue_verifier": str(verifier_output_path),
-        "classified_issue_grounding": str(grounding_output_path) if grounding_enabled else "",
+        "classified_issue_grounding": "",
         "slide_errors": str(slide_error_output_path),
     }
     result_json_path = out_dir / f"{base_stem}_verification_final.json"

@@ -463,12 +463,18 @@ def _usage_value(obj: Any, *names: str) -> int:
 
 def _openai_like_usage(resp: Any, provider: str, model: str) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
-    completion_details = getattr(usage, "completion_tokens_details", None)
-    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    completion_details = (
+        getattr(usage, "completion_tokens_details", None)
+        or getattr(usage, "output_tokens_details", None)
+    )
+    prompt_details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
     input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
     output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
     total_tokens = _usage_value(usage, "total_tokens")
-    return {
+    result = {
         "provider": provider,
         "model": model,
         "input_tokens": input_tokens,
@@ -479,6 +485,29 @@ def _openai_like_usage(resp: Any, provider: str, model: str) -> dict[str, Any]:
         "cache_creation_input_tokens": 0,
         "total_tokens": total_tokens or input_tokens + output_tokens,
     }
+    web_search_requests = 0
+    web_search_queries: list[str] = []
+    web_search_sources: list[str] = []
+    for item in getattr(resp, "output", []) or []:
+        if getattr(item, "type", "") != "web_search_call":
+            continue
+        web_search_requests += 1
+        action = getattr(item, "action", None)
+        query = str(getattr(action, "query", "") or "").strip()
+        if query and query not in web_search_queries:
+            web_search_queries.append(query)
+        for candidate in getattr(action, "queries", None) or []:
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in web_search_queries:
+                web_search_queries.append(candidate)
+        for source in getattr(action, "sources", None) or []:
+            url = str(getattr(source, "url", "") or "").strip()
+            if url and url not in web_search_sources:
+                web_search_sources.append(url)
+    result["web_search_requests"] = web_search_requests
+    result["web_search_queries"] = web_search_queries
+    result["web_search_sources"] = web_search_sources
+    return result
 
 
 def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
@@ -533,6 +562,10 @@ def _call_openai_like(
     model: str,
     prompt: str,
     max_tokens: int,
+    web_search: bool = False,
+    web_search_max_calls: int = 2,
+    web_search_force: bool = False,
+    web_search_context_size: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     try:
         from openai import OpenAI
@@ -566,32 +599,60 @@ def _call_openai_like(
         if base_url
         else OpenAI(api_key=api_key, timeout=timeout)
     )
-    messages = [{"role": "user", "content": prompt}]
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-    }
-    if not reasoning_effort:
-        kwargs["temperature"] = 0.0
-    seed = _env_seed()
-    if seed is not None:
-        kwargs["seed"] = seed
-    if provider == "openai":
-        kwargs["max_completion_tokens"] = max_tokens
+    use_web_search = provider == "openai" and bool(web_search)
+    if use_web_search:
+        # OpenAI rejects web_search combined with JSON mode. The final verifier
+        # therefore relies on its strict JSON-only prompt and existing parser.
+        search_tool: dict[str, Any] = {"type": "web_search"}
+        context_size = str(web_search_context_size or "").strip().lower()
+        if context_size in {"low", "medium", "high"}:
+            search_tool["search_context_size"] = context_size
+        kwargs = {
+            "model": model,
+            "input": prompt,
+            "tools": [search_tool],
+            "tool_choice": "required" if web_search_force else "auto",
+            "max_tool_calls": max(1, int(web_search_max_calls)),
+            "max_output_tokens": max_tokens,
+            "include": ["web_search_call.action.sources"],
+        }
         if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["reasoning"] = {"effort": reasoning_effort}
     else:
-        kwargs["max_tokens"] = max_tokens
-        if provider == "deepseek":
-            kwargs["extra_body"] = {"thinking": {"type": os.getenv("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_THINKING", "disabled")}}
+        messages = [{"role": "user", "content": prompt}]
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        if not reasoning_effort and model.lower() != "gpt-5.6-luna":
+            kwargs["temperature"] = 0.0
+        seed = _env_seed()
+        if seed is not None:
+            kwargs["seed"] = seed
+        if provider == "openai":
+            kwargs["max_completion_tokens"] = max_tokens
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+        else:
+            kwargs["max_tokens"] = max_tokens
+            if provider == "deepseek":
+                kwargs["extra_body"] = {
+                    "thinking": {
+                        "type": os.getenv("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_THINKING", "disabled")
+                    }
+                }
 
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_API_RETRIES", 2, min_value=0) + 1
     retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC", 10.0, min_value=0.0)
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            resp = client.chat.completions.create(**kwargs)
+            resp = (
+                client.responses.create(**kwargs)
+                if use_web_search
+                else client.chat.completions.create(**kwargs)
+            )
             break
         except Exception as exc:
             message = str(exc)
@@ -622,7 +683,8 @@ def _call_openai_like(
                 time.sleep(retry_wait)
     else:
         raise RuntimeError("LLM API 호출 실패") from last_exc
-    return _chat_completion_text(resp), _openai_like_usage(resp, provider, model)
+    text = str(getattr(resp, "output_text", "") or "") if use_web_search else _chat_completion_text(resp)
+    return text, _openai_like_usage(resp, provider, model)
 
 
 def _call_anthropic(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
@@ -634,13 +696,15 @@ def _call_anthropic(*, model: str, prompt: str, max_tokens: int) -> tuple[str, d
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
     client = Anthropic(api_key=api_key)
-    resp = client.messages.create(
+    request_kwargs = dict(
         model=model,
         max_tokens=max_tokens,
-        temperature=0.0,
         system="응답은 반드시 JSON 객체 하나만 출력하세요. 설명 문장이나 markdown fence를 붙이지 마세요.",
         messages=[{"role": "user", "content": prompt}],
     )
+    if "sonnet-5" not in model.lower():
+        request_kwargs["temperature"] = 0.0
+    resp = client.messages.create(**request_kwargs)
     text_blocks = [
         getattr(block, "text", "")
         for block in getattr(resp, "content", []) or []
@@ -665,9 +729,9 @@ def _call_gemini(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict
     if not client_sequence:
         raise RuntimeError("GOOGLE_API_KEY_1, GOOGLE_API_KEY 또는 GEMINI_API_KEY가 설정되지 않았습니다.")
 
+    del max_tokens
     cfg_kwargs: dict[str, Any] = {
         "temperature": 0.0,
-        "max_output_tokens": max_tokens,
         "response_mime_type": "application/json",
     }
     thinking_budget = os.getenv("ISSUE_TYPE_CLASSIFIER_GEMINI_THINKING_BUDGET")
@@ -717,6 +781,10 @@ def _call_llm(
     model_spec: str,
     prompt: str,
     max_tokens: int,
+    web_search: bool = False,
+    web_search_max_calls: int = 2,
+    web_search_force: bool = False,
+    web_search_context_size: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
     resolved = _resolve_model_spec(model_spec)
     provider = resolved["provider"]
@@ -726,7 +794,16 @@ def _call_llm(
     elif provider == "gemini":
         text, usage = _call_gemini(model=model, prompt=prompt, max_tokens=max_tokens)
     else:
-        text, usage = _call_openai_like(provider=provider, model=model, prompt=prompt, max_tokens=max_tokens)
+        text, usage = _call_openai_like(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            web_search=web_search,
+            web_search_max_calls=web_search_max_calls,
+            web_search_force=web_search_force,
+            web_search_context_size=web_search_context_size,
+        )
     return text, usage, resolved
 
 
@@ -815,38 +892,48 @@ def _model_worker(args: tuple) -> dict[str, Any]:
 def _batch_worker(args: tuple) -> dict[str, Any]:
     model, batch, batch_index, total_batches, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
-    ids = f"{batch[0]['id']}..{batch[-1]['id']}" if batch else "-"
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES", 2, min_value=0) + 1
     retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC", 10.0, min_value=0.0)
     last_exc: Exception | None = None
+    pending = list(batch)
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    usages: list[dict[str, Any]] = []
     for attempt in range(1, attempts + 1):
+        ids = f"{pending[0]['id']}..{pending[-1]['id']}" if pending else "-"
         suffix = f" (시도 {attempt}/{attempts})" if attempts > 1 else ""
         print(f"  [{model}] batch {batch_index}/{total_batches} 요청 중: {ids}{suffix}", flush=True)
         try:
             rows, usage = _call_model_for_batch(
                 model=model,
-                batch=batch,
+                batch=pending,
                 current_date=current_date,
                 max_tokens=max_tokens,
             )
-            ok_count = sum(1 for row in rows if row.get("status") == "ok")
-            if ok_count < len(rows) and attempt < attempts:
-                last_exc = ValueError(
-                    f"probability vectors parsed {ok_count}/{len(rows)}"
-                )
-                print(
-                    f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
-                    f"{attempt}/{attempts - 1}: {last_exc}",
-                    flush=True,
-                )
-                if retry_wait:
-                    time.sleep(retry_wait)
-                continue
-            if ok_count < len(rows):
-                raise ValueError(
-                    f"probability vectors parsed {ok_count}/{len(rows)} after {attempts} attempts"
-                )
-            break
+            usages.append(usage)
+            returned = {str(row.get("id") or ""): row for row in rows}
+            for item in pending:
+                issue_id = str(item.get("id") or "")
+                if issue_id in returned:
+                    rows_by_id[issue_id] = returned[issue_id]
+
+            failed = [
+                item
+                for item in pending
+                if rows_by_id.get(str(item.get("id") or ""), {}).get("status") != "ok"
+            ]
+            if not failed or attempt >= attempts:
+                break
+
+            ok_count = len(pending) - len(failed)
+            last_exc = ValueError(f"probability vectors parsed {ok_count}/{len(pending)}")
+            print(
+                f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
+                f"{attempt}/{attempts - 1}: {last_exc}",
+                flush=True,
+            )
+            pending = failed
+            if retry_wait:
+                time.sleep(retry_wait)
         except Exception as exc:
             last_exc = exc
             if attempt >= attempts:
@@ -861,6 +948,17 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
     else:
         raise RuntimeError("batch 분류 실패") from last_exc
 
+    rows = []
+    for item in batch:
+        issue_id = str(item.get("id") or "")
+        row = rows_by_id.get(issue_id)
+        if row is None:
+            row = {
+                "id": issue_id,
+                "status": "parse_failed",
+                "parse_error": "모델 응답에서 해당 이슈 결과가 누락되었습니다.",
+            }
+        rows.append(row)
     for row in rows:
         row["batch_index"] = batch_index
     ok_count = sum(1 for row in rows if row.get("status") == "ok")
@@ -875,7 +973,7 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
         "resolved_model": resolved["resolved_model"],
         "batch_index": batch_index,
         "classifications": rows,
-        "token_usage": usage,
+        "token_usage": _aggregate_token_usage(usages),
     }
 
 
@@ -1236,6 +1334,9 @@ def _compact_model_classifications(verdicts: list[dict[str, Any]]) -> list[dict[
                 "model": verdict.get("model", ""),
                 "top_issue_type": verdict.get("top_issue_type", ""),
                 "top_probability": verdict.get("top_probability", 0.0),
+                # This is carried only as an unverified entity/search hint for
+                # downstream grounding. It is not external factual evidence.
+                "reason": str(verdict.get("reason") or "")[:320],
             }
         )
     return compact
@@ -1247,6 +1348,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "claim_id": record.get("claim_id", ""),
         "resolved_claim": record.get("resolved_claim", ""),
         "claim_text": record.get("claim_text", ""),
+        "basis_code": record.get("basis_code", ""),
         "final_issue_type": record.get("final_issue_type"),
         "final_issue_type_label": record.get("final_issue_type_label", ""),
         "weighted_scores": record.get("weighted_scores", {}),
