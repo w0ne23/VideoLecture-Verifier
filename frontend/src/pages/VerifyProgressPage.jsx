@@ -1,42 +1,44 @@
-import { useRef } from 'react'
-import { PHASES } from './verifier/verifierConstants'
-import PipelineProgress from './verifier/PipelineProgress'
-import VerifierResults from './verifier/VerifierResults'
+import { useEffect } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { PHASES } from '../components/verifier/verifierConstants'
+import PipelineProgress from '../components/verifier/PipelineProgress'
 import { useJobStream } from '../hooks/useJobStream'
 
-export default function LectureDetail({ lectureId, onExit }) {
-  const videoRef = useRef(null)
+export default function VerifyProgressPage() {
+  const { lectureId } = useParams()
+  const navigate = useNavigate()
+  const goToList = () => navigate('/upload')
+
   const {
     phase,
     lecture,
-    verifier,
     pipelineStages,
     currentStage,
     errorMessage,
     isLoading,
     isMutating,
     actions,
-  } = useJobStream(lectureId, { onExit })
+  } = useJobStream(lectureId, { onExit: goToList })
 
-  function seekTo(seconds) {
-    const video = videoRef.current
-    if (!video) return
-    video.currentTime = seconds
-    video.play().catch(() => {})
-    video.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  // 파이프라인이 완료되면 결과 화면으로 이동한다. 이미 완료된 강의로 바로 진입한 경우도
+  // 여기서 즉시 리다이렉트되므로, 목록에서는 상태와 무관하게 항상 이 라우트로 보내면 된다.
+  useEffect(() => {
+    if (phase === PHASES.VERIFY_READY) {
+      navigate(`/result/${lectureId}`, { replace: true })
+    }
+  }, [phase, lectureId, navigate])
 
   if (isLoading) return <p className="list-note">불러오는 중...</p>
 
   return (
     <div className="detail">
       <div className="detail-head">
-        <button type="button" className="btn" onClick={onExit}>← 목록으로</button>
+        <button type="button" className="btn" onClick={goToList}>← 목록으로</button>
         <h2>{lecture.title || lectureId}</h2>
       </div>
 
       {lecture.video_url && (
-        <video ref={videoRef} className="detail-video" src={lecture.video_url} controls preload="metadata" />
+        <video className="detail-video" src={lecture.video_url} controls preload="metadata" />
       )}
 
       {phase === PHASES.PIPELINE && (
@@ -50,18 +52,10 @@ export default function LectureDetail({ lectureId, onExit }) {
         </div>
       )}
 
-      {phase === PHASES.VERIFY_READY && (
-        <VerifierResults verifier={verifier} onSeek={seekTo} />
-      )}
-
-      {phase === PHASES.VERIFY_READY && !verifier && (
-        <p className="list-note">검증 결과 파일을 불러올 수 없습니다. 파이프라인 로그를 확인하세요.</p>
-      )}
-
       {errorMessage && phase !== PHASES.ERROR && <p className="error-text">{errorMessage}</p>}
 
       <div className="button-row detail-actions">
-        {(phase === PHASES.VERIFY_READY || phase === PHASES.ERROR) && (
+        {phase === PHASES.ERROR && (
           <button type="button" className="btn" disabled={isMutating} onClick={actions.restart}>
             다시 검증
           </button>

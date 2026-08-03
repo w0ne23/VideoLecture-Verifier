@@ -1,19 +1,12 @@
 import { useCallback } from 'react'
-import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import LectureDetail from './components/LectureDetail'
 import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
+import VerifyProgressPage from './pages/VerifyProgressPage'
+import ResultPage from './pages/ResultPage'
 
 const queryClient = new QueryClient()
-
-function LectureDetailPage() {
-  const { lectureId } = useParams()
-  const navigate = useNavigate()
-  const goToList = useCallback(() => navigate('/upload'), [navigate])
-
-  return <LectureDetail lectureId={lectureId} onExit={goToList} />
-}
 
 function AppShell() {
   const navigate = useNavigate()
@@ -29,7 +22,8 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<MainPage />} />
           <Route path="/upload" element={<UploadPage />} />
-          <Route path="/lecture/:lectureId" element={<LectureDetailPage />} />
+          <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
+          <Route path="/result/:lectureId" element={<ResultPage />} />
         </Routes>
       </main>
     </div>

@@ -5,7 +5,7 @@ import LectureList from '../components/LectureList'
 
 export default function UploadPage() {
   const navigate = useNavigate()
-  const openLecture = useCallback(id => navigate(`/lecture/${id}`), [navigate])
+  const openLecture = useCallback(id => navigate(`/verify/${id}`), [navigate])
 
   return (
     <>
