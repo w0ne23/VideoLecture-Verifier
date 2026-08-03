@@ -5,6 +5,7 @@ import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
+import ModelSetupPage from './pages/ModelSetupPage'
 
 const queryClient = new QueryClient()
 
@@ -24,6 +25,7 @@ function AppShell() {
           <Route path="/upload" element={<UploadPage />} />
           <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
           <Route path="/result/:lectureId" element={<ResultPage />} />
+          <Route path="/model-setup" element={<ModelSetupPage />} />
         </Routes>
       </main>
     </div>
