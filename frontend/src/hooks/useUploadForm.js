@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useMutation } from '@tanstack/react-query'
 import { uploadLecture } from '../api/pipeline'
 
 function fileTitle(file) {
@@ -10,8 +11,15 @@ function fileTitle(file) {
 export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
-  const [errorMessage, setErrorMessage] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  const mutation = useMutation({
+    mutationFn: uploadLecture,
+    onSuccess: created => {
+      setFile(null)
+      setTitle('')
+      onUploaded?.(created.id)
+    },
+  })
 
   function selectFile(nextFile) {
     if (!nextFile) return
@@ -19,38 +27,22 @@ export function useUploadForm({ onUploaded } = {}) {
     setTitle(prev => (prev.trim() ? prev : fileTitle(nextFile)))
   }
 
-  async function submit() {
-    if (!file || isSubmitting) return
-
-    setErrorMessage('')
-    setIsSubmitting(true)
-    try {
-      const created = await uploadLecture({
-        file,
-        title: title.trim() || fileTitle(file),
-      })
-      setFile(null)
-      setTitle('')
-      setIsSubmitting(false)
-      onUploaded?.(created.id)
-    } catch (error) {
-      setIsSubmitting(false)
-      setErrorMessage(String(error?.message || error))
-    }
+  function submit() {
+    if (!file || mutation.isPending) return
+    mutation.mutate({ file, title: title.trim() || fileTitle(file) })
   }
 
   function reset() {
     setFile(null)
     setTitle('')
-    setErrorMessage('')
-    setIsSubmitting(false)
+    mutation.reset()
   }
 
   return {
     file,
     title,
-    errorMessage,
-    isSubmitting,
+    errorMessage: mutation.error ? String(mutation.error?.message || mutation.error) : '',
+    isSubmitting: mutation.isPending,
     actions: { selectFile, setTitle, submit, reset },
   }
 }

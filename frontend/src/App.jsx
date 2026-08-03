@@ -1,8 +1,11 @@
 import { useCallback } from 'react'
 import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import LectureDetail from './components/LectureDetail'
 import LectureList from './components/LectureList'
 import UploadForm from './components/UploadForm'
+
+const queryClient = new QueryClient()
 
 function HomePage() {
   const navigate = useNavigate()
@@ -47,8 +50,10 @@ function AppShell() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AppShell />
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AppShell />
+      </BrowserRouter>
+    </QueryClientProvider>
   )
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { listLectures } from '../api/pipeline'
 
 const STATUS_LABELS = {
@@ -9,35 +9,13 @@ const STATUS_LABELS = {
 }
 
 export default function LectureList({ onSelect }) {
-  const [lectures, setLectures] = useState([])
-  const [errorMessage, setErrorMessage] = useState('')
-  const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    let cancelled = false
-    setIsLoading(true)
-
-    listLectures()
-      .then(rows => {
-        if (!cancelled) {
-          setLectures(rows)
-          setErrorMessage('')
-        }
-      })
-      .catch(error => {
-        if (!cancelled) setErrorMessage(String(error?.message || error))
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { data: lectures = [], isLoading, error } = useQuery({
+    queryKey: ['lectures'],
+    queryFn: () => listLectures(),
+  })
 
   if (isLoading) return <p className="list-note">목록을 불러오는 중...</p>
-  if (errorMessage) return <p className="error-text">목록 조회 실패: {errorMessage}</p>
+  if (error) return <p className="error-text">목록 조회 실패: {String(error?.message || error)}</p>
   if (lectures.length === 0) return <p className="list-note">업로드된 강의가 없습니다.</p>
 
   return (
