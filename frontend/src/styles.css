@@ -33,6 +33,16 @@ body {
 
 main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 
+/* ── 메인 메뉴 ── */
+.main-menu { display: flex; flex-direction: column; gap: 10px; }
+.main-menu-item {
+  display: block; text-align: left; background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; padding: 20px; cursor: pointer;
+}
+.main-menu-item:hover { border-color: var(--primary); }
+.main-menu-title { display: block; font-size: 1.05rem; font-weight: 600; }
+.main-menu-desc { display: block; margin-top: 4px; color: var(--muted); font-size: 0.85rem; }
+
 /* ── 업로드 ── */
 .upload-card {
   background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
