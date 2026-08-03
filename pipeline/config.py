@@ -54,6 +54,7 @@ GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GEMINI_API_KEY_1  # 키 1개
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -199,9 +200,14 @@ def get_deepseek_client():
 
 def get_anthropic_client():
     current_key = os.getenv("ANTHROPIC_API_KEY") or ""
+    current_base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     return _cached_client(
-        "anthropic", current_key,
-        lambda: Anthropic(api_key=current_key) if current_key and Anthropic is not None else None,
+        "anthropic", f"{current_key}|{current_base_url}",
+        lambda: (
+            Anthropic(api_key=current_key, base_url=current_base_url)
+            if current_key and Anthropic is not None
+            else None
+        ),
     )
 
 

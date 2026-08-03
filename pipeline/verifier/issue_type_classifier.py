@@ -695,8 +695,9 @@ def _call_anthropic(*, model: str, prompt: str, max_tokens: int) -> tuple[str, d
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-    client = Anthropic(api_key=api_key)
-    request_kwargs = dict(
+    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    client = Anthropic(api_key=api_key, base_url=base_url)
+    resp = client.messages.create(
         model=model,
         max_tokens=max_tokens,
         system="응답은 반드시 JSON 객체 하나만 출력하세요. 설명 문장이나 markdown fence를 붙이지 마세요.",
