@@ -8,7 +8,7 @@ const STATUS_LABELS = {
   error: '오류',
 }
 
-export default function LectureList({ onSelect, refreshKey = 0 }) {
+export default function LectureList({ onSelect }) {
   const [lectures, setLectures] = useState([])
   const [errorMessage, setErrorMessage] = useState('')
   const [isLoading, setIsLoading] = useState(true)
@@ -34,7 +34,7 @@ export default function LectureList({ onSelect, refreshKey = 0 }) {
     return () => {
       cancelled = true
     }
-  }, [refreshKey])
+  }, [])
 
   if (isLoading) return <p className="list-note">목록을 불러오는 중...</p>
   if (errorMessage) return <p className="error-text">목록 조회 실패: {errorMessage}</p>

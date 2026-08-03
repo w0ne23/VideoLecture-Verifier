@@ -1,34 +1,33 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback } from 'react'
+import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom'
 import LectureDetail from './components/LectureDetail'
 import LectureList from './components/LectureList'
 import UploadForm from './components/UploadForm'
 
-// 테스트용 초경량 해시 라우팅: '#/lecture/<id>' ↔ 홈. 새로고침해도 화면이 유지된다.
-function lectureIdFromHash() {
-  const match = window.location.hash.match(/^#\/lecture\/([\w-]+)/)
-  return match ? match[1] : ''
+function HomePage() {
+  const navigate = useNavigate()
+  const openLecture = useCallback(id => navigate(`/lecture/${id}`), [navigate])
+
+  return (
+    <>
+      <UploadForm onUploaded={openLecture} />
+      <h2 className="list-heading">강의 목록</h2>
+      <LectureList onSelect={openLecture} />
+    </>
+  )
 }
 
-export default function App() {
-  const [lectureId, setLectureId] = useState(lectureIdFromHash)
-  const [refreshKey, setRefreshKey] = useState(0)
+function LectureDetailPage() {
+  const { lectureId } = useParams()
+  const navigate = useNavigate()
+  const goHome = useCallback(() => navigate('/'), [navigate])
 
-  useEffect(() => {
-    function onHashChange() {
-      setLectureId(lectureIdFromHash())
-    }
-    window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
-  }, [])
+  return <LectureDetail lectureId={lectureId} onExit={goHome} />
+}
 
-  const openLecture = useCallback(id => {
-    window.location.hash = `#/lecture/${id}`
-  }, [])
-
-  const goHome = useCallback(() => {
-    window.location.hash = ''
-    setRefreshKey(key => key + 1)
-  }, [])
+function AppShell() {
+  const navigate = useNavigate()
+  const goHome = useCallback(() => navigate('/'), [navigate])
 
   return (
     <div className="app">
@@ -37,16 +36,19 @@ export default function App() {
         <p>강의 영상 검증 파이프라인 테스트 콘솔</p>
       </header>
       <main>
-        {lectureId
-          ? <LectureDetail lectureId={lectureId} onExit={goHome} />
-          : (
-            <>
-              <UploadForm onUploaded={openLecture} />
-              <h2 className="list-heading">강의 목록</h2>
-              <LectureList onSelect={openLecture} refreshKey={refreshKey} />
-            </>
-          )}
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/lecture/:lectureId" element={<LectureDetailPage />} />
+        </Routes>
       </main>
     </div>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppShell />
+    </BrowserRouter>
   )
 }
