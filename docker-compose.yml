@@ -182,6 +182,11 @@ services:
       - vlm
     image: ollama/ollama:latest
     container_name: verilec-ollama
+    environment:
+      # 모델 기본 컨텍스트(Qwen3 계열은 262144)로 그대로 로드하면 KV 캐시만으로
+      # GPU를 다 채워 연산이 CPU로 밀려난다 — 실제로 겪은 문제라 명시적으로 낮춘다.
+      OLLAMA_CONTEXT_LENGTH: "${VERILEC_OLLAMA_CONTEXT_LENGTH:-16384}"
+      OLLAMA_NUM_PARALLEL: "${VERILEC_OLLAMA_NUM_PARALLEL:-4}"
     volumes:
       - ollama:/root/.ollama
     ports:
