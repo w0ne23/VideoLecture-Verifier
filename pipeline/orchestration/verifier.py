@@ -1,5 +1,19 @@
 from pathlib import Path
 
+# run_classified_issue_pipeline이 반환하는 stage_timings의 raw stage key를
+# pipeline_timings.json에 쓰는 라벨로 매핑한다. 기존 "V2A extract_claims" /
+# "V2B judge_issues" 네이밍(--stop-after-claim-extract 등 CLI 단독 실행 경로에서
+# 이미 쓰이던 접두사)을 그대로 이어받아 C~F를 추가했다 — 두 경로가 같은 스테이지를
+# 같은 키 계열로 기록하게 맞춘 것.
+_VERIFIER_STAGE_TIMING_LABELS = {
+    "verifier_claim_extraction": "V2A extract_claims — claim 추출",
+    "verifier_issue_judge": "V2B judge_issues — 1차 issue 판단",
+    "verifier_issue_classification": "V2C issue_classification — 이슈 유형 분류",
+    "verifier_web_grounding": "V2D web_grounding — 웹 근거 검증",
+    "verifier_final_verification": "V2E final_verification — 멀티 LLM 검증",
+    "verify_slide_errors": "V2F slide_errors — 슬라이드 오류 검사",
+}
+
 
 def run_verifier_pipeline(
     args,
@@ -76,6 +90,10 @@ def run_verifier_pipeline(
         )
         timings["V2 run_verifier — verifier 실행"] = r10["elapsed"]
         timings["V2 verifier 백그라운드 시작"] = 0.0
+        for stage_key, elapsed in (r10.get("stage_timings") or {}).items():
+            label = _VERIFIER_STAGE_TIMING_LABELS.get(stage_key)
+            if label:
+                timings[label] = elapsed
 
     return {
         "analyzer_input": r9,
