@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  applyEditorStateToStages,
+  ensureProvidersForEditorState,
+  nextProviderId,
+  serializeEditorState,
+  stagesToStageModels,
+  validateStagesForSave,
+} from './stageModels'
 
 const PROVIDERS_META = {
   openai: {
@@ -18,7 +26,7 @@ const PROVIDERS_META = {
   },
 }
 
-const STAGE_ORDER = ['claim', 'detect', 'classify', 'judge', 'ground']
+const STAGE_ORDER = ['claim', 'detect', 'classify', 'judge', 'ground', 'slide']
 
 const createInitialStages = () => ({
   claim: {
@@ -62,13 +70,19 @@ const createInitialStages = () => ({
     selected: null,
     version: null,
   },
+  slide: {
+    mode: 'single',
+    label: '슬라이드 오류',
+    desc: '슬라이드 이미지/텍스트에서 오류를 검사해요.',
+    selected: null,
+    version: null,
+  },
 })
 
 const SIDE_PANEL_TEXT = {
   key: '오류 검증에 쓰일 LLM 모델을 선택 후, API Key를 입력하세요. 여기서 등록한 모델로 이후 단계에 적용할 수 있어요.',
-  auto: '등록한 모델을 검증 파이프라인의 각 단계(Claim 추출 -> Issue 탐지 -> 유형 분류 -> Issue 판단 -> 웹 그라운딩)에 배정해요. 자동 배정 결과를 확인하거나, 상세 조절에서 단계별로 모델, 가중치, 재시도 횟수를 직접 조정할 수 있어요.',
-  detail: '등록한 모델을 검증 파이프라인의 각 단계(Claim 추출 -> Issue 탐지 -> 유형 분류 -> Issue 판단 -> 웹 그라운딩)에 배정해요. 자동 배정 결과를 확인하거나, 상세 조절에서 단계별로 모델, 가중치, 재시도 횟수를 직접 조정할 수 있어요.',
-  end: '등록한 설정으로 검증 파이프라인이 시작돼요. 진행 상황은 다음 화면에서 확인할 수 있어요.',
+  auto: '등록한 모델을 검증 파이프라인의 각 단계와 슬라이드 오류 검사에 배정해요. 자동 배정 결과를 확인하거나, 상세 조절에서 단계별로 모델, 가중치, 재시도 횟수를 직접 조정할 수 있어요.',
+  detail: '등록한 모델을 검증 파이프라인의 각 단계와 슬라이드 오류 검사에 배정해요. 자동 배정 결과를 확인하거나, 상세 조절에서 단계별로 모델, 가중치, 재시도 횟수를 직접 조정할 수 있어요.',
 }
 
 const createInitialRetryCounts = () => ({
@@ -77,6 +91,7 @@ const createInitialRetryCounts = () => ({
   classify: 1,
   judge: 1,
   ground: 1,
+  slide: 1,
 })
 
 function maskKey(key) {
@@ -98,14 +113,6 @@ function loadProviders() {
   } catch {
     return []
   }
-}
-
-function nextProviderId(providers) {
-  const maxId = providers.reduce((max, provider) => {
-    const numericId = Number.parseInt(String(provider.id || '').replace('p', ''), 10)
-    return Number.isFinite(numericId) ? Math.max(max, numericId) : max
-  }, 0)
-  return `p${maxId + 1}`
 }
 
 function recomputeWeights(selected) {
@@ -132,6 +139,8 @@ function getAutoStages(providers) {
   nextStages.claim.version = firstMeta.versions[0]
   nextStages.ground.selected = firstProvider.id
   nextStages.ground.version = firstMeta.versions[0]
+  nextStages.slide.selected = firstProvider.id
+  nextStages.slide.version = firstMeta.versions[0]
 
   ;['detect', 'classify', 'judge'].forEach(stageKey => {
     const selected = providers.map(provider => provider.id)
@@ -147,8 +156,25 @@ function getAutoStages(providers) {
   return nextStages
 }
 
-export default function ModelSetupConsole() {
+export default function ModelSetupConsole({
+  headerTitle = '새 프리셋 만들기',
+  initialName = '',
+  initialEditorState = null,
+  onBack,
+  onRequestSubmit,
+  confirmMessage = '저장하시겠습니까?',
+  confirmActionLabel = '확인',
+  cancelActionLabel = '취소',
+  saveLabel = '저장하기',
+  showPostSaveDialog = false,
+  postSaveMessage = '저장 완료했습니다. 프리셋을 확인해 보시겠습니까?',
+  onGoHome,
+  onGoList,
+  isSubmitting = false,
+  errorMessage = '',
+}) {
   const [view, setView] = useState('key')
+  const [presetName, setPresetName] = useState(initialName)
   const [providers, setProviders] = useState(() => loadProviders())
   const [providerSelect, setProviderSelect] = useState('auto')
   const [keyValue, setKeyValue] = useState('')
@@ -158,6 +184,74 @@ export default function ModelSetupConsole() {
   const [activeStage, setActiveStage] = useState('claim')
   const [openDropdown, setOpenDropdown] = useState(null)
   const [retryCounts, setRetryCounts] = useState(() => createInitialRetryCounts())
+  const hydratedRef = useRef(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [doneOpen, setDoneOpen] = useState(false)
+
+  useEffect(() => {
+    if (hydratedRef.current) return
+    if (!initialEditorState) {
+      hydratedRef.current = true
+      return
+    }
+
+    const nextProviders = ensureProvidersForEditorState(providers, initialEditorState)
+    setProviders(nextProviders)
+    setStages(current => applyEditorStateToStages(current, initialEditorState, nextProviders))
+    setRetryCounts(current => ({
+      ...current,
+      ...(initialEditorState.retryCounts || {}),
+    }))
+    hydratedRef.current = true
+  }, [initialEditorState, providers])
+
+  useEffect(() => {
+    setPresetName(initialName)
+  }, [initialName])
+
+  const validateBeforeSave = () => {
+    if (!(presetName || '').trim()) {
+      window.alert('프리셋 이름을 입력해주세요.')
+      return null
+    }
+    if (!providers.length) {
+      window.alert('먼저 모델을 하나 이상 등록해주세요.')
+      return null
+    }
+    const validationError = validateStagesForSave(stages, STAGE_ORDER)
+    if (validationError) {
+      window.alert(validationError)
+      return null
+    }
+    const stageModels = stagesToStageModels(stages, providers, STAGE_ORDER)
+    if (!Object.keys(stageModels).length) {
+      window.alert('저장할 모델 설정이 없어요.')
+      return null
+    }
+    return {
+      name: presetName.trim(),
+      stage_models: stageModels,
+      editor_state: serializeEditorState(stages, retryCounts, providers, STAGE_ORDER),
+    }
+  }
+
+  const handleSave = () => {
+    if (isSubmitting) return
+    if (!validateBeforeSave()) return
+    setConfirmOpen(true)
+  }
+
+  const handleConfirmSave = async () => {
+    const payload = validateBeforeSave()
+    if (!payload) return
+    setConfirmOpen(false)
+    try {
+      await onRequestSubmit?.(payload)
+      if (showPostSaveDialog) setDoneOpen(true)
+    } catch {
+      // 에러는 상위 mutation errorMessage로 표시
+    }
+  }
 
   const stageUsage = useMemo(() => {
     const usage = {}
@@ -174,7 +268,10 @@ export default function ModelSetupConsole() {
 
   useEffect(() => {
     if (rememberKey) {
-      localStorage.setItem('verilec_providers', JSON.stringify(providers))
+      localStorage.setItem(
+        'verilec_providers',
+        JSON.stringify(providers.filter(provider => !provider.isPresetPlaceholder)),
+      )
       return
     }
     localStorage.removeItem('verilec_providers')
@@ -204,10 +301,22 @@ export default function ModelSetupConsole() {
       finalType = detected
     }
 
-    setProviders(current => [
-      ...current,
-      { id: nextProviderId(current), type: finalType, keyMasked: maskKey(key) },
-    ])
+    setProviders(current => {
+      const placeholder = current.find(
+        provider => provider.type === finalType && provider.isPresetPlaceholder,
+      )
+      if (placeholder) {
+        return current.map(provider => (
+          provider.id === placeholder.id
+            ? { ...provider, keyMasked: maskKey(key), isPresetPlaceholder: false }
+            : provider
+        ))
+      }
+      return [
+        ...current,
+        { id: nextProviderId(current), type: finalType, keyMasked: maskKey(key), isPresetPlaceholder: false },
+      ]
+    })
     setKeyValue('')
     setProviderSelect('auto')
   }
@@ -393,6 +502,7 @@ export default function ModelSetupConsole() {
 
           return (
             <div className="ms-pipeline-part" key={stageKey}>
+              {stageKey === 'slide' && <span className="ms-stage-divider" aria-hidden="true" />}
               {editable ? (
                 <button
                   className={className}
@@ -407,7 +517,9 @@ export default function ModelSetupConsole() {
               ) : (
                 <div className={className}>{stageContent}</div>
               )}
-              {index < STAGE_ORDER.length - 1 && <span className="ms-arrow">-&gt;</span>}
+              {index < STAGE_ORDER.length - 1 && stageKey !== 'ground' && (
+                <span className="ms-arrow">-&gt;</span>
+              )}
             </div>
           )
         })}
@@ -423,12 +535,10 @@ export default function ModelSetupConsole() {
   return (
     <section className="model-setup">
       <div className="ms-header-row">
-        <h2 className="ms-app-title">VeriLec</h2>
-        {(view === 'auto' || view === 'detail') && (
-          <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={goKey}>
-            모델 관리로 -&gt;
-          </button>
-        )}
+        <h2 className="ms-app-title">{headerTitle}</h2>
+        <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={onBack}>
+          뒤로 가기 -&gt;
+        </button>
       </div>
 
       <div className="ms-layout">
@@ -437,6 +547,17 @@ export default function ModelSetupConsole() {
         </aside>
 
         <div className="ms-main-panel">
+          <div className="ms-card">
+            <p className="ms-label">프리셋 이름</p>
+            <input
+              className="ms-name-input"
+              type="text"
+              value={presetName}
+              placeholder="예: 빠른 검증, 정확도 우선"
+              onChange={event => setPresetName(event.target.value)}
+            />
+          </div>
+
           {view === 'key' && (
             <>
               <div className="ms-card">
@@ -447,7 +568,9 @@ export default function ModelSetupConsole() {
                       <div className="ms-provider-row" key={provider.id}>
                         <span className="ms-provider-name">{PROVIDERS_META[provider.type].name}</span>
                         <span className="ms-provider-key">{provider.keyMasked}</span>
-                        <span className="ms-provider-check">OK</span>
+                        <span className="ms-provider-check">
+                          {provider.isPresetPlaceholder ? '복원' : 'OK'}
+                        </span>
                         <button
                           className="ms-icon-btn"
                           type="button"
@@ -551,10 +674,20 @@ export default function ModelSetupConsole() {
                 <button className="ms-btn-secondary" type="button" onClick={goDetail}>
                   상세 조절로 전환
                 </button>
-                <button className="ms-btn-primary" type="button" onClick={() => setView('end')}>
-                  검증 시작
+                <button
+                  className="ms-btn-primary"
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleSave}
+                >
+                  {isSubmitting ? '저장 중…' : saveLabel}
                 </button>
               </div>
+              {errorMessage && (
+                <p className="ms-save-error">
+                  {errorMessage}
+                </p>
+              )}
             </>
           )}
 
@@ -672,27 +805,52 @@ export default function ModelSetupConsole() {
                 <button className="ms-btn-secondary" type="button" onClick={goAuto}>
                   자동 배정
                 </button>
-                <button className="ms-btn-primary" type="button" onClick={() => setView('end')}>
-                  검증 시작
+                <button
+                  className="ms-btn-primary"
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleSave}
+                >
+                  {isSubmitting ? '저장 중…' : saveLabel}
                 </button>
               </div>
-            </>
-          )}
-
-          {view === 'end' && (
-            <>
-              <div className="ms-card">
-                <p className="ms-end-text">이 지점부터는 실행 진행 화면으로 이어져요.</p>
-              </div>
-              <div className="ms-actions">
-                <button className="ms-btn-secondary" type="button" onClick={goKey}>
-                  처음으로
-                </button>
-              </div>
+              {errorMessage && <p className="ms-save-error">{errorMessage}</p>}
             </>
           )}
         </div>
       </div>
+
+      {confirmOpen && (
+        <div className="ms-modal-backdrop" role="presentation" onClick={() => setConfirmOpen(false)}>
+          <div className="ms-modal" role="dialog" aria-modal="true" onClick={event => event.stopPropagation()}>
+            <h3 className="ms-modal-title">{confirmMessage}</h3>
+            <div className="ms-modal-actions">
+              <button className="ms-btn-primary" type="button" disabled={isSubmitting} onClick={handleConfirmSave}>
+                {confirmActionLabel}
+              </button>
+              <button className="ms-btn-secondary" type="button" onClick={() => setConfirmOpen(false)}>
+                {cancelActionLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {doneOpen && (
+        <div className="ms-modal-backdrop" role="presentation">
+          <div className="ms-modal" role="dialog" aria-modal="true">
+            <h3 className="ms-modal-title">{postSaveMessage}</h3>
+            <div className="ms-modal-actions">
+              <button className="ms-btn-primary" type="button" onClick={() => onGoList?.()}>
+                목록으로
+              </button>
+              <button className="ms-btn-secondary" type="button" onClick={() => onGoHome?.()}>
+                메인으로
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

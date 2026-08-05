@@ -5,7 +5,11 @@ import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
-import ModelSetupPage from './pages/ModelSetupPage'
+import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
+import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
+import ModelSetupPresetListPage from './pages/model-setup/ModelSetupPresetListPage'
+import ModelSetupPresetEditorPage from './pages/model-setup/ModelSetupPresetEditorPage'
+import ModelSetupFab from './components/model-setup/ModelSetupFab'
 
 const queryClient = new QueryClient()
 
@@ -25,9 +29,15 @@ function AppShell() {
           <Route path="/upload" element={<UploadPage />} />
           <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
           <Route path="/result/:lectureId" element={<ResultPage />} />
-          <Route path="/model-setup" element={<ModelSetupPage />} />
+          <Route path="/model-setup" element={<ModelSetupLayout />}>
+            <Route index element={<ModelSetupEntryPage />} />
+            <Route path="presets" element={<ModelSetupPresetListPage />} />
+            <Route path="new" element={<ModelSetupPresetEditorPage mode="create" />} />
+            <Route path="presets/:profileId/edit" element={<ModelSetupPresetEditorPage mode="edit" />} />
+          </Route>
         </Routes>
       </main>
+      <ModelSetupFab />
     </div>
   )
 }
