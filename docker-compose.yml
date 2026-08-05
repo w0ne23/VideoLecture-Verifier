@@ -44,13 +44,13 @@ services:
       GRAPHLEC_SLIDE_OCR_LANG: korean
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
-      # LocalVLM / OpenAI
+      # LocalVLM — 슬라이드 후보 검토는 우리가 직접 제공하는 전처리라 외부 API가
+      # 아니라 로컬 LLM(Ollama)으로 돌린다.
       GRAPHLEC_VLM_ENABLED: "1"
       GRAPHLEC_VLM_APPLY: "1"
-      GRAPHLEC_VLM_PROVIDER: "openai"
-      GRAPHLEC_OPENAI_BASE_URL: "https://api.openai.com/v1"
-      GRAPHLEC_OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      GRAPHLEC_OPENAI_MODEL: "gpt-5.6-luna"
+      GRAPHLEC_VLM_PROVIDER: "ollama"
+      GRAPHLEC_OLLAMA_BASE_URL: "http://ollama:11434"
+      GRAPHLEC_OLLAMA_MODEL: "${VERILEC_VLM_MODEL:-gemma4:12b}"
       GRAPHLEC_VLM_WORKERS: "15"
       GRAPHLEC_VLM_BATCH_IMAGES: "2"
       GRAPHLEC_VLM_BATCH_CANDIDATES: "1"
