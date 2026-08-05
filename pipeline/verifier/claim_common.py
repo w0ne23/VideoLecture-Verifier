@@ -154,8 +154,23 @@ def _resolve_deepseek_model(model: str) -> str:
     return spec
 
 
-def _resolve_ollama_model(model: str) -> str:
+def _extract_ollama_think_override(model: str) -> tuple[str, Optional[bool]]:
+    """모델 스펙 끝에 붙은 `#think`/`#nothink`를 떼어내 (원본 없이, on/off)로 반환한다.
+
+    비교 테스트용 스위치 — 접미사가 없으면 None을 반환해 Ollama 서버 기본값
+    (reasoning 모델은 보통 on)을 그대로 따르게 해서, 기존 설정은 동작이 전혀
+    바뀌지 않는다.
+    """
     spec = str(model or "").strip()
+    if spec.endswith("#nothink"):
+        return spec[: -len("#nothink")].strip(), False
+    if spec.endswith("#think"):
+        return spec[: -len("#think")].strip(), True
+    return spec, None
+
+
+def _resolve_ollama_model(model: str) -> str:
+    spec, _ = _extract_ollama_think_override(model)
     lowered = spec.lower()
     if lowered.startswith("ollama:"):
         return spec.split(":", 1)[1].strip()
@@ -683,6 +698,7 @@ def _call_llm(
         import base64
 
         resolved_model = _resolve_ollama_model(model)
+        _, think_override = _extract_ollama_think_override(model)
         client = get_ollama_client()
         if client is None:
             raise RuntimeError("Ollama 클라이언트를 만들 수 없습니다 (openai 패키지 확인 필요).")
@@ -716,6 +732,8 @@ def _call_llm(
             )
             if response_format is not None:
                 kwargs["response_format"] = response_format
+            if think_override is not None:
+                kwargs["extra_body"] = {"think": think_override}
             # 로컬 추론이라 콜드스타트(모델 최초 로드)가 느릴 수 있어 타임아웃을 넉넉히 둔다.
             return client.chat.completions.create(**kwargs, timeout=_ollama_request_timeout())
 
