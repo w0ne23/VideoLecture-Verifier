@@ -11,12 +11,16 @@ function fileTitle(file) {
 export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
+  const [sourceTag, setSourceTag] = useState('')
+  const [localError, setLocalError] = useState('')
 
   const mutation = useMutation({
     mutationFn: uploadLecture,
     onSuccess: created => {
       setFile(null)
       setTitle('')
+      setSourceTag('')
+      setLocalError('')
       onUploaded?.(created.id)
     },
   })
@@ -24,25 +28,40 @@ export function useUploadForm({ onUploaded } = {}) {
   function selectFile(nextFile) {
     if (!nextFile) return
     setFile(nextFile)
+    setLocalError('')
     setTitle(prev => (prev.trim() ? prev : fileTitle(nextFile)))
   }
 
   function submit() {
     if (!file || mutation.isPending) return
-    mutation.mutate({ file, title: title.trim() || fileTitle(file) })
+    if (!sourceTag) {
+      setLocalError('출처 태그를 선택해 주세요.')
+      return
+    }
+    setLocalError('')
+    mutation.mutate({
+      file,
+      title: title.trim() || fileTitle(file),
+      sourceTag,
+    })
   }
 
   function reset() {
     setFile(null)
     setTitle('')
+    setSourceTag('')
+    setLocalError('')
     mutation.reset()
   }
+
+  const mutationError = mutation.error ? String(mutation.error?.message || mutation.error) : ''
 
   return {
     file,
     title,
-    errorMessage: mutation.error ? String(mutation.error?.message || mutation.error) : '',
+    sourceTag,
+    errorMessage: localError || mutationError,
     isSubmitting: mutation.isPending,
-    actions: { selectFile, setTitle, submit, reset },
+    actions: { selectFile, setTitle, setSourceTag, submit, reset },
   }
 }

@@ -1,15 +1,16 @@
 import { API_BASE, readError } from './client'
 
-export async function uploadLecture({ file, title, description = '' }) {
+export async function uploadLecture({ file, title, description = '', sourceTag }) {
   const formData = new FormData()
   formData.append('video', file)
   formData.append('title', title)
   formData.append('description', description)
+  formData.append('source_tag', sourceTag)
   formData.append('workflow_mode', 'verify')
 
   const res = await fetch(`${API_BASE}/lectures`, { method: 'POST', body: formData })
   if (!res.ok) throw new Error(await readError(res, 'Upload failed'))
-  return res.json() // { id, job_id, job_type, status, title, ... }
+  return res.json() // { id, job_id, job_type, status, title, source_tag, ... }
 }
 
 export async function listLectures(status = '') {

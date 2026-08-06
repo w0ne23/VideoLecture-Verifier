@@ -1,0 +1,241 @@
+/** 이슈 유형 — 차트 색상은 전 그래프 공통 */
+export const ISSUE_TYPES = [
+  { key: 'factual_error', label: '사실 오류', color: '#dc2626' },
+  { key: 'temporal_error', label: '오래된 내용', color: '#d97706' },
+  { key: 'scope_overclaim', label: '과도한 일반화', color: '#2563eb' },
+  { key: 'confusing_explanation', label: '혼동 가능 설명', color: '#0d9488' },
+  { key: 'composite_issue', label: '복합 오류', color: '#64748b' },
+]
+
+export const ISSUE_TYPE_LABELS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.label]))
+export const ISSUE_TYPE_COLORS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.color]))
+
+export const DOMAIN_LABELS = {
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건',
+  sports: '체육',
+  education: '교육',
+  etc: '기타',
+}
+
+export const DURATION_BUCKETS = [
+  { key: '0_15', label: '0–15분' },
+  { key: '15_30', label: '15–30분' },
+  { key: '30_45', label: '30–45분' },
+  { key: '45_60', label: '45분–1시간' },
+]
+
+/** typeDist 합 = 확정 + 교수확인 (기각·슬라이드 제외) */
+function series(key, label, typeDist, avgProcessMin = null) {
+  const total = Object.values(typeDist).reduce((sum, n) => sum + n, 0)
+  return { key, label, typeDist, total, avgProcessMin }
+}
+
+export const MOCK_BY_TAG = [
+  series('youtube', '유튜브', {
+    factual_error: 12, temporal_error: 5, scope_overclaim: 6, confusing_explanation: 4, composite_issue: 2,
+  }),
+  series('kmooc', 'K-MOOC', {
+    factual_error: 8, temporal_error: 7, scope_overclaim: 4, confusing_explanation: 3, composite_issue: 1,
+  }),
+  series('kocw', 'KOCW', {
+    factual_error: 6, temporal_error: 3, scope_overclaim: 5, confusing_explanation: 4, composite_issue: 2,
+  }),
+  series('instructor', '강의자 직접 제작', {
+    factual_error: 5, temporal_error: 2, scope_overclaim: 3, confusing_explanation: 6, composite_issue: 1,
+  }),
+  series('etc', '기타', {
+    factual_error: 3, temporal_error: 2, scope_overclaim: 2, confusing_explanation: 1, composite_issue: 1,
+  }),
+]
+
+export const MOCK_BY_DURATION = [
+  series('0_15', '0–15분', {
+    factual_error: 4, temporal_error: 2, scope_overclaim: 2, confusing_explanation: 2, composite_issue: 1,
+  }, 24),
+  series('15_30', '15–30분', {
+    factual_error: 9, temporal_error: 4, scope_overclaim: 5, confusing_explanation: 4, composite_issue: 1,
+  }, 36),
+  series('30_45', '30–45분', {
+    factual_error: 11, temporal_error: 5, scope_overclaim: 6, confusing_explanation: 3, composite_issue: 2,
+  }, 48),
+  series('45_60', '45분–1시간', {
+    factual_error: 10, temporal_error: 6, scope_overclaim: 4, confusing_explanation: 4, composite_issue: 2,
+  }, 62),
+]
+
+export const MOCK_BY_DOMAIN = [
+  series('engineering', DOMAIN_LABELS.engineering, {
+    factual_error: 14, temporal_error: 6, scope_overclaim: 7, confusing_explanation: 5, composite_issue: 2,
+  }),
+  series('natural_science', DOMAIN_LABELS.natural_science, {
+    factual_error: 8, temporal_error: 5, scope_overclaim: 3, confusing_explanation: 3, composite_issue: 1,
+  }),
+  series('social_science', DOMAIN_LABELS.social_science, {
+    factual_error: 4, temporal_error: 2, scope_overclaim: 5, confusing_explanation: 3, composite_issue: 1,
+  }),
+  series('education', DOMAIN_LABELS.education, {
+    factual_error: 3, temporal_error: 1, scope_overclaim: 2, confusing_explanation: 4, composite_issue: 1,
+  }),
+  series('etc', DOMAIN_LABELS.etc, {
+    factual_error: 2, temporal_error: 1, scope_overclaim: 1, confusing_explanation: 1, composite_issue: 1,
+  }),
+]
+
+export function rankTypes(typeDist) {
+  return ISSUE_TYPES
+    .map(t => ({ ...t, value: typeDist[t.key] || 0 }))
+    .filter(t => t.value > 0)
+    .sort((a, b) => b.value - a.value)
+}
+
+export function buildInsight(view, rows) {
+  if (view === 'tag') {
+    const totals = rows.map(r => ({ label: r.label, total: r.total }))
+    const top = [...totals].sort((a, b) => b.total - a.total)[0]
+    const all = {}
+    rows.forEach(r => {
+      Object.entries(r.typeDist).forEach(([k, v]) => { all[k] = (all[k] || 0) + v })
+    })
+    const ranked = rankTypes(all)
+    const instructor = rows.find(r => r.key === 'instructor')
+    const instructorTop = instructor ? rankTypes(instructor.typeDist)[0] : null
+    return {
+      title: '태그별 한눈에',
+      bullets: [
+        `전체적으로 ${ranked[0]?.label}이(가) 가장 많고, 이어서 ${ranked[1]?.label} 순입니다.`,
+        `${top.label} 출처에서 추출 Issue가 가장 많습니다 (${top.total}건).`,
+        instructorTop
+          ? `강의자 직접 제작은 ${instructorTop.label} 비중이 두드러집니다.`
+          : '출처마다 유형 구성이 다릅니다.',
+        '기각·슬라이드 오류는 집계에서 제외했습니다.',
+      ],
+    }
+  }
+
+  if (view === 'duration') {
+    const longest = [...rows].sort((a, b) => b.total - a.total)[0]
+    const shortest = [...rows].sort((a, b) => a.total - a.total)[0]
+    const slowest = [...rows].sort((a, b) => (b.avgProcessMin || 0) - (a.avgProcessMin || 0))[0]
+    return {
+      title: '강의 길이별 한눈에',
+      bullets: [
+        `${longest.label} 구간에서 Issue가 가장 많이 추출되었습니다 (${longest.total}건).`,
+        `${shortest.label}은(는) 상대적으로 Issue가 적습니다 (${shortest.total}건).`,
+        `평균 소요시간은 ${slowest.label}이(가) 가장 깁니다 (약 ${slowest.avgProcessMin}분).`,
+        '막대 안 색 구간은 이슈 유형 비율입니다.',
+      ],
+    }
+  }
+
+  const biggest = [...rows].sort((a, b) => b.total - a.total)[0]
+  const ranked = rankTypes(biggest.typeDist)
+  const education = rows.find(r => r.key === 'education')
+  const eduTop = education ? rankTypes(education.typeDist)[0] : null
+  return {
+    title: '도메인별 한눈에',
+    bullets: [
+      `${biggest.label} 도메인의 원가 가장 큽니다 (Issue ${biggest.total}건).`,
+      `${biggest.label} 안에서는 ${ranked[0]?.label} > ${ranked[1]?.label || '—'} 순입니다.`,
+      eduTop
+        ? `교육 도메인은 ${eduTop.label} 비중이 상대적으로 높습니다.`
+        : '도메인마다 유형 구성이 다릅니다.',
+      '원 크기는 Issue 수에 비례하고, 조각 색은 유형을 나타냅니다.',
+    ],
+  }
+}
+
+function sideTotal(side) {
+  return Object.values(side.typeDist).reduce((sum, n) => sum + n, 0)
+}
+
+/** 보여주기용 before/after 페어. 나중에 실제 강의에 연결 예정. */
+export const MOCK_BEFORE_AFTER_PAIRS = [
+  {
+    id: 'pair-os-intro',
+    title: '운영체제 개론 — 프로세스 스케줄링',
+    tagLabel: '강의자 직접 제작',
+    domainLabel: '공학',
+    durationMin: 28,
+    before: {
+      label: '수정 전',
+      processMin: 41,
+      typeDist: { factual_error: 5, temporal_error: 2, scope_overclaim: 2, confusing_explanation: 1, composite_issue: 1 },
+    },
+    after: {
+      label: '수정 후',
+      processMin: 38,
+      typeDist: { factual_error: 1, temporal_error: 1, scope_overclaim: 1, confusing_explanation: 1, composite_issue: 0 },
+    },
+  },
+  {
+    id: 'pair-db-norm',
+    title: '데이터베이스 — 정규화',
+    tagLabel: 'K-MOOC',
+    domainLabel: '공학',
+    durationMin: 36,
+    before: {
+      label: '수정 전',
+      processMin: 47,
+      typeDist: { factual_error: 6, temporal_error: 2, scope_overclaim: 3, confusing_explanation: 2, composite_issue: 1 },
+    },
+    after: {
+      label: '수정 후',
+      processMin: 44,
+      typeDist: { factual_error: 2, temporal_error: 1, scope_overclaim: 1, confusing_explanation: 1, composite_issue: 0 },
+    },
+  },
+  {
+    id: 'pair-ml-bias',
+    title: '머신러닝 — 편향과 분산',
+    tagLabel: '유튜브',
+    domainLabel: '자연과학',
+    durationMin: 24,
+    before: {
+      label: '수정 전',
+      processMin: 35,
+      typeDist: { factual_error: 3, temporal_error: 1, scope_overclaim: 2, confusing_explanation: 1, composite_issue: 1 },
+    },
+    after: {
+      label: '수정 후',
+      processMin: 33,
+      typeDist: { factual_error: 1, temporal_error: 0, scope_overclaim: 1, confusing_explanation: 0, composite_issue: 0 },
+    },
+  },
+].map(pair => ({
+  ...pair,
+  before: { ...pair.before, total: sideTotal(pair.before) },
+  after: { ...pair.after, total: sideTotal(pair.after) },
+}))
+
+export function buildCompareInsight(pair) {
+  if (!pair) {
+    return { title: '수정 전후', bullets: ['비교할 페어를 선택하세요.'] }
+  }
+  const delta = pair.after.total - pair.before.total
+  const beforeTop = rankTypes(pair.before.typeDist)[0]
+  const afterTop = rankTypes(pair.after.typeDist)[0]
+  const reduced = ISSUE_TYPES
+    .map(t => ({
+      ...t,
+      delta: (pair.after.typeDist[t.key] || 0) - (pair.before.typeDist[t.key] || 0),
+    }))
+    .filter(t => t.delta < 0)
+    .sort((a, b) => a.delta - b.delta)
+
+  return {
+    title: '수정 전후 한눈에',
+    bullets: [
+      `Issue가 ${pair.before.total}건 → ${pair.after.total}건으로 ${delta <= 0 ? `${Math.abs(delta)}건 감소` : `${delta}건 증가`}했습니다.`,
+      beforeTop ? `수정 전 최다 유형은 ${beforeTop.label}(${beforeTop.value}건)입니다.` : '수정 전 유형 분포를 확인하세요.',
+      afterTop ? `수정 후 최다 유형은 ${afterTop.label}(${afterTop.value}건)입니다.` : '수정 후 Issue가 거의 없습니다.',
+      reduced[0]
+        ? `${reduced[0].label}이(가) ${Math.abs(reduced[0].delta)}건 줄어 가장 크게 개선되었습니다.`
+        : '유형별 감소 폭을 비교해 보세요.',
+    ],
+  }
+}

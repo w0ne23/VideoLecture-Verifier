@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { listLectures } from '../api/pipeline'
+import { lectureTagLabel } from '../constants/lectureTags'
 
 const STATUS_LABELS = {
   pending: '대기 중',
@@ -24,8 +25,13 @@ export default function LectureList({ onSelect }) {
         <li key={lecture.id}>
           <button type="button" className="lecture-row" onClick={() => onSelect(lecture.id)}>
             <span className="lecture-title">{lecture.title}</span>
-            <span className={`status-chip status-chip--${lecture.status}`}>
-              {STATUS_LABELS[lecture.status] || lecture.status}
+            <span className="lecture-row-meta">
+              {lecture.source_tag && (
+                <span className="tag-chip">{lectureTagLabel(lecture.source_tag)}</span>
+              )}
+              <span className={`status-chip status-chip--${lecture.status}`}>
+                {STATUS_LABELS[lecture.status] || lecture.status}
+              </span>
             </span>
             <span className="lecture-stage">
               {lecture.status === 'error' ? lecture.error_message : lecture.current_stage}
