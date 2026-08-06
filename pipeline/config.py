@@ -46,7 +46,7 @@ load_dotenv()
 # API 키
 # ──────────────────────────────────────────────────────────────
 
-# 비디오 파이프라인용 (slide_textualizer, annotation_analyzer)
+# 비디오 파이프라인용 (slide_textualizer)
 GEMINI_API_KEY_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 # 오디오 파이프라인용 (text_processor, segment_grouper, emphasis_keyword)
 GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GEMINI_API_KEY_1  # 키 1개만 있을 때 fallback

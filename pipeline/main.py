@@ -7,8 +7,7 @@ main.py
          P1B analyze_audio_quality     — 오디오 품질 분석
   [병렬] P2A textualize_slides         — 슬라이드 텍스트 + 강조 추출
          P2B transcribe_audio          — 전체 전사 (scene 매핑용)
-  [병렬] P3A analyze_annotation        — 필기 강조 분석
-         P3B process_audio             — 오디오 후처리
+  [직렬] P3  process_audio             — 오디오 후처리 (P2 완료 후)
                      text_processor    — 3-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
   [직렬] V1  build_analyzer_input      — 검증 입력 데이터 구성
@@ -18,7 +17,7 @@ Usage:
     python main.py --input lecture.mp4
     python main.py --input lecture.mp4 --output output/ --slides output/slides/
     python main.py --input lecture.mp4 --skip-extract
-    python main.py --input lecture.mp4 --debug --masks
+    python main.py --input lecture.mp4 --debug
     python main.py --input lecture.mp4 --force
 """
 
@@ -343,30 +342,6 @@ def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path) ->
     return {"transcript_raw_path": str(transcript_raw_path), "elapsed": elapsed}
 
 
-def analyze_slide_annotations(args, slides_dir: Path, output_dir: Path) -> dict:
-    from .annotation_analyzer import analyze_all
-
-    stem = Path(args.input).stem
-    annotation_path = output_dir / f"{stem}_annotation.json"
-
-    if _is_done(annotation_path, "P3A analyze_annotation — 필기 강조 분석", args.force):
-        return {"annotation_path": str(annotation_path), "elapsed": 0.0}
-
-    _banner("P3A analyze_annotation — 필기 강조 분석  (annotation_analyzer)")
-    t0 = time.time()
-    annot_results = analyze_all(
-        slides_dir=str(slides_dir),
-        output_path=str(annotation_path),
-        save_masks=args.masks,
-        per_annot_mode=getattr(args, "per_annot_mode", False),
-    )
-    elapsed = time.time() - t0
-
-    n_annots = sum(len(r.get("annotations", [])) for r in annot_results)
-    _done(f"{len(annot_results)}개 분석, 총 {n_annots}개 강조 추출", elapsed)
-    return {"annotation_path": str(annotation_path), "elapsed": elapsed}
-
-
 def process_audio(
     args,
     meta_path: str,
@@ -432,7 +407,7 @@ def process_audio(
         and _by_scene_has_context_schema(by_scene_path)
     )
     if seg_ok and silences_ok and emphasis_ok and by_scene_ok:
-        print(f"\n  ⏭  P3B process_audio — 오디오 파이프라인 출력 파일 존재, 스킵")
+        print(f"\n  ⏭  P3 process_audio — 오디오 파이프라인 출력 파일 존재, 스킵")
         print(f"     {segments_path}")
         print(f"     {by_scene_path}")
         print("─" * 70)
@@ -477,7 +452,7 @@ def process_audio(
         }
     elif not args.force and segments_path.exists():
         log.warning(
-            "P3B process_audio 캐시가 불완전하여 재실행합니다 "
+            "P3 process_audio 캐시가 불완전하여 재실행합니다 "
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
             f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()})"
         )
@@ -485,13 +460,13 @@ def process_audio(
     if seg_ok and not by_scene_ok:
         print(
             f"\n  ⚠️  {by_scene_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
-            "P3B process_audio 전체를 다시 실행합니다."
+            "P3 process_audio 전체를 다시 실행합니다."
         )
         print("─" * 70)
 
     video_path = args.input
 
-    _banner("P3B process_audio — 오디오 파이프라인")
+    _banner("P3 process_audio — 오디오 파이프라인")
     stage_started_at = time.time()
 
     # 슬라이드 텍스트화 데이터 로드
@@ -1309,28 +1284,17 @@ def get_parser():
         default=int(os.getenv("VERILEC_SLIDE_EXTRACT_WORKERS", "0")),
         help="P1A extract_slides 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
     )
-    parser.add_argument("--masks", action="store_true", help="P3A analyze_annotation diff 마스크 이미지 저장")
-    parser.add_argument(
-        "--per-annot-mode",
-        dest="per_annot_mode",
-        action="store_true",
-        help="P3A analyze_annotation을 annot별 개별 호출 방식으로 실행",
-    )
-    parser.add_argument("--legacy-per-annot", dest="per_annot_mode", action="store_true",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--no-batch", dest="per_annot_mode", action="store_true",
-                        help=argparse.SUPPRESS)
     parser.add_argument("--skip-analyzer", action="store_true",
                         help="V2 verifier 실행 스킵")
     parser.add_argument(
         "--stop-after-claim-extract",
         action="store_true",
-        help="P3B process_audio context 기반 analyzer 입력 생성 및 claim 추출 후 종료",
+        help="P3 process_audio context 기반 analyzer 입력 생성 및 claim 추출 후 종료",
     )
     parser.add_argument(
         "--stop-after-issue-judge",
         action="store_true",
-        help="P3B process_audio context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
+        help="P3 process_audio context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
     )
     parser.add_argument(
         "--issue-judge-min-confidence",
