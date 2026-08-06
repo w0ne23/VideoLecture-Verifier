@@ -43,6 +43,10 @@ services:
 
   ollama:
     environment:
+      # 두 카드에 걸쳐 텐서를 분산했을 때 GPU 0이 세 번 연속(ERR! 두 번 +
+      # 시스템 행 한 번) 죽는 걸 확인했다 — GSP 펌웨어를 꺼도 재현됨. RTX 4090은
+      # NVLink가 없어 P2P 자체가 이 하드웨어에서 불안정한 것으로 보여, 안전하게
+      # backend/ocr와 같은 GPU 한 장(VERILEC_NVIDIA_DEVICE)만 쓰도록 고정한다.
       NVIDIA_VISIBLE_DEVICES: "${VERILEC_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     deploy:

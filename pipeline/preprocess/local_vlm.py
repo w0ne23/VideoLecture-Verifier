@@ -732,12 +732,16 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
         # do not let that OCR/VLM false negative split a chronological slide.
         metrics = candidate.get("metrics") or {}
         try:
+            edge_preserve = min(
+                float(metrics.get("prev_edge_preserve", 0.0) or 0.0),
+                float(metrics.get("curr_edge_preserve", 0.0) or 0.0),
+            )
             exact_content = (
                 int(metrics.get("content_phash", 9999)) <= 10
                 and int(metrics.get("content_dhash", 9999)) <= 12
                 and float(metrics.get("content_mse", 1.0) or 1.0) <= 0.003
                 and float(metrics.get("content_changed", 1.0) or 1.0) <= 0.02
-                and float(metrics.get("content_edge", 0.0) or 0.0) >= 0.95
+                and edge_preserve >= 0.95
                 and float(metrics.get("content_hist", 0.0) or 0.0) >= 0.998
             )
         except (TypeError, ValueError):

@@ -44,13 +44,18 @@ services:
       GRAPHLEC_SLIDE_OCR_LANG: korean
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
-      # LocalVLM / OpenAI
+      # LocalVLM — 슬라이드 후보 검토는 우리가 직접 제공하는 전처리라 외부 API가
+      # 아니라 로컬 LLM(Ollama)으로 돌린다.
+      # 상용 API 버전:
+      #   GRAPHLEC_VLM_PROVIDER: "openai"
+      #   GRAPHLEC_OPENAI_BASE_URL: "https://api.openai.com/v1"
+      #   GRAPHLEC_OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      #   GRAPHLEC_OPENAI_MODEL: "gpt-5.6-luna"
       GRAPHLEC_VLM_ENABLED: "1"
       GRAPHLEC_VLM_APPLY: "1"
-      GRAPHLEC_VLM_PROVIDER: "openai"
-      GRAPHLEC_OPENAI_BASE_URL: "https://api.openai.com/v1"
-      GRAPHLEC_OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      GRAPHLEC_OPENAI_MODEL: "gpt-5.6-luna"
+      GRAPHLEC_VLM_PROVIDER: "ollama"
+      GRAPHLEC_OLLAMA_BASE_URL: "http://ollama:11434"
+      GRAPHLEC_OLLAMA_MODEL: "${VERILEC_VLM_MODEL:-gemma4:12b}"
       GRAPHLEC_VLM_WORKERS: "15"
       GRAPHLEC_VLM_BATCH_IMAGES: "2"
       GRAPHLEC_VLM_BATCH_CANDIDATES: "1"
@@ -58,7 +63,10 @@ services:
       GRAPHLEC_VLM_TIMEOUT_SEC: "300"
       GRAPHLEC_VLM_NUM_PREDICT: "512"
       GRAPHLEC_VLM_IMAGE_WIDTH: "768"
-      # P2A base slide t1/t1_structure OpenAI requests
+      # P2A base slide t1/t1_structure — 속도보다 정확도 우선이라 로컬 모델 중
+      # qwen3-vl:30b 사용. gpt-5.4-mini로 되돌리려면 provider만 openai로 바꾸면 됨.
+      GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER: "${VERILEC_TEXTUALIZER_PROVIDER:-ollama}"
+      GRAPHLEC_SLIDE_TEXTUALIZER_MODEL: "${VERILEC_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
       GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "12"
 
       # Verifier concurrency. Each multi-model stage applies this limit per
@@ -182,6 +190,11 @@ services:
       - vlm
     image: ollama/ollama:latest
     container_name: verilec-ollama
+    environment:
+      # 모델 기본 컨텍스트(Qwen3 계열은 262144)로 그대로 로드하면 KV 캐시만으로
+      # GPU를 다 채워 연산이 CPU로 밀려난다 — 실제로 겪은 문제라 명시적으로 낮춘다.
+      OLLAMA_CONTEXT_LENGTH: "${VERILEC_OLLAMA_CONTEXT_LENGTH:-16384}"
+      OLLAMA_NUM_PARALLEL: "${VERILEC_OLLAMA_NUM_PARALLEL:-4}"
     volumes:
       - ollama:/root/.ollama
     ports:

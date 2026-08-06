@@ -75,8 +75,7 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    # T1 textualization is OpenAI-only. Kept for config compatibility.
-    provider: str = "openai"
+    provider: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER", "openai")
     model: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini")
     max_retries: int = 3
     retry_delay: float = 5.0
@@ -505,11 +504,19 @@ class T1Extractor:
 
     def __init__(self, config: Config):
         self.config = config
-        from .config import get_openai_client
-        self.client = get_openai_client()
-        if self.client is None:
-            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
-        logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
+        self.provider = str(config.provider or "openai").strip().lower()
+        if self.provider == "ollama":
+            from .config import get_ollama_client
+            self.client = get_ollama_client()
+            if self.client is None:
+                raise RuntimeError("Ollama 클라이언트를 만들 수 없습니다 (openai 패키지 확인 필요).")
+            logger.info(f"✓ Ollama initialized for t1 extraction: {self.config.model}")
+        else:
+            from .config import get_openai_client
+            self.client = get_openai_client()
+            if self.client is None:
+                raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+            logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
 
     @staticmethod
     def _compose_prompt_with_ocr(prompt: str, ocr_hint: str) -> str:
@@ -571,6 +578,55 @@ class T1Extractor:
                 last_exc = e
                 logger.warning(
                     f"  ⚠ OpenAI call failed "
+                    f"(attempt {attempt+1}/{self.config.max_retries}): {e}"
+                )
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1))
+        raise last_exc
+
+    def _call_ollama(
+        self,
+        base_image: Image.Image,
+        build_images: List[Image.Image] = None,
+        ocr_hint: str = "",
+    ) -> str:
+        build_images = build_images or []
+        template = T1_EXTRACTION_PROMPT_WITH_BUILDS if build_images else T1_BASE_ONLY_EXTRACTION_PROMPT
+        prompt = self._compose_prompt_with_ocr(template, ocr_hint)
+        content = [{"type": "text", "text": prompt}]
+        content.append({"type": "image_url", "image_url": {"url": self._image_to_data_url(base_image)}})
+        for build_image in build_images:
+            content.append({"type": "image_url", "image_url": {"url": self._image_to_data_url(build_image)}})
+
+        last_exc = None
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[{"role": "user", "content": content}],
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=4096,
+                    temperature=0,
+                    extra_body={"think": False},
+                )
+                try:
+                    from .cost_report import record_model_call
+
+                    record_model_call(
+                        stage="stage2a_slide_textualizer",
+                        provider="ollama",
+                        model=self.config.model,
+                        response=response,
+                        image_count=1 + len(build_images),
+                        prompt_chars=len(prompt),
+                    )
+                except Exception:
+                    pass
+                return (response.choices[0].message.content or "").strip()
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    f"  ⚠ Ollama call failed "
                     f"(attempt {attempt+1}/{self.config.max_retries}): {e}"
                 )
                 if attempt < self.config.max_retries - 1:
@@ -751,6 +807,8 @@ class T1Extractor:
         build_images = build_images or []
         if self.provider == "openai":
             return self._call_openai(base_image, build_images=build_images, ocr_hint=ocr_hint)
+        if self.provider == "ollama":
+            return self._call_ollama(base_image, build_images=build_images, ocr_hint=ocr_hint)
 
         template = T1_EXTRACTION_PROMPT_WITH_BUILDS if build_images else T1_BASE_ONLY_EXTRACTION_PROMPT
         contents = [self._compose_prompt_with_ocr(template, ocr_hint), base_image]

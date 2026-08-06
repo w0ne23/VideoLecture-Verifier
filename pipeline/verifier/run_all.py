@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -1174,7 +1175,21 @@ def run_classified_issue_pipeline(
         flush=True,
     )
 
+    # 서브스테이지별 소요시간. notify()가 이미 모든 스테이지 경계(run/done/error)를
+    # 호출하고 있어서 그 지점을 그대로 재사용한다 — 별도로 새 계측 지점을 만들지
+    # 않는다. 이 함수는 각 스테이지의 작업을 동기 호출하는 메인 스레드에서만
+    # 실행되므로(스테이지 내부의 ThreadPoolExecutor 동시성과는 무관), 락 없이
+    # dict에 써도 경쟁 조건이 없다.
+    stage_timings: dict[str, float] = {}
+    _stage_started_at: dict[str, float] = {}
+
     def notify(stage: str, status: str) -> None:
+        if status == "run":
+            _stage_started_at[stage] = time.time()
+        elif status in ("done", "error"):
+            started_at = _stage_started_at.pop(stage, None)
+            if started_at is not None:
+                stage_timings[stage] = time.time() - started_at
         if not stage_notify:
             return
         stage_notify(stage, status)
@@ -1412,6 +1427,7 @@ def run_classified_issue_pipeline(
         "classified_issue_artifacts": content_view["classified_issue_artifacts"],
         "slide_error_count": len(slide_errors),
         "slide_error_failures": content_view["slide_error_failures"],
+        "stage_timings": stage_timings,
     }
 
 

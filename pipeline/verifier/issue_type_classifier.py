@@ -433,6 +433,10 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
         return {"provider": "gemini", "alias": raw, "resolved_model": raw}
     if lowered.startswith("claude") or lowered.startswith(("sonnet", "haiku", "opus")):
         return {"provider": "anthropic", "alias": raw, "resolved_model": _resolve_anthropic_model(raw)}
+    if lowered.startswith("ollama:"):
+        return {"provider": "ollama", "alias": raw, "resolved_model": raw.split(":", 1)[1].strip()}
+    if lowered.startswith("ollama/"):
+        return {"provider": "ollama", "alias": raw, "resolved_model": raw.split("/", 1)[1].strip()}
     raise ValueError(f"지원하지 않는 모델 지정: {model_spec}")
 
 
@@ -581,10 +585,18 @@ def _call_openai_like(
     elif provider == "deepseek":
         api_key = os.getenv("DEEPSEEK_API_KEY")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    elif provider == "ollama":
+        api_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
     else:
         raise ValueError(f"지원하지 않는 OpenAI 호환 provider: {provider}")
     if not api_key:
-        env_name = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}[provider]
+        env_name = {
+            "openai": "OPENAI_API_KEY",
+            "xai": "XAI_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "ollama": "OLLAMA_API_KEY",
+        }[provider]
         raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
     reasoning_effort = None
     if provider == "openai":
