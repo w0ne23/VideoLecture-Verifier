@@ -5,6 +5,7 @@ import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
+import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
 import ModelSetupPresetListPage from './pages/model-setup/ModelSetupPresetListPage'
@@ -27,6 +28,7 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<MainPage />} />
           <Route path="/upload" element={<UploadPage />} />
+          <Route path="/stats" element={<StatsPage />} />
           <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
           <Route path="/result/:lectureId" element={<ResultPage />} />
           <Route path="/model-setup" element={<ModelSetupLayout />}>

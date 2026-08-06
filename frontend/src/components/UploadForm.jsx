@@ -1,9 +1,10 @@
 import { useRef } from 'react'
+import { LECTURE_SOURCE_TAGS } from '../constants/lectureTags'
 import { useUploadForm } from '../hooks/useUploadForm'
 
 export default function UploadForm({ onUploaded }) {
   const inputRef = useRef(null)
-  const { file, title, errorMessage, isSubmitting, actions } = useUploadForm({ onUploaded })
+  const { file, title, sourceTag, errorMessage, isSubmitting, actions } = useUploadForm({ onUploaded })
 
   function onDrop(event) {
     event.preventDefault()
@@ -39,12 +40,29 @@ export default function UploadForm({ onUploaded }) {
           onChange={event => actions.setTitle(event.target.value)}
         />
       </label>
+      <fieldset className="field tag-fieldset">
+        <legend>출처 태그</legend>
+        <div className="tag-options" role="radiogroup" aria-label="출처 태그">
+          {LECTURE_SOURCE_TAGS.map(tag => (
+            <label key={tag.value} className={`tag-option${sourceTag === tag.value ? ' is-selected' : ''}`}>
+              <input
+                type="radio"
+                name="source_tag"
+                value={tag.value}
+                checked={sourceTag === tag.value}
+                onChange={() => actions.setSourceTag(tag.value)}
+              />
+              {tag.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       {errorMessage && <p className="error-text">{errorMessage}</p>}
       <div className="button-row">
         <button
           type="button"
           className="btn btn--primary"
-          disabled={!file || isSubmitting}
+          disabled={!file || !sourceTag || isSubmitting}
           onClick={actions.submit}
         >
           {isSubmitting ? '업로드 중...' : '검증 시작'}

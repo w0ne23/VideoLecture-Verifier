@@ -53,12 +53,17 @@ class ProcessingJob(Base):
     lecture = relationship('Lecture', back_populates='processing_jobs')
 
 
+LECTURE_SOURCE_TAGS = ('youtube', 'kmooc', 'kocw', 'instructor', 'etc')
+
+
 class Lecture(Base):
     __tablename__ = 'lectures'
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String, nullable=True)
     description = Column(Text, nullable=True)
+    # 업로드 시 필수: youtube | kmooc | kocw | instructor | etc
+    source_tag = Column(String, nullable=True)
     video_path = Column(Text, nullable=False)
     output_dir = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

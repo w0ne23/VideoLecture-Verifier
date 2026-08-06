@@ -16,6 +16,7 @@ from app.models import (
     JOB_STATUS_REJECTED,
     JOB_STATUS_WAITING_APPROVAL,
     JOB_TYPE_VERIFY,
+    LECTURE_SOURCE_TAGS,
     Lecture,
     normalize_job_type,
 )
@@ -36,6 +37,7 @@ async def create_lecture(
     video: UploadFile = File(...),
     title: str = Form(''),
     description: str = Form(''),
+    source_tag: str = Form(...),
     workflow_mode: str = Form(JOB_TYPE_VERIFY),
     db: AsyncSession = Depends(get_db),
 ):
@@ -47,6 +49,13 @@ async def create_lecture(
     job_type = normalize_job_type(workflow_mode, JOB_TYPE_VERIFY)
     if job_type != JOB_TYPE_VERIFY:
         raise HTTPException(status_code=400, detail='Only verify workflow is supported for uploaded videos')
+
+    tag = (source_tag or '').strip().lower()
+    if tag not in LECTURE_SOURCE_TAGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f'source_tag must be one of: {", ".join(LECTURE_SOURCE_TAGS)}',
+        )
 
     lecture_id = uuid.uuid4()
     original_stem = Path(video.filename or '').stem
@@ -62,6 +71,7 @@ async def create_lecture(
         id=lecture_id,
         title=final_title,
         description=description,
+        source_tag=tag,
         # 컨테이너/호스트 어디서든 해석 가능하도록 LOCAL_STORAGE_DIR 상대경로로 저장
         video_path=storage_relpath(input_path),
         output_dir=storage_relpath(output_dir),
@@ -77,6 +87,7 @@ async def create_lecture(
         'id': str(lecture.id),
         'title': lecture.title,
         'description': lecture.description or '',
+        'source_tag': lecture.source_tag,
         'job_id': str(job.id),
         'job_type': job.job_type,
         'status': job.status,
