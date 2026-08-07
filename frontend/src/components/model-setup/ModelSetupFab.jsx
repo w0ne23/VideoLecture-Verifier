@@ -5,11 +5,7 @@ import { summarizeEditorState } from './stageModels'
 
 function formatModelText(row) {
   if (!row.models.length) return '미설정'
-  return row.models.map(model => (
-    row.mode === 'multi'
-      ? `${model.version} (${model.weight || 0}%)`
-      : model.version
-  )).join(', ')
+  return row.models.map(model => model.version || model.modelId || '모델').join(', ')
 }
 
 export default function ModelSetupFab() {
@@ -41,8 +37,8 @@ export default function ModelSetupFab() {
         <div className="ms-fab-panel-inner">
           <div className="ms-fab-header">
             <div>
-              <p className="ms-fab-kicker">현재 적용 프리셋</p>
-              <h3>{activeProfile?.name || '아직 적용된 프리셋 없음'}</h3>
+              <p className="ms-fab-kicker">현재 적용 LLM 셋</p>
+              <h3>{activeProfile?.name || '아직 적용된 셋 없음'}</h3>
             </div>
             {activeProfile && (
               <span className="ms-fab-stage-count">{rows.length}단계</span>
@@ -64,7 +60,7 @@ export default function ModelSetupFab() {
               ))}
             </div>
           ) : (
-            <p className="ms-empty">적용된 프리셋이 아직 없어요.</p>
+            <p className="ms-empty">적용된 셋이 아직 없어요.</p>
           )}
         </div>
       </div>

@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="clearboard">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VeriLec · 설정 화면 테마 목업</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,600;9..40,700&family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Outfit:wght@500;700&family=Space+Grotesk:wght@500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,700&family=Syne:wght@600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Theme A: Clearboard — 밝은 화이트보드 / 교실 낮 ── */
+    [data-theme="clearboard"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #f4f7fb;
+      --bg-accent: #dbeafe;
+      --surface: #ffffff;
+      --surface-2: #eef3f9;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #d7e0ea;
+      --accent: #0284c7;
+      --accent-soft: #e0f2fe;
+      --accent-border: #7dd3fc;
+      --ok: #059669;
+      --ok-soft: #d1fae5;
+      --warn: #d97706;
+      --warn-soft: #ffedd5;
+      --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      --radius: 14px;
+      --fab-radius: 14px;
+      --stage-bg: #e0f2fe;
+      --stage-border: #7dd3fc;
+      --stage-text: #0369a1;
+      --page-glow: radial-gradient(circle at 88% 0%, #dbeafe 0%, transparent 45%);
+    }
+
+    /* ── Theme B: Night Ops — 야간 검증 콘솔 ── */
+    [data-theme="nightops"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #0b1220;
+      --bg-accent: #122033;
+      --surface: #121a2b;
+      --surface-2: #182338;
+      --text: #e8eef8;
+      --muted: #93a4bd;
+      --border: #243247;
+      --accent: #2dd4bf;
+      --accent-soft: rgba(45, 212, 191, 0.12);
+      --accent-border: rgba(45, 212, 191, 0.45);
+      --ok: #34d399;
+      --ok-soft: rgba(52, 211, 153, 0.14);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, 0.14);
+      --shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+      --radius: 12px;
+      --fab-radius: 10px;
+      --stage-bg: rgba(45, 212, 191, 0.1);
+      --stage-border: rgba(45, 212, 191, 0.35);
+      --stage-text: #5eead4;
+      --page-glow: radial-gradient(circle at 80% 10%, rgba(45, 212, 191, 0.12) 0%, transparent 40%);
+    }
+
+    /* ── Theme C: Ledger — 세이지·차콜 아카이브 / 기록 보관 ── */
+    [data-theme="ledger"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Source Serif 4", serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #eef1ec;
+      --bg-accent: #d7e0d4;
+      --surface: #f7f8f4;
+      --surface-2: #e4e9e0;
+      --text: #1c2420;
+      --muted: #5f6d66;
+      --border: #c9d2c8;
+      --accent: #2f5d50;
+      --accent-soft: #d9e8e1;
+      --accent-border: #8fb3a5;
+      --ok: #2f6b4f;
+      --ok-soft: #d8eee3;
+      --warn: #9a6700;
+      --warn-soft: #f3e6c4;
+      --shadow: 0 12px 28px rgba(28, 36, 32, 0.1);
+      --radius: 10px;
+      --fab-radius: 8px;
+      --stage-bg: #d9e8e1;
+      --stage-border: #8fb3a5;
+      --stage-text: #244a40;
+      --page-glow: linear-gradient(180deg, #e4eadf 0%, transparent 38%);
+    }
+
+    /* ── Theme D: Prism — 단계별 무지개 컬러 ── */
+    [data-theme="prism"] {
+      --font-ui: "DM Sans", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #faf8ff;
+      --surface: #ffffff;
+      --surface-2: #f3f0ff;
+      --text: #1e1b4b;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #7c3aed;
+      --accent-soft: #ede9fe;
+      --accent-border: #c4b5fd;
+      --ok: #059669;
+      --ok-soft: #d1fae5;
+      --warn: #ea580c;
+      --warn-soft: #ffedd5;
+      --shadow: 0 12px 32px rgba(124, 58, 237, 0.1);
+      --radius: 16px;
+      --fab-radius: 14px;
+      --stage-bg: #ede9fe;
+      --stage-border: #c4b5fd;
+      --stage-text: #5b21b6;
+      --btn-primary-text: #5b21b6;
+      --page-glow:
+        radial-gradient(circle at 10% 0%, #fce7f3 0%, transparent 32%),
+        radial-gradient(circle at 90% 10%, #dbeafe 0%, transparent 34%),
+        radial-gradient(circle at 50% 100%, #fef3c7 0%, transparent 28%);
+    }
+
+    /* ── Theme E: Sunset Lab — 노을 + 코랄 + 바이올렛 ── */
+    [data-theme="sunset"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fff7f2;
+      --surface: #fffdfb;
+      --surface-2: #ffe8dc;
+      --text: #431407;
+      --muted: #9a3412;
+      --border: #fed7aa;
+      --accent: #ea580c;
+      --accent-soft: #ffedd5;
+      --accent-border: #fdba74;
+      --ok: #15803d;
+      --ok-soft: #dcfce7;
+      --warn: #be185d;
+      --warn-soft: #fce7f3;
+      --shadow: 0 14px 36px rgba(234, 88, 12, 0.12);
+      --radius: 18px;
+      --fab-radius: 16px;
+      --stage-bg: #ffedd5;
+      --stage-border: #fdba74;
+      --stage-text: #c2410c;
+      --btn-primary-text: #c2410c;
+      --page-glow:
+        linear-gradient(135deg, #fff1f2 0%, #fff7ed 40%, #faf5ff 100%);
+    }
+
+    /* ── Theme F: Neon Circuit — 다크 + 시안/마젠타/라임 ── */
+    [data-theme="neon"] {
+      --font-ui: "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #09090f;
+      --surface: #12121c;
+      --surface-2: #181826;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --border: #27272f;
+      --accent: #22d3ee;
+      --accent-soft: rgba(34, 211, 238, 0.12);
+      --accent-border: rgba(34, 211, 238, 0.45);
+      --ok: #a3e635;
+      --ok-soft: rgba(163, 230, 53, 0.14);
+      --warn: #f472b6;
+      --warn-soft: rgba(244, 114, 182, 0.14);
+      --shadow: 0 0 0 1px rgba(34, 211, 238, 0.08), 0 20px 50px rgba(0, 0, 0, 0.55);
+      --radius: 10px;
+      --fab-radius: 8px;
+      --stage-bg: rgba(34, 211, 238, 0.08);
+      --stage-border: rgba(34, 211, 238, 0.35);
+      --stage-text: #67e8f9;
+      --btn-primary-text: #042f2e;
+      --page-glow:
+        radial-gradient(circle at 15% 20%, rgba(244, 114, 182, 0.14) 0%, transparent 35%),
+        radial-gradient(circle at 85% 0%, rgba(34, 211, 238, 0.16) 0%, transparent 38%),
+        radial-gradient(circle at 70% 90%, rgba(163, 230, 53, 0.1) 0%, transparent 30%);
+    }
+
+    /* ── Theme G: Candy Stack — 파스텔 멀티컬러 카드 ── */
+    [data-theme="candy"] {
+      --font-ui: "DM Sans", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fff9fc;
+      --surface: #ffffff;
+      --surface-2: #fef2f8;
+      --text: #312e81;
+      --muted: #6366f1;
+      --border: #e0e7ff;
+      --accent: #ec4899;
+      --accent-soft: #fce7f3;
+      --accent-border: #f9a8d4;
+      --ok: #10b981;
+      --ok-soft: #d1fae5;
+      --warn: #f59e0b;
+      --warn-soft: #fef3c7;
+      --shadow: 0 10px 28px rgba(236, 72, 153, 0.1);
+      --radius: 20px;
+      --fab-radius: 18px;
+      --stage-bg: #fce7f3;
+      --stage-border: #f9a8d4;
+      --stage-text: #be185d;
+      --btn-primary-text: #be185d;
+      --page-glow:
+        radial-gradient(circle at 0% 0%, #fce7f3 0%, transparent 30%),
+        radial-gradient(circle at 100% 0%, #dbeafe 0%, transparent 28%),
+        radial-gradient(circle at 50% 100%, #fef9c3 0%, transparent 32%);
+    }
+
+    /* ── Theme H: Ocean Bloom — 청록/보라/산호 ── */
+    [data-theme="ocean"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Source Serif 4", serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #f0fdfa;
+      --surface: #ffffff;
+      --surface-2: #ccfbf1;
+      --text: #134e4a;
+      --muted: #0f766e;
+      --border: #99f6e4;
+      --accent: #0d9488;
+      --accent-soft: #ccfbf1;
+      --accent-border: #5eead4;
+      --ok: #0891b2;
+      --ok-soft: #cffafe;
+      --warn: #e11d48;
+      --warn-soft: #ffe4e6;
+      --shadow: 0 12px 30px rgba(13, 148, 136, 0.12);
+      --radius: 12px;
+      --fab-radius: 10px;
+      --stage-bg: #ccfbf1;
+      --stage-border: #5eead4;
+      --stage-text: #0f766e;
+      --btn-primary-text: #0f766e;
+      --page-glow:
+        radial-gradient(circle at 80% 10%, #ddd6fe 0%, transparent 34%),
+        radial-gradient(circle at 10% 80%, #fecdd3 0%, transparent 30%),
+        linear-gradient(180deg, #ecfeff 0%, transparent 50%);
+    }
+
+    /* ── Theme I: Signal Grid — 원색 4색 그리드 ── */
+    [data-theme="signal"] {
+      --font-ui: "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-2: #f1f5f9;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #cbd5e1;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --accent-border: #93c5fd;
+      --ok: #16a34a;
+      --ok-soft: #dcfce7;
+      --warn: #dc2626;
+      --warn-soft: #fee2e2;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      --radius: 8px;
+      --fab-radius: 6px;
+      --stage-bg: #dbeafe;
+      --stage-border: #93c5fd;
+      --stage-text: #1d4ed8;
+      --btn-primary-text: #1d4ed8;
+      --page-glow:
+        linear-gradient(90deg, rgba(37, 99, 235, 0.06) 0%, rgba(220, 38, 38, 0.05) 33%, rgba(22, 163, 74, 0.05) 66%, rgba(234, 179, 8, 0.06) 100%);
+    }
+
+    /* ── Theme J: Mono Ink — 흑백 고대비 ── */
+    [data-theme="mono"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --surface-2: #f0f0f0;
+      --text: #0a0a0a;
+      --muted: #737373;
+      --border: #d4d4d4;
+      --accent: #0a0a0a;
+      --accent-soft: #f5f5f5;
+      --accent-border: #a3a3a3;
+      --ok: #171717;
+      --ok-soft: #e5e5e5;
+      --warn: #525252;
+      --warn-soft: #f5f5f5;
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      --radius: 4px;
+      --fab-radius: 4px;
+      --stage-bg: #f5f5f5;
+      --stage-border: #a3a3a3;
+      --stage-text: #171717;
+      --btn-primary-text: #fff;
+      --page-glow: none;
+    }
+
+    /* ── Theme K: Sakura — 벚꽃 핑크 ── */
+    [data-theme="sakura"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Fraunces", serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fff5f7;
+      --surface: #fffbfc;
+      --surface-2: #ffe4e6;
+      --text: #881337;
+      --muted: #be123c;
+      --border: #fecdd3;
+      --accent: #e11d48;
+      --accent-soft: #ffe4e6;
+      --accent-border: #fda4af;
+      --ok: #059669;
+      --ok-soft: #d1fae5;
+      --warn: #db2777;
+      --warn-soft: #fce7f3;
+      --shadow: 0 12px 32px rgba(225, 29, 72, 0.1);
+      --radius: 20px;
+      --fab-radius: 18px;
+      --stage-bg: #ffe4e6;
+      --stage-border: #fda4af;
+      --stage-text: #be123c;
+      --btn-primary-text: #be123c;
+      --page-glow: radial-gradient(circle at 70% 0%, #fbcfe8 0%, transparent 40%);
+    }
+
+    /* ── Theme L: Aurora — 오로라 그린/퍼플 ── */
+    [data-theme="aurora"] {
+      --font-ui: "Syne", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Syne", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #0c0f1a;
+      --surface: #131829;
+      --surface-2: #1a2035;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --border: #2d3748;
+      --accent: #34d399;
+      --accent-soft: rgba(52, 211, 153, 0.12);
+      --accent-border: rgba(52, 211, 153, 0.4);
+      --ok: #a78bfa;
+      --ok-soft: rgba(167, 139, 250, 0.14);
+      --warn: #38bdf8;
+      --warn-soft: rgba(56, 189, 248, 0.14);
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+      --radius: 14px;
+      --fab-radius: 12px;
+      --stage-bg: rgba(52, 211, 153, 0.1);
+      --stage-border: rgba(52, 211, 153, 0.35);
+      --stage-text: #6ee7b7;
+      --btn-primary-text: #064e3b;
+      --page-glow:
+        radial-gradient(ellipse at 20% 0%, rgba(52, 211, 153, 0.2) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 20%, rgba(167, 139, 250, 0.18) 0%, transparent 45%),
+        radial-gradient(ellipse at 50% 100%, rgba(56, 189, 248, 0.12) 0%, transparent 40%);
+    }
+
+    /* ── Theme M: Desert — 사막/테라코타 ── */
+    [data-theme="desert"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Fraunces", serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #faf6f1;
+      --surface: #fffdf9;
+      --surface-2: #f5ebe0;
+      --text: #44403c;
+      --muted: #78716c;
+      --border: #d6d3d1;
+      --accent: #b45309;
+      --accent-soft: #fef3c7;
+      --accent-border: #fcd34d;
+      --ok: #15803d;
+      --ok-soft: #dcfce7;
+      --warn: #c2410c;
+      --warn-soft: #ffedd5;
+      --shadow: 0 10px 28px rgba(180, 83, 9, 0.1);
+      --radius: 12px;
+      --fab-radius: 10px;
+      --stage-bg: #fef3c7;
+      --stage-border: #fcd34d;
+      --stage-text: #92400e;
+      --btn-primary-text: #92400e;
+      --page-glow: linear-gradient(180deg, #fef3c7 0%, transparent 35%);
+    }
+
+    /* ── Theme N: Hologram — 홀로그램 그라데이션 ── */
+    [data-theme="holo"] {
+      --font-ui: "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #0f0a1e;
+      --surface: #1a1230;
+      --surface-2: #231840;
+      --text: #f0e6ff;
+      --muted: #c4b5fd;
+      --border: #4c1d95;
+      --accent: #e879f9;
+      --accent-soft: rgba(232, 121, 249, 0.14);
+      --accent-border: rgba(232, 121, 249, 0.45);
+      --ok: #22d3ee;
+      --ok-soft: rgba(34, 211, 238, 0.14);
+      --warn: #f472b6;
+      --warn-soft: rgba(244, 114, 182, 0.14);
+      --shadow: 0 0 40px rgba(232, 121, 249, 0.15);
+      --radius: 16px;
+      --fab-radius: 14px;
+      --stage-bg: rgba(232, 121, 249, 0.1);
+      --stage-border: rgba(232, 121, 249, 0.4);
+      --stage-text: #f0abfc;
+      --btn-primary-text: #3b0764;
+      --page-glow:
+        linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(34, 211, 238, 0.1) 50%, rgba(244, 114, 182, 0.12) 100%);
+    }
+
+    /* ── Theme O: Retro CRT — 터미널 그린 ── */
+    [data-theme="crt"] {
+      --font-ui: "JetBrains Mono", monospace;
+      --font-display: "JetBrains Mono", monospace;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #0a0f0a;
+      --surface: #0d140d;
+      --surface-2: #111a11;
+      --text: #33ff33;
+      --muted: #1a991a;
+      --border: #1a401a;
+      --accent: #33ff33;
+      --accent-soft: rgba(51, 255, 51, 0.08);
+      --accent-border: #1a991a;
+      --ok: #33ff33;
+      --ok-soft: rgba(51, 255, 51, 0.1);
+      --warn: #99ff99;
+      --warn-soft: rgba(153, 255, 153, 0.1);
+      --shadow: 0 0 20px rgba(51, 255, 51, 0.08);
+      --radius: 0;
+      --fab-radius: 0;
+      --stage-bg: rgba(51, 255, 51, 0.06);
+      --stage-border: #1a991a;
+      --stage-text: #33ff33;
+      --btn-primary-text: #0a0f0a;
+      --page-glow: none;
+    }
+
+    /* ── Theme P: Lavender — 라벤더 퍼플 ── */
+    [data-theme="lavender"] {
+      --font-ui: "DM Sans", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #f5f3ff;
+      --surface: #faf9ff;
+      --surface-2: #ede9fe;
+      --text: #4c1d95;
+      --muted: #7c3aed;
+      --border: #ddd6fe;
+      --accent: #7c3aed;
+      --accent-soft: #ede9fe;
+      --accent-border: #c4b5fd;
+      --ok: #6d28d9;
+      --ok-soft: #ede9fe;
+      --warn: #9333ea;
+      --warn-soft: #f3e8ff;
+      --shadow: 0 10px 28px rgba(124, 58, 237, 0.12);
+      --radius: 16px;
+      --fab-radius: 14px;
+      --stage-bg: #ede9fe;
+      --stage-border: #c4b5fd;
+      --stage-text: #6d28d9;
+      --btn-primary-text: #5b21b6;
+      --page-glow: radial-gradient(circle at 50% 0%, #ddd6fe 0%, transparent 45%);
+    }
+
+    /* ── Theme Q: Citrus — 라임/오렌지/옐로 ── */
+    [data-theme="citrus"] {
+      --font-ui: "Outfit", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fefce8;
+      --surface: #fffff7;
+      --surface-2: #fef9c3;
+      --text: #365314;
+      --muted: #4d7c0f;
+      --border: #d9f99d;
+      --accent: #65a30d;
+      --accent-soft: #ecfccb;
+      --accent-border: #a3e635;
+      --ok: #ca8a04;
+      --ok-soft: #fef9c3;
+      --warn: #ea580c;
+      --warn-soft: #ffedd5;
+      --shadow: 0 10px 28px rgba(101, 163, 13, 0.12);
+      --radius: 14px;
+      --fab-radius: 12px;
+      --stage-bg: #ecfccb;
+      --stage-border: #a3e635;
+      --stage-text: #4d7c0f;
+      --btn-primary-text: #365314;
+      --page-glow:
+        radial-gradient(circle at 0% 100%, #ffedd5 0%, transparent 35%),
+        radial-gradient(circle at 100% 0%, #ecfccb 0%, transparent 35%);
+    }
+
+    /* ── Theme R: Midnight Rose — 다크 + 로즈골드 ── */
+    [data-theme="midrose"] {
+      --font-ui: "IBM Plex Sans KR", sans-serif;
+      --font-display: "Fraunces", serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #1a1215;
+      --surface: #23181c;
+      --surface-2: #2d2026;
+      --text: #fce7f3;
+      --muted: #d8aab8;
+      --border: #4a3040;
+      --accent: #f472b6;
+      --accent-soft: rgba(244, 114, 182, 0.12);
+      --accent-border: rgba(244, 114, 182, 0.4);
+      --ok: #fbbf24;
+      --ok-soft: rgba(251, 191, 36, 0.12);
+      --warn: #fb7185;
+      --warn-soft: rgba(251, 113, 133, 0.12);
+      --shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+      --radius: 14px;
+      --fab-radius: 12px;
+      --stage-bg: rgba(244, 114, 182, 0.1);
+      --stage-border: rgba(244, 114, 182, 0.35);
+      --stage-text: #fbcfe8;
+      --btn-primary-text: #500724;
+      --page-glow: radial-gradient(circle at 80% 10%, rgba(244, 114, 182, 0.15) 0%, transparent 40%);
+    }
+
+    /* ── Theme S: Ice Studio — 아이스 블루/실버 ── */
+    [data-theme="ice"] {
+      --font-ui: "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Space Grotesk", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #f0f9ff;
+      --surface: #ffffff;
+      --surface-2: #e0f2fe;
+      --text: #0c4a6e;
+      --muted: #0369a1;
+      --border: #bae6fd;
+      --accent: #0284c7;
+      --accent-soft: #e0f2fe;
+      --accent-border: #7dd3fc;
+      --ok: #0891b2;
+      --ok-soft: #cffafe;
+      --warn: #64748b;
+      --warn-soft: #f1f5f9;
+      --shadow: 0 8px 24px rgba(2, 132, 199, 0.1);
+      --radius: 6px;
+      --fab-radius: 6px;
+      --stage-bg: #e0f2fe;
+      --stage-border: #7dd3fc;
+      --stage-text: #0369a1;
+      --btn-primary-text: #0c4a6e;
+      --page-glow: linear-gradient(180deg, #ffffff 0%, #e0f2fe 100%);
+    }
+
+    /* ── Theme T: Patchwork — 패치워크 멀티컬러 ── */
+    [data-theme="patch"] {
+      --font-ui: "DM Sans", "IBM Plex Sans KR", sans-serif;
+      --font-display: "Outfit", sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --surface-2: #f5f5f5;
+      --text: #171717;
+      --muted: #525252;
+      --border: #e5e5e5;
+      --accent: #ef4444;
+      --accent-soft: #fee2e2;
+      --accent-border: #fca5a5;
+      --ok: #22c55e;
+      --ok-soft: #dcfce7;
+      --warn: #eab308;
+      --warn-soft: #fef9c3;
+      --shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+      --radius: 4px;
+      --fab-radius: 4px;
+      --stage-bg: #fee2e2;
+      --stage-border: #fca5a5;
+      --stage-text: #b91c1c;
+      --btn-primary-text: #991b1b;
+      --page-glow:
+        repeating-linear-gradient(
+          45deg,
+          rgba(239, 68, 68, 0.03) 0px,
+          rgba(239, 68, 68, 0.03) 8px,
+          rgba(34, 197, 94, 0.03) 8px,
+          rgba(34, 197, 94, 0.03) 16px,
+          rgba(59, 130, 246, 0.03) 16px,
+          rgba(59, 130, 246, 0.03) 24px,
+          rgba(234, 179, 8, 0.03) 24px,
+          rgba(234, 179, 8, 0.03) 32px
+        );
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--page-glow), var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      line-height: 1.5;
+      transition: background 0.25s ease, color 0.25s ease;
+    }
+
+    .theme-bar {
+      position: sticky;
+      top: 0;
+      z-index: 60;
+      backdrop-filter: blur(10px);
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+    }
+    .theme-bar-inner {
+      width: min(100%, 920px);
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .theme-bar h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .theme-bar p {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .theme-switch {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      max-width: min(100%, 640px);
+      max-height: 108px;
+      overflow-y: auto;
+      justify-content: flex-end;
+      padding: 2px;
+    }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 5px 9px;
+      font: inherit;
+      font-size: 0.68rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .theme-btn.is-active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--btn-primary-text, #fff);
+    }
+
+    /* 멀티컬러: 파이프라인 단계마다 다른 색 */
+    [data-stage-colors="true"] .stage[data-stage="claim"] {
+      background: var(--c-claim-bg); border-color: var(--c-claim-border); color: var(--c-claim-text);
+    }
+    [data-stage-colors="true"] .stage[data-stage="detect"] {
+      background: var(--c-detect-bg); border-color: var(--c-detect-border); color: var(--c-detect-text);
+    }
+    [data-stage-colors="true"] .stage[data-stage="classify"] {
+      background: var(--c-classify-bg); border-color: var(--c-classify-border); color: var(--c-classify-text);
+    }
+    [data-stage-colors="true"] .stage[data-stage="judge"] {
+      background: var(--c-judge-bg); border-color: var(--c-judge-border); color: var(--c-judge-text);
+    }
+    [data-stage-colors="true"] .stage[data-stage="ground"] {
+      background: var(--c-ground-bg); border-color: var(--c-ground-border); color: var(--c-ground-text);
+    }
+    [data-stage-colors="true"] .stage[data-stage="slide"] {
+      background: var(--c-slide-bg); border-color: var(--c-slide-border); color: var(--c-slide-text);
+    }
+
+    [data-theme="prism"] {
+      --c-claim-bg: #dbeafe; --c-claim-border: #93c5fd; --c-claim-text: #1d4ed8;
+      --c-detect-bg: #ede9fe; --c-detect-border: #c4b5fd; --c-detect-text: #6d28d9;
+      --c-classify-bg: #fce7f3; --c-classify-border: #f9a8d4; --c-classify-text: #be185d;
+      --c-judge-bg: #ffedd5; --c-judge-border: #fdba74; --c-judge-text: #c2410c;
+      --c-ground-bg: #ccfbf1; --c-ground-border: #5eead4; --c-ground-text: #0f766e;
+      --c-slide-bg: #fef9c3; --c-slide-border: #fde047; --c-slide-text: #a16207;
+    }
+    [data-theme="sunset"] {
+      --c-claim-bg: #ffedd5; --c-claim-border: #fdba74; --c-claim-text: #c2410c;
+      --c-detect-bg: #fce7f3; --c-detect-border: #f9a8d4; --c-detect-text: #be185d;
+      --c-classify-bg: #ede9fe; --c-classify-border: #c4b5fd; --c-classify-text: #6d28d9;
+      --c-judge-bg: #fef3c7; --c-judge-border: #fcd34d; --c-judge-text: #b45309;
+      --c-ground-bg: #ffe4e6; --c-ground-border: #fda4af; --c-ground-text: #be123c;
+      --c-slide-bg: #ffedd5; --c-slide-border: #fb923c; --c-slide-text: #9a3412;
+    }
+    [data-theme="neon"] {
+      --c-claim-bg: rgba(34, 211, 238, 0.14); --c-claim-border: rgba(34, 211, 238, 0.5); --c-claim-text: #67e8f9;
+      --c-detect-bg: rgba(244, 114, 182, 0.14); --c-detect-border: rgba(244, 114, 182, 0.5); --c-detect-text: #f9a8d4;
+      --c-classify-bg: rgba(163, 230, 53, 0.12); --c-classify-border: rgba(163, 230, 53, 0.45); --c-classify-text: #bef264;
+      --c-judge-bg: rgba(250, 204, 21, 0.12); --c-judge-border: rgba(250, 204, 21, 0.45); --c-judge-text: #fde047;
+      --c-ground-bg: rgba(129, 140, 248, 0.14); --c-ground-border: rgba(129, 140, 248, 0.5); --c-ground-text: #a5b4fc;
+      --c-slide-bg: rgba(52, 211, 153, 0.12); --c-slide-border: rgba(52, 211, 153, 0.45); --c-slide-text: #6ee7b7;
+    }
+    [data-theme="candy"] {
+      --c-claim-bg: #fce7f3; --c-claim-border: #f9a8d4; --c-claim-text: #db2777;
+      --c-detect-bg: #dbeafe; --c-detect-border: #93c5fd; --c-detect-text: #2563eb;
+      --c-classify-bg: #fef9c3; --c-classify-border: #fde047; --c-classify-text: #ca8a04;
+      --c-judge-bg: #dcfce7; --c-judge-border: #86efac; --c-judge-text: #16a34a;
+      --c-ground-bg: #ede9fe; --c-ground-border: #c4b5fd; --c-ground-text: #7c3aed;
+      --c-slide-bg: #ffedd5; --c-slide-border: #fdba74; --c-slide-text: #ea580c;
+    }
+    [data-theme="ocean"] {
+      --c-claim-bg: #ccfbf1; --c-claim-border: #5eead4; --c-claim-text: #0f766e;
+      --c-detect-bg: #ddd6fe; --c-detect-border: #a78bfa; --c-detect-text: #6d28d9;
+      --c-classify-bg: #cffafe; --c-classify-border: #67e8f9; --c-classify-text: #0891b2;
+      --c-judge-bg: #fecdd3; --c-judge-border: #fda4af; --c-judge-text: #e11d48;
+      --c-ground-bg: #bfdbfe; --c-ground-border: #93c5fd; --c-ground-text: #1d4ed8;
+      --c-slide-bg: #fef3c7; --c-slide-border: #fcd34d; --c-slide-text: #b45309;
+    }
+    [data-theme="signal"] {
+      --c-claim-bg: #dbeafe; --c-claim-border: #60a5fa; --c-claim-text: #1d4ed8;
+      --c-detect-bg: #fee2e2; --c-detect-border: #f87171; --c-detect-text: #b91c1c;
+      --c-classify-bg: #dcfce7; --c-classify-border: #4ade80; --c-classify-text: #15803d;
+      --c-judge-bg: #fef9c3; --c-judge-border: #facc15; --c-judge-text: #a16207;
+      --c-ground-bg: #ede9fe; --c-ground-border: #a78bfa; --c-ground-text: #6d28d9;
+      --c-slide-bg: #ffedd5; --c-slide-border: #fb923c; --c-slide-text: #c2410c;
+    }
+    [data-theme="sakura"] {
+      --c-claim-bg: #fce7f3; --c-claim-border: #f9a8d4; --c-claim-text: #db2777;
+      --c-detect-bg: #ffe4e6; --c-detect-border: #fda4af; --c-detect-text: #e11d48;
+      --c-classify-bg: #fbcfe8; --c-classify-border: #f472b6; --c-classify-text: #be185d;
+      --c-judge-bg: #fdf2f8; --c-judge-border: #ec4899; --c-judge-text: #9d174d;
+      --c-ground-bg: #fecdd3; --c-ground-border: #fb7185; --c-ground-text: #be123c;
+      --c-slide-bg: #fff1f2; --c-slide-border: #fda4af; --c-slide-text: #881337;
+    }
+    [data-theme="aurora"] {
+      --c-claim-bg: rgba(52, 211, 153, 0.15); --c-claim-border: rgba(52, 211, 153, 0.45); --c-claim-text: #6ee7b7;
+      --c-detect-bg: rgba(167, 139, 250, 0.15); --c-detect-border: rgba(167, 139, 250, 0.45); --c-detect-text: #c4b5fd;
+      --c-classify-bg: rgba(56, 189, 248, 0.12); --c-classify-border: rgba(56, 189, 248, 0.4); --c-classify-text: #7dd3fc;
+      --c-judge-bg: rgba(52, 211, 153, 0.1); --c-judge-border: rgba(52, 211, 153, 0.35); --c-judge-text: #34d399;
+      --c-ground-bg: rgba(167, 139, 250, 0.12); --c-ground-border: rgba(167, 139, 250, 0.4); --c-ground-text: #a78bfa;
+      --c-slide-bg: rgba(56, 189, 248, 0.1); --c-slide-border: rgba(56, 189, 248, 0.35); --c-slide-text: #38bdf8;
+    }
+    [data-theme="desert"] {
+      --c-claim-bg: #fef3c7; --c-claim-border: #fcd34d; --c-claim-text: #b45309;
+      --c-detect-bg: #ffedd5; --c-detect-border: #fdba74; --c-detect-text: #c2410c;
+      --c-classify-bg: #fed7aa; --c-classify-border: #fb923c; --c-classify-text: #9a3412;
+      --c-judge-bg: #fde68a; --c-judge-border: #fbbf24; --c-judge-text: #92400e;
+      --c-ground-bg: #fecaca; --c-ground-border: #f87171; --c-ground-text: #991b1b;
+      --c-slide-bg: #fef9c3; --c-slide-border: #eab308; --c-slide-text: #854d0e;
+    }
+    [data-theme="holo"] {
+      --c-claim-bg: rgba(232, 121, 249, 0.15); --c-claim-border: rgba(232, 121, 249, 0.5); --c-claim-text: #f0abfc;
+      --c-detect-bg: rgba(34, 211, 238, 0.12); --c-detect-border: rgba(34, 211, 238, 0.45); --c-detect-text: #67e8f9;
+      --c-classify-bg: rgba(244, 114, 182, 0.12); --c-classify-border: rgba(244, 114, 182, 0.45); --c-classify-text: #f9a8d4;
+      --c-judge-bg: rgba(129, 140, 248, 0.14); --c-judge-border: rgba(129, 140, 248, 0.5); --c-judge-text: #a5b4fc;
+      --c-ground-bg: rgba(52, 211, 153, 0.1); --c-ground-border: rgba(52, 211, 153, 0.4); --c-ground-text: #6ee7b7;
+      --c-slide-bg: rgba(250, 204, 21, 0.1); --c-slide-border: rgba(250, 204, 21, 0.4); --c-slide-text: #fde047;
+    }
+    [data-theme="citrus"] {
+      --c-claim-bg: #ecfccb; --c-claim-border: #a3e635; --c-claim-text: #4d7c0f;
+      --c-detect-bg: #fef9c3; --c-detect-border: #fde047; --c-detect-text: #ca8a04;
+      --c-classify-bg: #ffedd5; --c-classify-border: #fdba74; --c-classify-text: #ea580c;
+      --c-judge-bg: #dcfce7; --c-judge-border: #86efac; --c-judge-text: #16a34a;
+      --c-ground-bg: #fef08a; --c-ground-border: #eab308; --c-ground-text: #a16207;
+      --c-slide-bg: #fed7aa; --c-slide-border: #fb923c; --c-slide-text: #c2410c;
+    }
+    [data-theme="midrose"] {
+      --c-claim-bg: rgba(244, 114, 182, 0.14); --c-claim-border: rgba(244, 114, 182, 0.45); --c-claim-text: #fbcfe8;
+      --c-detect-bg: rgba(251, 191, 36, 0.12); --c-detect-border: rgba(251, 191, 36, 0.4); --c-detect-text: #fde047;
+      --c-classify-bg: rgba(251, 113, 133, 0.12); --c-classify-border: rgba(251, 113, 133, 0.4); --c-classify-text: #fda4af;
+      --c-judge-bg: rgba(244, 114, 182, 0.1); --c-judge-border: rgba(244, 114, 182, 0.35); --c-judge-text: #f472b6;
+      --c-ground-bg: rgba(251, 191, 36, 0.1); --c-ground-border: rgba(251, 191, 36, 0.35); --c-ground-text: #fbbf24;
+      --c-slide-bg: rgba(251, 113, 133, 0.1); --c-slide-border: rgba(251, 113, 133, 0.35); --c-slide-text: #fb7185;
+    }
+    [data-theme="patch"] {
+      --c-claim-bg: #fee2e2; --c-claim-border: #ef4444; --c-claim-text: #b91c1c;
+      --c-detect-bg: #dbeafe; --c-detect-border: #3b82f6; --c-detect-text: #1d4ed8;
+      --c-classify-bg: #dcfce7; --c-classify-border: #22c55e; --c-classify-text: #15803d;
+      --c-judge-bg: #fef9c3; --c-judge-border: #eab308; --c-judge-text: #a16207;
+      --c-ground-bg: #f3e8ff; --c-ground-border: #a855f7; --c-ground-text: #7e22ce;
+      --c-slide-bg: #ffedd5; --c-slide-border: #f97316; --c-slide-text: #c2410c;
+    }
+
+    /* Candy: 프리셋 카드마다 다른 파스텔 */
+    [data-theme="candy"] .preset-card:nth-child(3n+1) { border-color: #f9a8d4; background: linear-gradient(180deg, #fff 0%, #fdf2f8 100%); }
+    [data-theme="candy"] .preset-card:nth-child(3n+2) { border-color: #93c5fd; background: linear-gradient(180deg, #fff 0%, #eff6ff 100%); }
+    [data-theme="candy"] .preset-card:nth-child(3n)   { border-color: #86efac; background: linear-gradient(180deg, #fff 0%, #f0fdf4 100%); }
+    [data-theme="candy"] .preset-card:nth-child(3n+1) .tag { color: #db2777; background: #fce7f3; }
+    [data-theme="candy"] .preset-card:nth-child(3n+2) .tag { color: #2563eb; background: #dbeafe; }
+    [data-theme="candy"] .preset-card:nth-child(3n)   .tag { color: #16a34a; background: #dcfce7; }
+
+    /* Neon: FAB 글로우 */
+    [data-theme="neon"] .fab {
+      box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.3), 0 0 24px rgba(34, 211, 238, 0.25);
+    }
+    [data-theme="neon"] .fab-wrap.is-open .fab {
+      box-shadow: 0 0 0 1px rgba(244, 114, 182, 0.4), 0 0 28px rgba(244, 114, 182, 0.3);
+    }
+
+    /* Signal: 사이드 패널 4색 스트라이프 */
+    [data-theme="signal"] .side {
+      border-left: 4px solid;
+      border-image: linear-gradient(180deg, #2563eb, #dc2626, #16a34a, #eab308) 1;
+    }
+
+    /* CRT: 스캔라인 */
+    html[data-theme="crt"]::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.12) 0px,
+        rgba(0, 0, 0, 0.12) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      z-index: 100;
+    }
+    [data-theme="crt"] .card,
+    [data-theme="crt"] .preset-card,
+    [data-theme="crt"] .side {
+      box-shadow: inset 0 0 0 1px rgba(51, 255, 51, 0.15);
+    }
+
+    /* Holo: 카드 홀로그램 테두리 */
+    [data-theme="holo"] .card,
+    [data-theme="holo"] .preset-card {
+      border-image: linear-gradient(135deg, #e879f9, #22d3ee, #f472b6) 1;
+      border-width: 1px;
+      border-style: solid;
+    }
+
+    /* Patch: 프리셋 카드마다 다른 원색 */
+    [data-theme="patch"] .preset-card:nth-child(3n+1) { border-color: #ef4444; background: #fff5f5; }
+    [data-theme="patch"] .preset-card:nth-child(3n+2) { border-color: #3b82f6; background: #eff6ff; }
+    [data-theme="patch"] .preset-card:nth-child(3n)   { border-color: #22c55e; background: #f0fdf4; }
+
+    /* Mono: 날카로운 테두리 */
+    [data-theme="mono"] .card,
+    [data-theme="mono"] .preset-card,
+    [data-theme="mono"] .stage {
+      border-width: 2px;
+    }
+
+    /* Aurora / Holo: FAB glow */
+    [data-theme="aurora"] .fab,
+    [data-theme="holo"] .fab {
+      box-shadow: 0 0 20px rgba(167, 139, 250, 0.25);
+    }
+
+    .concept-card {
+      width: min(100% - 40px, 920px);
+      margin: 18px auto 0;
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .concept-card strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: 1.05rem;
+      margin-bottom: 4px;
+    }
+    .concept-card span { color: var(--muted); font-size: 0.82rem; }
+
+    .page {
+      width: min(100% - 40px, 920px);
+      margin: 20px auto 140px;
+    }
+
+    .banner {
+      margin-bottom: 16px;
+      padding: 11px 13px;
+      border: 1px dashed var(--accent-border);
+      border-radius: var(--radius);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.8rem;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .header h2 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 1.4rem;
+      font-weight: 700;
+    }
+    .link {
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    .side {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 16px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .side p { margin: 0; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      margin-bottom: 14px;
+      padding-bottom: 4px;
+    }
+    .stage {
+      flex: 1 1 0;
+      min-width: 88px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 10px 8px;
+      border: 1px solid var(--stage-border);
+      border-radius: calc(var(--radius) - 4px);
+      background: var(--stage-bg);
+      color: var(--stage-text);
+      text-align: center;
+    }
+    .stage span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stage .num { font-size: 0.68rem; opacity: 0.8; font-family: var(--font-mono); }
+    .stage .label { font-size: 0.74rem; font-weight: 700; }
+    .stage .sub { font-size: 0.68rem; opacity: 0.9; }
+    .arrow { color: var(--muted); font-size: 0.78rem; padding: 0 2px; }
+    .divider {
+      width: 1px;
+      height: 42px;
+      margin: 0 6px;
+      background: var(--border);
+      flex: 0 0 auto;
+    }
+
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+    }
+    .summary-row:last-child { border-bottom: none; }
+    .summary-row strong { flex: 0 0 120px; }
+    .summary-row span { color: var(--muted); text-align: right; }
+
+    .actions { display: flex; gap: 10px; margin-top: 16px; }
+    .btn {
+      flex: 1;
+      min-height: 42px;
+      border-radius: calc(var(--radius) - 4px);
+      font: inherit;
+      font-size: 0.86rem;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-border);
+      color: var(--btn-primary-text, var(--accent));
+      font-weight: 700;
+    }
+    [data-theme="nightops"] .btn-primary,
+    [data-theme="neon"] .btn-primary,
+    [data-theme="aurora"] .btn-primary,
+    [data-theme="holo"] .btn-primary,
+    [data-theme="midrose"] .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--btn-primary-text, #042f2e);
+    }
+    [data-theme="crt"] .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--btn-primary-text);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .btn-secondary {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    .section-title { margin: 28px 0 12px; }
+    .section-title h3 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 1.08rem;
+      font-weight: 700;
+    }
+    .section-title p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .preset-toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .preset-toolbar input {
+      flex: 1;
+      min-width: 160px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) - 4px);
+      font: inherit;
+      font-size: 0.84rem;
+      background: var(--surface);
+      color: var(--text);
+    }
+    .preset-toolbar .btn { flex: 0 0 auto; padding: 0 16px; }
+
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .preset-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 150px;
+      box-shadow: var(--shadow);
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .preset-card:hover {
+      border-color: var(--accent-border);
+      transform: translateY(-1px);
+    }
+    .preset-card.is-active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .preset-card-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .preset-name {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+    .preset-badge {
+      flex: 0 0 auto;
+      font-size: 0.68rem;
+      font-weight: 800;
+      color: var(--ok);
+      background: var(--ok-soft);
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+    .preset-meta { margin: 0; color: var(--muted); font-size: 0.75rem; }
+    .preset-tags { display: flex; flex-wrap: wrap; gap: 4px; min-height: 24px; }
+    .tag {
+      font-size: 0.68rem;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border-radius: 6px;
+      padding: 3px 7px;
+    }
+    .preset-actions { display: flex; gap: 6px; margin-top: auto; }
+    .preset-actions .btn { min-height: 34px; font-size: 0.78rem; padding: 0 8px; }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--text);
+      color: var(--bg);
+      padding: 10px 16px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 40;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .fab-wrap {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+    }
+    .fab {
+      width: 48px;
+      height: 48px;
+      border-radius: var(--fab-radius);
+      border: 1px solid var(--accent-border);
+      background: var(--surface);
+      color: var(--accent);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      box-shadow: var(--shadow);
+    }
+    .fab-wrap.is-open .fab {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--btn-primary-text, #fff);
+    }
+    .fab svg { width: 20px; height: 20px; }
+
+    .fab-panel {
+      width: min(320px, calc(100vw - 44px));
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+      transform-origin: bottom right;
+      transition: max-height 0.28s ease, opacity 0.2s ease, transform 0.2s ease;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .fab-wrap.is-open .fab-panel {
+      max-height: 420px;
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    .fab-panel-inner { padding: 16px; }
+    .fab-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .fab-panel-head h3 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 0.92rem;
+      font-weight: 700;
+    }
+    .fab-panel-head .mode {
+      font-size: 0.68rem;
+      font-weight: 800;
+      color: var(--warn);
+      background: var(--warn-soft);
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+    .fab-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 8px;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.78rem;
+    }
+    .fab-row:last-child { border-bottom: none; }
+    .fab-row dt { margin: 0; color: var(--muted); }
+    .fab-row dd { margin: 0; font-weight: 700; word-break: break-word; }
+    .fab-note { margin: 12px 0 0; color: var(--muted); font-size: 0.72rem; }
+  </style>
+</head>
+<body>
+  <div class="theme-bar">
+    <div class="theme-bar-inner">
+      <div>
+        <h1>테마 비교 목업</h1>
+        <p>같은 화면 · 테마 20종. 상단에서 바로 전환해 비교하세요.</p>
+      </div>
+      <div class="theme-switch" role="tablist" aria-label="테마 선택">
+        <button class="theme-btn is-active" type="button" data-theme="clearboard">A. Clearboard</button>
+        <button class="theme-btn" type="button" data-theme="nightops">B. Night Ops</button>
+        <button class="theme-btn" type="button" data-theme="ledger">C. Ledger</button>
+        <button class="theme-btn" type="button" data-theme="prism">D. Prism</button>
+        <button class="theme-btn" type="button" data-theme="sunset">E. Sunset</button>
+        <button class="theme-btn" type="button" data-theme="neon">F. Neon</button>
+        <button class="theme-btn" type="button" data-theme="candy">G. Candy</button>
+        <button class="theme-btn" type="button" data-theme="ocean">H. Ocean</button>
+        <button class="theme-btn" type="button" data-theme="signal">I. Signal</button>
+        <button class="theme-btn" type="button" data-theme="mono">J. Mono Ink</button>
+        <button class="theme-btn" type="button" data-theme="sakura">K. Sakura</button>
+        <button class="theme-btn" type="button" data-theme="aurora">L. Aurora</button>
+        <button class="theme-btn" type="button" data-theme="desert">M. Desert</button>
+        <button class="theme-btn" type="button" data-theme="holo">N. Hologram</button>
+        <button class="theme-btn" type="button" data-theme="crt">O. Retro CRT</button>
+        <button class="theme-btn" type="button" data-theme="lavender">P. Lavender</button>
+        <button class="theme-btn" type="button" data-theme="citrus">Q. Citrus</button>
+        <button class="theme-btn" type="button" data-theme="midrose">R. Midnight Rose</button>
+        <button class="theme-btn" type="button" data-theme="ice">S. Ice Studio</button>
+        <button class="theme-btn" type="button" data-theme="patch">T. Patchwork</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="concept-card" id="concept-copy">
+    <strong>A. Clearboard</strong>
+    <span>밝은 화이트보드형. 교실/연구실 낮 분위기. 하늘색 포인트로 단계와 액션을 구분.</span>
+  </div>
+
+  <div class="page">
+    <div class="banner">프리셋 카드 + 우측 하단 현재설정 패널 구조는 동일하고, 색·타이포·분위기만 바뀝니다.</div>
+
+    <div class="header">
+      <h2>VeriLec</h2>
+      <button class="link" type="button">모델 관리로 -&gt;</button>
+    </div>
+
+    <div class="layout">
+      <aside class="side">
+        <p>
+          등록한 모델을 검증 파이프라인 단계에 배정한 뒤, 아래 프리셋으로 저장해 두고
+          필요할 때 불러와 적용할 수 있어요. 우측 하단 아이콘에서는 지금 적용 중인 설정을 확인해요.
+        </p>
+      </aside>
+
+      <main>
+        <div class="pipeline" id="pipeline"></div>
+        <div class="card" id="summary"></div>
+        <div class="actions">
+          <button class="btn btn-secondary" type="button">상세 조절로 전환</button>
+          <button class="btn btn-primary" type="button" id="btn-save-settings">저장하기</button>
+        </div>
+
+        <div class="section-title">
+          <h3>설정 프리셋</h3>
+          <p>현재 화면의 모델 배정을 카드로 저장하고, 나중에 불러와 적용해요.</p>
+        </div>
+
+        <div class="preset-toolbar">
+          <input id="preset-name" type="text" placeholder="프리셋 이름 (예: 빠른 검증, 정확도 우선)" />
+          <button class="btn btn-primary" type="button" id="btn-add-preset">현재 설정 저장</button>
+        </div>
+        <div class="preset-grid" id="preset-grid"></div>
+      </main>
+    </div>
+  </div>
+
+  <div class="fab-wrap" id="fab-wrap">
+    <div class="fab-panel" id="fab-panel" aria-hidden="true">
+      <div class="fab-panel-inner">
+        <div class="fab-panel-head">
+          <h3>현재 적용 설정</h3>
+          <span class="mode" id="active-mode">적용됨</span>
+        </div>
+        <dl id="active-list"></dl>
+        <p class="fab-note">테마 전환만 비교용이에요. 새로고침하면 예시 데이터로 돌아갑니다.</p>
+      </div>
+    </div>
+    <button class="fab" type="button" id="fab-toggle" aria-expanded="false" aria-controls="fab-panel" title="현재 설정 보기">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="13" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="4" y="13" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="13" y="13" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+      </svg>
+    </button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const THEMES = {
+      clearboard: {
+        title: 'A. Clearboard',
+        desc: '밝은 화이트보드형. 교실/연구실 낮 분위기. 하늘색 포인트로 단계와 액션을 구분.',
+        stageColors: false,
+      },
+      nightops: {
+        title: 'B. Night Ops',
+        desc: '야간 검증 콘솔형. 어두운 바탕 + 민트 시그널. 모니터링/운영 도구 느낌.',
+        stageColors: false,
+      },
+      ledger: {
+        title: 'C. Ledger',
+        desc: '세이지·차콜 아카이브형. 기록/보관 문서 느낌. 세리프 타이틀로 무게감.',
+        stageColors: false,
+      },
+      prism: {
+        title: 'D. Prism',
+        desc: '무지개형. 파이프라인 단계마다 다른 색(파랑·보라·핑크·주황·청록·노랑). 밝고 실험실 같은 분위기.',
+        stageColors: true,
+      },
+      sunset: {
+        title: 'E. Sunset Lab',
+        desc: '노을·코랄·바이올렛 멀티톤. 따뜻한 그라데이션 배경 + 단계별 다른 따뜻한 색.',
+        stageColors: true,
+      },
+      neon: {
+        title: 'F. Neon Circuit',
+        desc: '다크 + 시안/마젠타/라임/노랑/보라/그린 네온. 야간 콘솔 + 단계별 네온 컬러.',
+        stageColors: true,
+      },
+      candy: {
+        title: 'G. Candy Stack',
+        desc: '파스텔 멀티컬러. 단계·프리셋 카드마다 다른 파스텔. 가볍고 친근한 느낌.',
+        stageColors: true,
+      },
+      ocean: {
+        title: 'H. Ocean Bloom',
+        desc: '청록·보라·산호·블루 조합. 바다+꽃 느낌의 멀티톤. 단계별 다른 색.',
+        stageColors: true,
+      },
+      signal: {
+        title: 'I. Signal Grid',
+        desc: '원색 4색(파·적·녹·노) 그리드. 사이드에 컬러 스트라이프, 단계별 시그널 색.',
+        stageColors: true,
+      },
+      mono: {
+        title: 'J. Mono Ink',
+        desc: '흑백 고대비. 날카로운 직선, 최소 장식. 인쇄물/문서 느낌.',
+        stageColors: false,
+      },
+      sakura: {
+        title: 'K. Sakura',
+        desc: '벚꽃 핑크 톤. 부드러운 세리프 + 단계별 다른 핑크/로즈.',
+        stageColors: true,
+      },
+      aurora: {
+        title: 'L. Aurora',
+        desc: '오로라 다크. 그린·퍼플·시안이 섞인 배경 + 단계별 오로라 색.',
+        stageColors: true,
+      },
+      desert: {
+        title: 'M. Desert',
+        desc: '사막/테라코타. 모래·주황·골드·레드 어스톤 + 단계별 따뜻한 색.',
+        stageColors: true,
+      },
+      holo: {
+        title: 'N. Hologram',
+        desc: '홀로그램 다크. 마젠타·시안·핑크 그라데이션 + 단계별 홀로 색.',
+        stageColors: true,
+      },
+      crt: {
+        title: 'O. Retro CRT',
+        desc: '레트로 터미널. 검은 바탕 + 형광 그린, 스캔라인, 모노스페이스.',
+        stageColors: false,
+      },
+      lavender: {
+        title: 'P. Lavender',
+        desc: '라벤더 퍼플. 보라 단색 톤, 부드럽고 몽환적인 UI.',
+        stageColors: false,
+      },
+      citrus: {
+        title: 'Q. Citrus Punch',
+        desc: '라임·옐로·오렌지·그린. 밝고 에너지 넘치는 멀티컬러.',
+        stageColors: true,
+      },
+      midrose: {
+        title: 'R. Midnight Rose',
+        desc: '다크 + 로즈골드. 밤 분위기에 핑크/골드 포인트 + 단계별 로즈 톤.',
+        stageColors: true,
+      },
+      ice: {
+        title: 'S. Ice Studio',
+        desc: '아이스 블루/실버. 차가운 스튜디오 느낌, 날카로운 각.',
+        stageColors: false,
+      },
+      patch: {
+        title: 'T. Patchwork',
+        desc: '패치워크 멀티컬러. 원색 조각 + 단계·카드마다 다른 색.',
+        stageColors: true,
+      },
+    }
+
+    const STAGES = [
+      { key: 'claim', label: 'Claim 추출', value: 'OpenAI · GPT-5.4 Mini' },
+      { key: 'detect', label: 'Issue 탐지', value: 'OpenAI, Anthropic' },
+      { key: 'classify', label: '유형 분류', value: 'OpenAI, Anthropic' },
+      { key: 'judge', label: 'Issue 판단', value: 'OpenAI, Anthropic, xAI' },
+      { key: 'ground', label: '웹 그라운딩', value: 'OpenAI · GPT-5.4' },
+      { key: 'slide', label: '슬라이드 오류', value: 'OpenAI · GPT-5.4 Mini', separated: true },
+    ]
+
+    const DEFAULT_PRESETS = [
+      {
+        id: 'p1',
+        name: '빠른 검증',
+        note: '비용·속도 우선',
+        tags: ['Mini', '2모델'],
+        stages: {
+          claim: 'OpenAI · GPT-5.4 Mini',
+          detect: 'OpenAI',
+          classify: 'OpenAI',
+          judge: 'OpenAI',
+          ground: 'OpenAI · GPT-5.4 Mini',
+          slide: 'OpenAI · GPT-5.4 Mini',
+        },
+      },
+      {
+        id: 'p2',
+        name: '정확도 우선',
+        note: '다중 모델 앙상블',
+        tags: ['앙상블', '3모델'],
+        stages: {
+          claim: 'OpenAI · GPT-5.4',
+          detect: 'OpenAI, Anthropic, xAI',
+          classify: 'OpenAI, Anthropic',
+          judge: 'OpenAI, Anthropic, xAI',
+          ground: 'OpenAI · GPT-5.4',
+          slide: 'OpenAI · GPT-5.4',
+        },
+      },
+      {
+        id: 'p3',
+        name: '팀 기본값',
+        note: '현재 팀에서 쓰는 기본',
+        tags: ['기본'],
+        stages: Object.fromEntries(STAGES.map(s => [s.key, s.value])),
+      },
+    ]
+
+    let current = Object.fromEntries(STAGES.map(s => [s.key, s.value]))
+    let presets = structuredClone(DEFAULT_PRESETS)
+    let activePresetId = 'p3'
+
+    const pipelineEl = document.getElementById('pipeline')
+    const summaryEl = document.getElementById('summary')
+    const presetGridEl = document.getElementById('preset-grid')
+    const activeListEl = document.getElementById('active-list')
+    const fabWrap = document.getElementById('fab-wrap')
+    const fabToggle = document.getElementById('fab-toggle')
+    const fabPanel = document.getElementById('fab-panel')
+    const toastEl = document.getElementById('toast')
+    const presetNameInput = document.getElementById('preset-name')
+    const conceptCopy = document.getElementById('concept-copy')
+
+    function toast(message) {
+      toastEl.textContent = message
+      toastEl.classList.add('show')
+      clearTimeout(toast._t)
+      toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800)
+    }
+
+    function setTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme)
+      const info = THEMES[theme]
+      document.documentElement.setAttribute(
+        'data-stage-colors',
+        info.stageColors ? 'true' : 'false',
+      )
+      document.querySelectorAll('.theme-btn').forEach(btn => {
+        btn.classList.toggle('is-active', btn.dataset.theme === theme)
+      })
+      conceptCopy.innerHTML = `<strong>${info.title}</strong><span>${info.desc}</span>`
+    }
+
+    function renderPipeline() {
+      pipelineEl.innerHTML = STAGES.map((stage, index) => `
+        ${stage.separated ? '<span class="divider" aria-hidden="true"></span>' : ''}
+        <div class="stage" data-stage="${stage.key}">
+          <span class="num">${index + 1}</span>
+          <span class="label">${stage.label}</span>
+          <span class="sub">${current[stage.key]}</span>
+        </div>
+        ${index < STAGES.length - 1 && !STAGES[index + 1]?.separated ? '<span class="arrow">-&gt;</span>' : ''}
+      `).join('')
+    }
+
+    function renderSummary() {
+      summaryEl.innerHTML = STAGES.map((stage, index) => `
+        <div class="summary-row">
+          <strong>${index + 1}. ${stage.label}</strong>
+          <span>${current[stage.key]}</span>
+        </div>
+      `).join('')
+    }
+
+    function renderActivePanel() {
+      activeListEl.innerHTML = STAGES.map(stage => `
+        <div class="fab-row">
+          <dt>${stage.label}</dt>
+          <dd>${current[stage.key]}</dd>
+        </div>
+      `).join('')
+      document.getElementById('active-mode').textContent =
+        activePresetId ? (presets.find(p => p.id === activePresetId)?.name || '적용됨') : '직접 설정'
+    }
+
+    function renderPresets() {
+      presetGridEl.innerHTML = presets.map(preset => {
+        const tags = (preset.tags || []).map(tag => `<span class="tag">${tag}</span>`).join('')
+        const active = preset.id === activePresetId
+        return `
+          <article class="preset-card${active ? ' is-active' : ''}" data-id="${preset.id}">
+            <div class="preset-card-top">
+              <h3 class="preset-name">${preset.name}</h3>
+              ${active ? '<span class="preset-badge">적용 중</span>' : ''}
+            </div>
+            <p class="preset-meta">${preset.note || '사용자 저장 프리셋'}</p>
+            <div class="preset-tags">${tags}</div>
+            <div class="preset-actions">
+              <button class="btn btn-primary" type="button" data-action="apply">적용</button>
+              <button class="btn btn-secondary" type="button" data-action="load">불러오기</button>
+              <button class="btn btn-secondary" type="button" data-action="delete">삭제</button>
+            </div>
+          </article>
+        `
+      }).join('')
+    }
+
+    function applyPreset(preset) {
+      current = { ...preset.stages }
+      activePresetId = preset.id
+      renderAll()
+      toast(`「${preset.name}」 프리셋을 적용했어요`)
+    }
+
+    function loadPresetToEditor(preset) {
+      current = { ...preset.stages }
+      renderPipeline()
+      renderSummary()
+      toast(`「${preset.name}」을 편집 화면으로 불러왔어요 (아직 적용 전)`)
+    }
+
+    function renderAll() {
+      renderPipeline()
+      renderSummary()
+      renderPresets()
+      renderActivePanel()
+    }
+
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.addEventListener('click', () => setTheme(btn.dataset.theme))
+    })
+
+    presetGridEl.addEventListener('click', event => {
+      const button = event.target.closest('button[data-action]')
+      if (!button) return
+      const card = button.closest('.preset-card')
+      const preset = presets.find(item => item.id === card.dataset.id)
+      if (!preset) return
+      const action = button.dataset.action
+      if (action === 'apply') applyPreset(preset)
+      if (action === 'load') loadPresetToEditor(preset)
+      if (action === 'delete') {
+        presets = presets.filter(item => item.id !== preset.id)
+        if (activePresetId === preset.id) activePresetId = null
+        renderPresets()
+        renderActivePanel()
+        toast(`「${preset.name}」 프리셋을 삭제했어요`)
+      }
+    })
+
+    document.getElementById('btn-add-preset').addEventListener('click', () => {
+      const name = presetNameInput.value.trim()
+      if (!name) {
+        toast('프리셋 이름을 입력해주세요')
+        presetNameInput.focus()
+        return
+      }
+      const id = `p${Date.now()}`
+      presets = [{
+        id,
+        name,
+        note: '방금 저장한 설정',
+        tags: ['사용자'],
+        stages: { ...current },
+      }, ...presets]
+      presetNameInput.value = ''
+      activePresetId = id
+      renderPresets()
+      renderActivePanel()
+      toast(`「${name}」 프리셋을 저장했어요`)
+    })
+
+    document.getElementById('btn-save-settings').addEventListener('click', () => {
+      toast('목업: 실제 저장 API는 연결되지 않았어요')
+    })
+
+    fabToggle.addEventListener('click', () => {
+      const open = fabWrap.classList.toggle('is-open')
+      fabToggle.setAttribute('aria-expanded', String(open))
+      fabPanel.setAttribute('aria-hidden', String(!open))
+    })
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && fabWrap.classList.contains('is-open')) {
+        fabWrap.classList.remove('is-open')
+        fabToggle.setAttribute('aria-expanded', 'false')
+        fabPanel.setAttribute('aria-hidden', 'true')
+      }
+    })
+
+    renderAll()
+    setTheme('clearboard')
+  </script>
+</body>
+</html>
