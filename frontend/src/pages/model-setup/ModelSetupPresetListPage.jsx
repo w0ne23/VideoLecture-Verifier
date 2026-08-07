@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -7,6 +8,7 @@ import {
   listModelSettingProfiles,
 } from '../../api/modelSetupProfiles'
 import { summarizeEditorState } from '../../components/model-setup/stageModels'
+import { summarizeSetConfig } from '../../components/model-setup/setBuilder'
 
 const ORDER_STORAGE_KEY = 'verilec-model-setup-preset-order'
 
@@ -39,7 +41,10 @@ function sortProfilesByOrder(list, orderIds) {
     ordered.push(profile)
     map.delete(String(id))
   })
-  return [...map.values(), ...ordered]
+  const rest = [...map.values(), ...ordered]
+  const active = rest.filter(profile => profile.is_active)
+  const inactive = rest.filter(profile => !profile.is_active)
+  return [...active, ...inactive]
 }
 
 function moveIdBefore(orderIds, fromId, toId) {
@@ -50,77 +55,141 @@ function moveIdBefore(orderIds, fromId, toId) {
   return next
 }
 
-function formatModelLabel(row, model) {
-  if (row.mode === 'multi') return `${model.version} (${model.weight || 0}%)`
-  return model.version
+function formatModelLabel(model) {
+  return model.version || model.modelId || '모델'
 }
 
-function collectUsedModels(rows) {
-  const seen = new Set()
-  const names = []
-  rows.forEach(row => {
-    row.models.forEach(model => {
-      const name = String(model.version || '').trim()
-      if (!name || seen.has(name)) return
-      seen.add(name)
-      names.push(name)
-    })
-  })
-  return names
+function IconEdit() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+      <path d="M13.5 6.5l3 3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
 }
 
-function PresetFlow({ rows }) {
-  const rowChunks = []
-  for (let index = 0; index < rows.length; index += 3) {
-    rowChunks.push(rows.slice(index, index + 3))
+function IconSearch() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M16 16l5 5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+const PREPROCESS_PARALLEL = [
+  { key: 'video', label: '비디오 처리', desc: '슬라이드·장면 추출' },
+  { key: 'audio', label: '오디오 처리', desc: '음성 품질·전사' },
+]
+
+const PREPROCESS_MERGE = {
+  key: 'merge',
+  label: '통합 텍스트',
+  desc: '강의 맥락 구성',
+}
+
+function buildDetailFlow(llmRows = []) {
+  return {
+    parallel: PREPROCESS_PARALLEL.map(step => ({
+      stageKey: step.key,
+      label: step.label,
+      desc: step.desc,
+      kind: 'preprocess',
+      models: [],
+    })),
+    merge: {
+      stageKey: PREPROCESS_MERGE.key,
+      label: PREPROCESS_MERGE.label,
+      desc: PREPROCESS_MERGE.desc,
+      kind: 'preprocess',
+      models: [],
+    },
+    llm: llmRows.map(row => ({
+      stageKey: row.stageKey,
+      label: row.label,
+      desc: row.mode === 'multi' ? '멀티 LLM' : '메인 LLM',
+      kind: 'llm',
+      models: Array.isArray(row.models) ? row.models : [],
+    })),
   }
+}
+
+function PipeCard({ node, badge, tone = 0 }) {
+  return (
+    <article className={`ms-pipe-card ms-pipe-card--${node.kind} ms-pipe-tone-${tone % 6}`}>
+      <div className="ms-pipe-card-top">
+        <span className="ms-pipe-idx">{badge}</span>
+        <h4 className="ms-pipe-title">{node.label}</h4>
+      </div>
+      <p className="ms-pipe-desc">{node.desc}</p>
+      {node.kind === 'llm' ? (
+        <ul className="ms-pipe-models">
+          {node.models.length ? node.models.map(model => (
+            <li key={`${node.stageKey}-${model.version}-${model.providerType}`}>
+              {formatModelLabel(model)}
+            </li>
+          )) : (
+            <li className="ms-pipe-models-empty">미설정</li>
+          )}
+        </ul>
+      ) : (
+        <span className="ms-pipe-tag">고정 단계</span>
+      )}
+    </article>
+  )
+}
+
+function PipeArrow() {
+  return (
+    <div className="ms-pipe-arrow" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="28" height="28">
+        <path d="M4 16h20" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+        <path d="M18 8l10 8-10 8" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
+  )
+}
+
+function PresetFlow({ flow }) {
+  const scrollRef = useRef(null)
+  const stageCount = flow.parallel.length + 1 + flow.llm.length
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0
+  }, [flow])
 
   return (
-    <div className="ms-preset-flow">
-      {rowChunks.map((chunk, rowIndex) => (
-        <div className="ms-preset-flow-row" key={`flow-row-${rowIndex}`}>
-          {chunk.map((row, chunkIndex) => {
-            const stageIndex = rowIndex * 3 + chunkIndex
-            return (
-              <div
-                className="ms-preset-flow-part"
-                key={row.stageKey}
-                style={{ '--ms-stage-delay': `${80 + stageIndex * 90}ms` }}
-              >
-                <div className={`ms-preset-flow-stage${row.models.length ? ' ms-preset-flow-stage--set' : ''} ms-preset-flow-stage--tone-${stageIndex % 6}`}>
-                  <div className="ms-preset-flow-stage-top">
-                    <span className="ms-preset-flow-num">{stageIndex + 1}단계</span>
-                    <div>
-                      <strong>{row.label}</strong>
-                      <p>{row.mode === 'multi' ? '멀티' : '싱글'} · 재시도 {row.retryCount}회</p>
-                    </div>
-                  </div>
-                  <div className="ms-preset-flow-models">
-                    {row.models.length ? row.models.map(model => (
-                      <span className="ms-preset-flow-chip" key={`${row.stageKey}-${model.version}-${model.providerType}`}>
-                        {formatModelLabel(row, model)}
-                      </span>
-                    )) : (
-                      <span className="ms-preset-flow-empty">미설정</span>
-                    )}
-                  </div>
-                </div>
-                {chunkIndex < chunk.length - 1 && (
-                  <div
-                    className="ms-preset-flow-arrow"
-                    aria-hidden="true"
-                    style={{ '--ms-stage-delay': `${140 + stageIndex * 90}ms` }}
-                  >
-                    <svg viewBox="0 0 24 24" width="16" height="16">
-                      <path d="M5 12h12M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </div>
-                )}
-              </div>
-            )
-          })}
+    <div className="ms-pipe">
+      <div className="ms-pipe-scroll" ref={scrollRef}>
+        <div className="ms-pipe-row">
+          <div className="ms-pipe-parallel">
+            <span className="ms-pipe-parallel-label">병렬 처리</span>
+            {flow.parallel.map((node, index) => (
+              <PipeCard
+                key={node.stageKey}
+                node={node}
+                badge={`1${String.fromCharCode(97 + index)}`}
+                tone={index}
+              />
+            ))}
+          </div>
+
+          <PipeArrow />
+
+          <PipeCard node={flow.merge} badge="2" tone={2} />
+
+          {flow.llm.map((node, index) => (
+            <div className="ms-pipe-follow" key={node.stageKey}>
+              <PipeArrow />
+              <PipeCard node={node} badge={String(index + 3)} tone={index + 3} />
+            </div>
+          ))}
         </div>
-      ))}
+      </div>
+
+      <p className="ms-pipe-note">
+        비디오·오디오는 동시에 처리된 뒤 통합 텍스트로 합쳐집니다. · 총 {stageCount}단계
+      </p>
     </div>
   )
 }
@@ -129,6 +198,7 @@ export default function ModelSetupPresetListPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
+  const [selectedId, setSelectedId] = useState(null)
   const [detailId, setDetailId] = useState(null)
   const [orderIds, setOrderIds] = useState(loadStoredOrder)
   const [dragId, setDragId] = useState(null)
@@ -144,6 +214,7 @@ export default function ModelSetupPresetListPage() {
     mutationFn: applyModelSettingProfile,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['model-setting-profiles'] })
+      setSelectedId(null)
     },
   })
 
@@ -156,6 +227,7 @@ export default function ModelSetupPresetListPage() {
         return next
       })
       setDetailId(current => (current === profileId ? null : current))
+      setSelectedId(current => (current === profileId ? null : current))
       queryClient.invalidateQueries({ queryKey: ['model-setting-profiles'] })
     },
   })
@@ -201,9 +273,18 @@ export default function ModelSetupPresetListPage() {
     () => profiles.find(profile => profile.id === detailId) || null,
     [profiles, detailId],
   )
-  const detailRows = useMemo(
-    () => (detailProfile ? summarizeEditorState(detailProfile.editor_state || {}) : []),
+  const detailFlow = useMemo(
+    () => (detailProfile ? buildDetailFlow(summarizeEditorState(detailProfile.editor_state || {})) : null),
     [detailProfile],
+  )
+  const detailSummary = useMemo(
+    () => (detailProfile ? summarizeSetConfig(detailProfile.editor_state || {}) : null),
+    [detailProfile],
+  )
+
+  const selectedProfile = useMemo(
+    () => profiles.find(profile => profile.id === selectedId) || null,
+    [profiles, selectedId],
   )
 
   const reorderProfiles = (fromId, toId) => {
@@ -218,17 +299,26 @@ export default function ModelSetupPresetListPage() {
     })
   }
 
-  const openDetail = profileId => {
+  const selectProfile = profileId => {
     if (suppressClickRef.current) return
+    setSelectedId(profileId)
+  }
+
+  const openDetail = profileId => {
     setDetailId(profileId)
+  }
+
+  const handleConfirmApply = () => {
+    if (!selectedId || applyMutation.isPending) return
+    applyMutation.mutate(selectedId)
   }
 
   return (
     <section className="model-setup">
       <div className="ms-header-row">
-        <h2 className="ms-app-title">프리셋 목록</h2>
+        <h2 className="ms-app-title">LLM 설정 목록</h2>
         <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={() => navigate('/model-setup')}>
-          선택 화면으로 -&gt;
+          선택 화면으로
         </button>
       </div>
 
@@ -238,24 +328,41 @@ export default function ModelSetupPresetListPage() {
             className="ms-name-input"
             type="text"
             value={search}
-            placeholder="프리셋 이름 검색"
+            placeholder="셋 이름 검색"
             onChange={event => setSearch(event.target.value)}
           />
-          <button className="ms-btn-primary ms-preset-toolbar-btn" type="button" onClick={() => navigate('/model-setup/new')}>
-            새로 만들기
+          <button className="ms-btn-primary ms-preset-toolbar-btn" type="button" onClick={() => navigate('/model-setup/sets/new')}>
+            셋 만들기
           </button>
         </div>
-        <p className="ms-preset-hint">카드를 드래그해 순서를 바꾸고, 클릭하면 상세를 볼 수 있어요.</p>
+        <p className="ms-preset-hint">드래그로 순서를 바꿀 수 있어요. 항목을 누르면 선택되고, 상단에서 확정하면 적용돼요.</p>
       </div>
 
-      {isLoading && <div className="ms-card"><p className="ms-empty">프리셋을 불러오는 중이에요…</p></div>}
+      {selectedProfile && (
+        <div className="ms-preset-selection-bar">
+          <p>
+            <strong>{selectedProfile.name}</strong> 선택되었습니다.
+            {selectedProfile.is_active && <span className="ms-preset-selection-note"> (현재 적용 중)</span>}
+          </p>
+          <button
+            className="ms-btn-primary ms-preset-confirm-btn"
+            type="button"
+            disabled={applyMutation.isPending || selectedProfile.is_active}
+            onClick={handleConfirmApply}
+          >
+            {selectedProfile.is_active ? '적용됨' : applyMutation.isPending ? '적용 중…' : '확정'}
+          </button>
+        </div>
+      )}
+
+      {isLoading && <div className="ms-card"><p className="ms-empty">셋을 불러오는 중이에요…</p></div>}
       {error && <div className="ms-card"><p className="ms-save-error">{String(error.message || error)}</p></div>}
 
       {!isLoading && !error && (
         <div className="ms-preset-list">
           {profiles.length ? profiles.map(profile => {
-            const rows = summarizeEditorState(profile.editor_state || {})
-            const usedModels = collectUsedModels(rows)
+            const summary = summarizeSetConfig(profile.editor_state || {})
+            const isSelected = selectedId === profile.id
             const isDragging = dragId === String(profile.id)
             const isOver = overId === String(profile.id) && dragId && dragId !== String(profile.id)
 
@@ -263,14 +370,16 @@ export default function ModelSetupPresetListPage() {
               <article
                 className={[
                   'ms-preset-card',
+                  'ms-preset-card--row',
                   profile.is_active ? 'ms-preset-card--active' : '',
+                  isSelected ? 'ms-preset-card--selected' : '',
                   isDragging ? 'ms-preset-card--dragging' : '',
                   isOver ? 'ms-preset-card--drag-over' : '',
                 ].filter(Boolean).join(' ')}
                 key={profile.id}
                 draggable
                 onDragStart={event => {
-                  if (event.target.closest('.ms-preset-actions')) {
+                  if (event.target.closest('.ms-preset-actions, .ms-preset-row-delete, .ms-preset-icon-btn')) {
                     event.preventDefault()
                     return
                   }
@@ -306,59 +415,65 @@ export default function ModelSetupPresetListPage() {
                   setOverId(null)
                 }}
                 onClick={event => {
-                  if (event.target.closest('.ms-preset-actions')) return
-                  openDetail(profile.id)
+                  if (event.target.closest('.ms-preset-actions, .ms-preset-row-delete, .ms-preset-icon-btn')) return
+                  selectProfile(profile.id)
                 }}
               >
-                <div className="ms-preset-summary">
-                  <div className="ms-preset-summary-head">
-                    <div>
-                      <div className="ms-preset-title-row">
-                        <h3>{profile.name}</h3>
-                        {profile.is_active && <span className="ms-preset-badge">적용 중</span>}
-                      </div>
-                      <p>{profile.is_active ? '지금 검증에 쓰이는 설정이에요' : '저장된 프리셋'}</p>
-                    </div>
-                    <span className="ms-preset-date">{formatUpdatedAt(profile.updated_at)}</span>
+                <div className="ms-preset-summary ms-preset-summary--row">
+                  <div className="ms-preset-title-row">
+                    <h3>{profile.name}</h3>
+                    {profile.is_active && <span className="ms-preset-badge">적용 중</span>}
+                    {isSelected && !profile.is_active && (
+                      <span className="ms-preset-badge ms-preset-badge--apply">적용</span>
+                    )}
                   </div>
+                  <p className="ms-preset-row-meta">
+                    {summary.modelCount}개 LLM
+                    {' · '}
+                    {formatUpdatedAt(profile.updated_at)}
+                  </p>
                   <div className="ms-preset-tags">
-                    <span className="ms-preset-tag ms-preset-tag--stage">{rows.length}단계</span>
-                    {usedModels.length ? usedModels.map((name, index) => (
-                      <span className={`ms-preset-tag ms-preset-tag--tone-${index % 5}`} key={name}>{name}</span>
+                    <span className="ms-preset-tag ms-preset-tag--meta">메인 {summary.mainModelName}</span>
+                    <span className="ms-preset-tag ms-preset-tag--meta">
+                      그라운딩 {summary.includeGrounding ? '포함' : '미포함'}
+                    </span>
+                    {summary.modelNames.length ? summary.modelNames.map((modelName, index) => (
+                      <span className={`ms-preset-tag ms-preset-tag--tone-${index % 5}`} key={modelName}>{modelName}</span>
                     )) : (
                       <span className="ms-preset-tag ms-preset-tag--empty">모델 미설정</span>
                     )}
                   </div>
-                  <p className="ms-preset-more">클릭하여 자세히 보기</p>
                 </div>
 
-                <div className="ms-preset-actions">
+                <div className="ms-preset-actions ms-preset-actions--row">
                   <button
-                    className="ms-btn-primary"
+                    className="ms-preset-icon-btn"
                     type="button"
-                    disabled={applyMutation.isPending || profile.is_active}
-                    onClick={() => applyMutation.mutate(profile.id)}
+                    aria-label={`${profile.name} 상세 보기`}
+                    onClick={() => openDetail(profile.id)}
                   >
-                    {profile.is_active ? '적용됨' : '적용'}
+                    <IconSearch />
                   </button>
                   <button
-                    className="ms-btn-secondary"
+                    className="ms-preset-icon-btn"
                     type="button"
-                    onClick={() => navigate(`/model-setup/presets/${profile.id}/edit`)}
+                    aria-label={`${profile.name} 수정`}
+                    onClick={() => navigate(`/model-setup/sets/${profile.id}/edit`)}
                   >
-                    수정
+                    <IconEdit />
                   </button>
                   <button
-                    className="ms-btn-secondary"
+                    className="ms-preset-row-delete"
                     type="button"
                     disabled={deleteMutation.isPending}
+                    aria-label={`${profile.name} 삭제`}
                     onClick={() => {
-                      if (window.confirm(`"${profile.name}" 프리셋을 삭제할까요?`)) {
+                      if (window.confirm(`"${profile.name}" 셋을 삭제할까요?`)) {
                         deleteMutation.mutate(profile.id)
                       }
                     }}
                   >
-                    삭제
+                    ×
                   </button>
                 </div>
               </article>
@@ -369,7 +484,7 @@ export default function ModelSetupPresetListPage() {
         </div>
       )}
 
-      {detailProfile && (
+      {detailProfile && createPortal(
         <div
           className="ms-preset-detail-backdrop"
           role="presentation"
@@ -388,32 +503,37 @@ export default function ModelSetupPresetListPage() {
                   <h3 id="ms-preset-detail-title">{detailProfile.name}</h3>
                   {detailProfile.is_active && <span className="ms-preset-badge">적용 중</span>}
                 </div>
-                <p>{formatUpdatedAt(detailProfile.updated_at)} 업데이트 · {detailRows.length}단계 파이프라인</p>
+                <p>
+                  {formatUpdatedAt(detailProfile.updated_at)} 업데이트
+                  {' · '}
+                  {detailSummary?.modelCount || 0}개 LLM
+                </p>
               </div>
               <button className="ms-preset-detail-close" type="button" onClick={() => setDetailId(null)} aria-label="닫기">
                 ×
               </button>
             </div>
 
-            <div className="ms-preset-flow-head">
-              <strong>파이프라인 구성</strong>
-              <span>{detailRows.length}단계</span>
+            <div className="ms-preset-tags ms-preset-tags--detail">
+              <span className="ms-preset-tag ms-preset-tag--meta">메인 {detailSummary?.mainModelName}</span>
+              <span className="ms-preset-tag ms-preset-tag--meta">
+                그라운딩 {detailSummary?.includeGrounding ? '포함' : '미포함'}
+              </span>
             </div>
-            <PresetFlow rows={detailRows} />
+
+            <div className="ms-preset-flow-head">
+              <strong>전체 파이프라인</strong>
+              <span>
+                {(detailFlow?.parallel.length || 0) + 1 + (detailFlow?.llm.length || 0)}단계
+              </span>
+            </div>
+            {detailFlow && <PresetFlow flow={detailFlow} />}
 
             <div className="ms-preset-detail-actions">
               <button
-                className="ms-btn-primary"
-                type="button"
-                disabled={applyMutation.isPending || detailProfile.is_active}
-                onClick={() => applyMutation.mutate(detailProfile.id)}
-              >
-                {detailProfile.is_active ? '적용됨' : '적용'}
-              </button>
-              <button
                 className="ms-btn-secondary"
                 type="button"
-                onClick={() => navigate(`/model-setup/presets/${detailProfile.id}/edit`)}
+                onClick={() => navigate(`/model-setup/sets/${detailProfile.id}/edit`)}
               >
                 수정
               </button>
@@ -422,7 +542,8 @@ export default function ModelSetupPresetListPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </section>
   )

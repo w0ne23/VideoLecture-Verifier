@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VeriLec · 프리셋 / 현재 설정 패널 목업</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --card: #ffffff;
+      --text: #1f2430;
+      --muted: #64748b;
+      --border: #e2e5ee;
+      --primary: #3d4b94;
+      --primary-soft: #ebedf9;
+      --primary-border: #c4c9ec;
+      --green: #16a34a;
+      --amber: #d97706;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top right, #eef0fa 0%, transparent 42%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Apple SD Gothic Neo", "Pretendard", -apple-system, sans-serif;
+      line-height: 1.5;
+    }
+
+    .page {
+      width: min(100% - 40px, 920px);
+      margin: 28px auto 120px;
+    }
+
+    .banner {
+      margin-bottom: 18px;
+      padding: 12px 14px;
+      border: 1px dashed var(--primary-border);
+      border-radius: 10px;
+      background: #f8f9ff;
+      color: var(--primary);
+      font-size: 0.82rem;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .header h1 { margin: 0; font-size: 1.35rem; font-weight: 800; }
+    .link {
+      border: none;
+      background: transparent;
+      color: var(--primary);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    .side {
+      background: #f1f2f6;
+      border-radius: 12px;
+      padding: 20px 18px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .side p { margin: 0; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 14px;
+    }
+
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      margin-bottom: 14px;
+      padding-bottom: 4px;
+    }
+    .stage {
+      flex: 1 1 0;
+      min-width: 88px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 10px 8px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--primary-soft);
+      border-color: var(--primary-border);
+      color: var(--primary);
+      text-align: center;
+    }
+    .stage span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stage .num { font-size: 0.7rem; opacity: 0.8; }
+    .stage .label { font-size: 0.76rem; font-weight: 800; }
+    .stage .sub { font-size: 0.7rem; opacity: 0.85; }
+    .arrow { color: #8b92a3; font-size: 0.78rem; padding: 0 2px; }
+    .divider {
+      width: 1px;
+      height: 42px;
+      margin: 0 6px;
+      background: #c9ceda;
+      flex: 0 0 auto;
+    }
+
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+    }
+    .summary-row:last-child { border-bottom: none; }
+    .summary-row strong { flex: 0 0 120px; }
+    .summary-row span { color: var(--muted); text-align: right; }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .btn {
+      flex: 1;
+      min-height: 42px;
+      border-radius: 8px;
+      font: inherit;
+      font-size: 0.88rem;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: var(--primary-soft);
+      border: 1px solid var(--primary-border);
+      color: var(--primary);
+      font-weight: 700;
+    }
+    .btn-secondary {
+      background: var(--card);
+      border: 1px solid #d3d7e0;
+      color: var(--text);
+    }
+    .btn:hover { filter: brightness(0.98); }
+
+    /* ── Preset section ── */
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 28px 0 12px;
+    }
+    .section-title h2 {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 800;
+    }
+    .section-title p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .preset-toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .preset-toolbar input {
+      flex: 1;
+      min-width: 160px;
+      padding: 10px 12px;
+      border: 1px solid #d3d7e0;
+      border-radius: 8px;
+      font: inherit;
+      font-size: 0.84rem;
+      background: var(--card);
+    }
+    .preset-toolbar .btn { flex: 0 0 auto; padding: 0 16px; }
+
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+    }
+
+    .preset-card {
+      position: relative;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 150px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .preset-card:hover {
+      border-color: var(--primary-border);
+      box-shadow: 0 6px 18px rgba(61, 75, 148, 0.08);
+    }
+    .preset-card.is-active {
+      border-color: var(--primary);
+      background: #f8f9ff;
+    }
+    .preset-card-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .preset-name {
+      margin: 0;
+      font-size: 0.92rem;
+      font-weight: 800;
+    }
+    .preset-badge {
+      flex: 0 0 auto;
+      font-size: 0.68rem;
+      font-weight: 800;
+      color: var(--green);
+      background: #e8f8ee;
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+    .preset-meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .preset-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      min-height: 24px;
+    }
+    .tag {
+      font-size: 0.68rem;
+      color: var(--primary);
+      background: var(--primary-soft);
+      border-radius: 6px;
+      padding: 3px 7px;
+    }
+    .preset-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: auto;
+    }
+    .preset-actions .btn {
+      min-height: 34px;
+      font-size: 0.78rem;
+      padding: 0 8px;
+    }
+    .preset-empty {
+      grid-column: 1 / -1;
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.84rem;
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      background: #fafbfe;
+    }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%) translateY(20px);
+      background: #1f2430;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 40;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* ── Floating current-settings panel ── */
+    .fab-wrap {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+    }
+
+    .fab {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      border: 1px solid var(--primary-border);
+      background: var(--card);
+      color: var(--primary);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      box-shadow: 0 8px 24px rgba(31, 36, 48, 0.12);
+      transition: transform 0.18s ease, background 0.18s ease;
+    }
+    .fab:hover { transform: translateY(-1px); background: var(--primary-soft); }
+    .fab svg { width: 20px; height: 20px; }
+
+    .fab-panel {
+      width: min(320px, calc(100vw - 44px));
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+      transform-origin: bottom right;
+      transition:
+        max-height 0.28s ease,
+        opacity 0.2s ease,
+        transform 0.2s ease;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 16px 40px rgba(31, 36, 48, 0.16);
+    }
+    .fab-wrap.is-open .fab-panel {
+      max-height: 420px;
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    .fab-wrap.is-open .fab {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    .fab-panel-inner { padding: 16px; }
+    .fab-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .fab-panel-head h3 {
+      margin: 0;
+      font-size: 0.92rem;
+      font-weight: 800;
+    }
+    .fab-panel-head .mode {
+      font-size: 0.68rem;
+      font-weight: 800;
+      color: var(--amber);
+      background: #fff7e8;
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+    .fab-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 8px;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.78rem;
+    }
+    .fab-row:last-child { border-bottom: none; }
+    .fab-row dt { margin: 0; color: var(--muted); }
+    .fab-row dd { margin: 0; font-weight: 700; word-break: break-word; }
+    .fab-note {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="banner">
+      이건 실제 앱에 반영하기 전 <strong>HTML 예시 목업</strong>이에요.
+      프리셋 카드 저장/적용, 우측 하단 네모 아이콘 확장 패널만 먼저 보여줍니다.
+    </div>
+
+    <div class="header">
+      <h1>VeriLec</h1>
+      <button class="link" type="button">모델 관리로 -&gt;</button>
+    </div>
+
+    <div class="layout">
+      <aside class="side">
+        <p>
+          등록한 모델을 검증 파이프라인 단계에 배정한 뒤, 아래 프리셋으로 저장해 두고
+          필요할 때 불러와 적용할 수 있어요. 우측 하단 아이콘에서는 지금 적용 중인 설정을 확인해요.
+        </p>
+      </aside>
+
+      <main>
+        <div class="pipeline" id="pipeline"></div>
+
+        <div class="card" id="summary"></div>
+
+        <div class="actions">
+          <button class="btn btn-secondary" type="button">상세 조절로 전환</button>
+          <button class="btn btn-primary" type="button" id="btn-save-settings">저장하기</button>
+        </div>
+
+        <div class="section-title">
+          <div>
+            <h2>설정 프리셋</h2>
+            <p>현재 화면의 모델 배정을 카드로 저장하고, 나중에 불러와 적용해요.</p>
+          </div>
+        </div>
+
+        <div class="preset-toolbar">
+          <input id="preset-name" type="text" placeholder="프리셋 이름 (예: 빠른 검증, 정확도 우선)" />
+          <button class="btn btn-primary" type="button" id="btn-add-preset">현재 설정 저장</button>
+        </div>
+
+        <div class="preset-grid" id="preset-grid"></div>
+      </main>
+    </div>
+  </div>
+
+  <div class="fab-wrap" id="fab-wrap">
+    <div class="fab-panel" id="fab-panel" aria-hidden="true">
+      <div class="fab-panel-inner">
+        <div class="fab-panel-head">
+          <h3>현재 적용 설정</h3>
+          <span class="mode" id="active-mode">적용됨</span>
+        </div>
+        <dl id="active-list"></dl>
+        <p class="fab-note">목업이므로 브라우저 메모리에만 유지돼요. 새로고침하면 예시 프리셋으로 돌아갑니다.</p>
+      </div>
+    </div>
+    <button class="fab" type="button" id="fab-toggle" aria-expanded="false" aria-controls="fab-panel" title="현재 설정 보기">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="13" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="4" y="13" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+        <rect x="13" y="13" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8" />
+      </svg>
+    </button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const STAGES = [
+      { key: 'claim', label: 'Claim 추출', value: 'OpenAI · GPT-5.4 Mini' },
+      { key: 'detect', label: 'Issue 탐지', value: 'OpenAI, Anthropic' },
+      { key: 'classify', label: '유형 분류', value: 'OpenAI, Anthropic' },
+      { key: 'judge', label: 'Issue 판단', value: 'OpenAI, Anthropic, xAI' },
+      { key: 'ground', label: '웹 그라운딩', value: 'OpenAI · GPT-5.4' },
+      { key: 'slide', label: '슬라이드 오류', value: 'OpenAI · GPT-5.4 Mini', separated: true },
+    ]
+
+    const DEFAULT_PRESETS = [
+      {
+        id: 'p1',
+        name: '빠른 검증',
+        note: '비용·속도 우선',
+        tags: ['Mini', '2모델'],
+        stages: {
+          claim: 'OpenAI · GPT-5.4 Mini',
+          detect: 'OpenAI',
+          classify: 'OpenAI',
+          judge: 'OpenAI',
+          ground: 'OpenAI · GPT-5.4 Mini',
+          slide: 'OpenAI · GPT-5.4 Mini',
+        },
+      },
+      {
+        id: 'p2',
+        name: '정확도 우선',
+        note: '다중 모델 앙상블',
+        tags: ['앙상블', '3모델'],
+        stages: {
+          claim: 'OpenAI · GPT-5.4',
+          detect: 'OpenAI, Anthropic, xAI',
+          classify: 'OpenAI, Anthropic',
+          judge: 'OpenAI, Anthropic, xAI',
+          ground: 'OpenAI · GPT-5.4',
+          slide: 'OpenAI · GPT-5.4',
+        },
+      },
+      {
+        id: 'p3',
+        name: '팀 기본값',
+        note: '현재 팀에서 쓰는 기본',
+        tags: ['기본'],
+        stages: Object.fromEntries(STAGES.map(s => [s.key, s.value])),
+      },
+    ]
+
+    let current = Object.fromEntries(STAGES.map(s => [s.key, s.value]))
+    let presets = structuredClone(DEFAULT_PRESETS)
+    let activePresetId = 'p3'
+
+    const pipelineEl = document.getElementById('pipeline')
+    const summaryEl = document.getElementById('summary')
+    const presetGridEl = document.getElementById('preset-grid')
+    const activeListEl = document.getElementById('active-list')
+    const fabWrap = document.getElementById('fab-wrap')
+    const fabToggle = document.getElementById('fab-toggle')
+    const fabPanel = document.getElementById('fab-panel')
+    const toastEl = document.getElementById('toast')
+    const presetNameInput = document.getElementById('preset-name')
+
+    function toast(message) {
+      toastEl.textContent = message
+      toastEl.classList.add('show')
+      clearTimeout(toast._t)
+      toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800)
+    }
+
+    function renderPipeline() {
+      pipelineEl.innerHTML = STAGES.map((stage, index) => {
+        const sep = stage.separated ? '<span class="divider" aria-hidden="true"></span>' : ''
+        const arrow = index < STAGES.length - 1 && !stage.separated
+          ? '<span class="arrow">-&gt;</span>'
+          : (index < STAGES.length - 1 && STAGES[index + 1]?.separated ? '' : '')
+        return `
+          ${sep}
+          <div class="stage">
+            <span class="num">${index + 1}</span>
+            <span class="label">${stage.label}</span>
+            <span class="sub">${current[stage.key]}</span>
+          </div>
+          ${index < STAGES.length - 1 && !STAGES[index + 1]?.separated ? '<span class="arrow">-&gt;</span>' : ''}
+        `
+      }).join('')
+    }
+
+    function renderSummary() {
+      summaryEl.innerHTML = STAGES.map((stage, index) => `
+        <div class="summary-row">
+          <strong>${index + 1}. ${stage.label}</strong>
+          <span>${current[stage.key]}</span>
+        </div>
+      `).join('')
+    }
+
+    function renderActivePanel() {
+      activeListEl.innerHTML = STAGES.map(stage => `
+        <div class="fab-row">
+          <dt>${stage.label}</dt>
+          <dd>${current[stage.key]}</dd>
+        </div>
+      `).join('')
+      document.getElementById('active-mode').textContent =
+        activePresetId ? (presets.find(p => p.id === activePresetId)?.name || '적용됨') : '직접 설정'
+    }
+
+    function renderPresets() {
+      if (!presets.length) {
+        presetGridEl.innerHTML = '<div class="preset-empty">저장된 프리셋이 없어요. 위에서 이름을 입력하고 저장해보세요.</div>'
+        return
+      }
+
+      presetGridEl.innerHTML = presets.map(preset => {
+        const tags = (preset.tags || []).map(tag => `<span class="tag">${tag}</span>`).join('')
+        const active = preset.id === activePresetId
+        return `
+          <article class="preset-card${active ? ' is-active' : ''}" data-id="${preset.id}">
+            <div class="preset-card-top">
+              <h3 class="preset-name">${preset.name}</h3>
+              ${active ? '<span class="preset-badge">적용 중</span>' : ''}
+            </div>
+            <p class="preset-meta">${preset.note || '사용자 저장 프리셋'}</p>
+            <div class="preset-tags">${tags}</div>
+            <div class="preset-actions">
+              <button class="btn btn-primary" type="button" data-action="apply">적용</button>
+              <button class="btn btn-secondary" type="button" data-action="load">불러오기</button>
+              <button class="btn btn-secondary" type="button" data-action="delete">삭제</button>
+            </div>
+          </article>
+        `
+      }).join('')
+    }
+
+    function applyPreset(preset, { silent } = {}) {
+      current = { ...preset.stages }
+      activePresetId = preset.id
+      renderAll()
+      if (!silent) toast(`「${preset.name}」 프리셋을 적용했어요`)
+    }
+
+    function loadPresetToEditor(preset) {
+      current = { ...preset.stages }
+      renderPipeline()
+      renderSummary()
+      toast(`「${preset.name}」을 편집 화면으로 불러왔어요 (아직 적용 전)`)
+    }
+
+    function renderAll() {
+      renderPipeline()
+      renderSummary()
+      renderPresets()
+      renderActivePanel()
+    }
+
+    presetGridEl.addEventListener('click', event => {
+      const button = event.target.closest('button[data-action]')
+      if (!button) return
+      const card = button.closest('.preset-card')
+      const preset = presets.find(item => item.id === card.dataset.id)
+      if (!preset) return
+
+      const action = button.dataset.action
+      if (action === 'apply') applyPreset(preset)
+      if (action === 'load') loadPresetToEditor(preset)
+      if (action === 'delete') {
+        presets = presets.filter(item => item.id !== preset.id)
+        if (activePresetId === preset.id) activePresetId = null
+        renderPresets()
+        renderActivePanel()
+        toast(`「${preset.name}」 프리셋을 삭제했어요`)
+      }
+    })
+
+    document.getElementById('btn-add-preset').addEventListener('click', () => {
+      const name = presetNameInput.value.trim()
+      if (!name) {
+        toast('프리셋 이름을 입력해주세요')
+        presetNameInput.focus()
+        return
+      }
+      const id = `p${Date.now()}`
+      const preset = {
+        id,
+        name,
+        note: '방금 저장한 설정',
+        tags: ['사용자'],
+        stages: { ...current },
+      }
+      presets = [preset, ...presets]
+      presetNameInput.value = ''
+      activePresetId = id
+      renderPresets()
+      renderActivePanel()
+      toast(`「${name}」 프리셋을 저장했어요`)
+    })
+
+    document.getElementById('btn-save-settings').addEventListener('click', () => {
+      toast('목업: 실제 저장 API는 연결되지 않았어요')
+    })
+
+    fabToggle.addEventListener('click', () => {
+      const open = fabWrap.classList.toggle('is-open')
+      fabToggle.setAttribute('aria-expanded', String(open))
+      fabPanel.setAttribute('aria-hidden', String(!open))
+    })
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && fabWrap.classList.contains('is-open')) {
+        fabWrap.classList.remove('is-open')
+        fabToggle.setAttribute('aria-expanded', 'false')
+        fabPanel.setAttribute('aria-hidden', 'true')
+      }
+    })
+
+    renderAll()
+  </script>
+</body>
+</html>

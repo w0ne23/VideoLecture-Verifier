@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
@@ -9,10 +9,16 @@ import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
 import ModelSetupPresetListPage from './pages/model-setup/ModelSetupPresetListPage'
-import ModelSetupPresetEditorPage from './pages/model-setup/ModelSetupPresetEditorPage'
+import ModelRegistryPage from './pages/model-setup/ModelRegistryPage'
+import ModelSetEditorPage from './pages/model-setup/ModelSetEditorPage'
 import ModelSetupFab from './components/model-setup/ModelSetupFab'
 
 const queryClient = new QueryClient()
+
+function RedirectPresetEdit() {
+  const { profileId } = useParams()
+  return <Navigate to={`/model-setup/sets/${profileId}/edit`} replace />
+}
 
 function AppShell() {
   const navigate = useNavigate()
@@ -33,9 +39,14 @@ function AppShell() {
           <Route path="/result/:lectureId" element={<ResultPage />} />
           <Route path="/model-setup" element={<ModelSetupLayout />}>
             <Route index element={<ModelSetupEntryPage />} />
-            <Route path="presets" element={<ModelSetupPresetListPage />} />
-            <Route path="new" element={<ModelSetupPresetEditorPage mode="create" />} />
-            <Route path="presets/:profileId/edit" element={<ModelSetupPresetEditorPage mode="edit" />} />
+            <Route path="models" element={<ModelRegistryPage />} />
+            <Route path="sets" element={<ModelSetupPresetListPage />} />
+            <Route path="sets/new" element={<ModelSetEditorPage mode="create" />} />
+            <Route path="sets/:profileId/edit" element={<ModelSetEditorPage mode="edit" />} />
+            {/* 이전 경로 호환 */}
+            <Route path="presets" element={<Navigate to="/model-setup/sets" replace />} />
+            <Route path="new" element={<Navigate to="/model-setup/sets/new" replace />} />
+            <Route path="presets/:profileId/edit" element={<RedirectPresetEdit />} />
           </Route>
         </Routes>
       </main>
