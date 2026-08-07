@@ -22,7 +22,7 @@ export default function GroupedBarChart({ rows, animKey }) {
       className="stats-svg stats-svg--bars"
       viewBox={`0 0 ${W} ${H}`}
       role="img"
-      aria-label="태그별 이슈 유형 묶음 막대 그래프"
+      aria-label="출처별 이슈 유형 묶음 막대 그래프"
     >
       {ticks.map(tick => {
         const y = PAD.top + plotH - (tick / maxValue) * plotH

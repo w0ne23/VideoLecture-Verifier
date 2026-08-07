@@ -17,8 +17,8 @@ import {
 const VIEWS = [
   {
     id: 'tag',
-    label: '태그별',
-    blurb: '출처 태그마다 이슈 유형을 나란히 비교합니다.',
+    label: '출처별',
+    blurb: '출처마다 이슈 유형을 나란히 비교합니다.',
   },
   {
     id: 'duration',
