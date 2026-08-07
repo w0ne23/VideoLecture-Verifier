@@ -105,7 +105,7 @@ export function buildInsight(view, rows) {
     const instructor = rows.find(r => r.key === 'instructor')
     const instructorTop = instructor ? rankTypes(instructor.typeDist)[0] : null
     return {
-      title: '태그별 한눈에',
+      title: '출처별 한눈에',
       bullets: [
         `전체적으로 ${ranked[0]?.label}이(가) 가장 많고, 이어서 ${ranked[1]?.label} 순입니다.`,
         `${top.label} 출처에서 추출 Issue가 가장 많습니다 (${top.total}건).`,

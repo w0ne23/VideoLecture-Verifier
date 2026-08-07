@@ -57,7 +57,7 @@ export default function MainPage() {
           </svg>
         </span>
         <span className="main-menu-title">통계</span>
-        <span className="main-menu-desc">태그·도메인·길이별 이슈 분포와 수정 전후 비교를 봅니다.</span>
+        <span className="main-menu-desc">출처·도메인·길이별 이슈 분포와 수정 전후 비교를 봅니다.</span>
       </button>
     </div>
   )
