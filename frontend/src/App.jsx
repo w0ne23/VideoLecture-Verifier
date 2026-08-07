@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from '
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import MainPage from './pages/MainPage'
 import UploadPage from './pages/UploadPage'
+import LecturesPage from './pages/LecturesPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
 import StatsPage from './pages/StatsPage'
@@ -34,6 +35,7 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<MainPage />} />
           <Route path="/upload" element={<UploadPage />} />
+          <Route path="/lectures" element={<LecturesPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
           <Route path="/result/:lectureId" element={<ResultPage />} />

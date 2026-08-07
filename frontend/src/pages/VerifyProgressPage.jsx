@@ -7,7 +7,7 @@ import { useJobStream } from '../hooks/useJobStream'
 export default function VerifyProgressPage() {
   const { lectureId } = useParams()
   const navigate = useNavigate()
-  const goToList = () => navigate('/upload')
+  const goToList = () => navigate('/lectures')
 
   const {
     phase,

@@ -8,7 +8,7 @@ export default function ResultPage() {
   const { lectureId } = useParams()
   const navigate = useNavigate()
   const videoRef = useRef(null)
-  const goToList = () => navigate('/upload')
+  const goToList = () => navigate('/lectures')
 
   const {
     phase,
@@ -23,11 +23,14 @@ export default function ResultPage() {
 
   // 결과 화면에 아직 파이프라인이 안 끝난 강의로 진입했거나, "다시 검증"으로 재실행된 경우
   // 진행 화면으로 되돌려보낸다.
+  // useJobStream의 초기 phase는 PIPELINE이므로, 로딩이 끝난 뒤에만 판정해야
+  // /result ↔ /verify 리다이렉트 루프가 생기지 않는다.
   useEffect(() => {
+    if (isLoading) return
     if (phase === PHASES.PIPELINE || phase === PHASES.ERROR) {
       navigate(`/verify/${lectureId}`, { replace: true })
     }
-  }, [phase, lectureId, navigate])
+  }, [phase, lectureId, navigate, isLoading])
 
   function seekTo(seconds) {
     const video = videoRef.current
