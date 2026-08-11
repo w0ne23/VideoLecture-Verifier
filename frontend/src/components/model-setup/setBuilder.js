@@ -227,6 +227,13 @@ export function summarizeSetConfig(editorState) {
     return {
       modelCount: models.length,
       modelNames: models.map(model => model.version).filter(Boolean),
+      models: models.map(model => ({
+        id: model.id,
+        type: model.type,
+        version: model.version,
+        modelId: model.modelId,
+        isMain: Boolean(main) && model.id === main.id,
+      })),
       mainModelName: main?.version || '미지정',
       includeGrounding: state.includeGrounding !== false,
       stageCount: Object.keys(state.stages || {}).length || (state.includeGrounding === false ? 5 : 6),
@@ -235,6 +242,8 @@ export function summarizeSetConfig(editorState) {
 
   const stages = state.stages || {}
   const names = []
+  const nameToModelId = new Map()
+  const nameToType = new Map()
   const seen = new Set()
   Object.values(stages).forEach(stage => {
     ;(stage.models || []).forEach(model => {
@@ -242,12 +251,22 @@ export function summarizeSetConfig(editorState) {
       if (!name || seen.has(name)) return
       seen.add(name)
       names.push(name)
+      nameToModelId.set(name, model.modelId)
+      nameToType.set(name, model.providerType)
     })
   })
+  const mainModelName = stages.claim?.models?.[0]?.version || names[0] || '미지정'
   return {
     modelCount: names.length,
     modelNames: names,
-    mainModelName: stages.claim?.models?.[0]?.version || names[0] || '미지정',
+    models: names.map(name => ({
+      id: name,
+      type: nameToType.get(name),
+      version: name,
+      modelId: nameToModelId.get(name),
+      isMain: name === mainModelName,
+    })),
+    mainModelName,
     includeGrounding: Boolean(stages.ground?.models?.length),
     stageCount: Object.keys(stages).length,
   }
