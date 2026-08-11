@@ -1,5 +1,7 @@
 import { VERSION_TO_MODEL_ID, nextProviderId } from './stageModels'
 
+export const CUSTOM_VERSION = '__custom__'
+
 export const PROVIDERS_META = {
   openai: {
     name: 'OpenAI',
@@ -16,6 +18,23 @@ export const PROVIDERS_META = {
     prefix: /^xai-/,
     versions: ['Grok-4', 'Grok-4 Mini'],
   },
+  gemini: {
+    name: 'Gemini',
+    prefix: /^AIza/,
+    versions: ['Gemini 3 Pro', 'Gemini 3 Flash', 'Gemini 3 Flash Lite'],
+  },
+  deepseek: {
+    name: 'DeepSeek',
+    // OpenAI 키와 접두사가 같아 자동 감지는 지원하지 않음(provider를 직접 선택해야 함)
+    prefix: null,
+    versions: ['DeepSeek V4', 'DeepSeek V4 Flash'],
+  },
+  ollama: {
+    name: 'Ollama (로컬)',
+    prefix: null,
+    versions: ['Gemma 3 27B', 'Gemma 3 9B', 'Qwen 3 32B', 'Qwen 3 14B'],
+    requiresKey: false,
+  },
 }
 
 const REGISTRY_KEY = 'verilec_registered_llms'
@@ -29,8 +48,13 @@ export function maskKey(key) {
 export function detectProvider(key) {
   if (PROVIDERS_META.anthropic.prefix.test(key)) return 'anthropic'
   if (PROVIDERS_META.xai.prefix.test(key)) return 'xai'
+  if (PROVIDERS_META.gemini.prefix.test(key)) return 'gemini'
   if (PROVIDERS_META.openai.prefix.test(key)) return 'openai'
   return null
+}
+
+export function providerRequiresKey(type) {
+  return PROVIDERS_META[type]?.requiresKey !== false
 }
 
 export function versionToModelId(version) {
