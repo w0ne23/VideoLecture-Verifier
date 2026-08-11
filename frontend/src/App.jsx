@@ -9,16 +9,15 @@ import ResultPage from './pages/ResultPage'
 import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
-import ModelSetupPresetListPage from './pages/model-setup/ModelSetupPresetListPage'
+import ModelSetsPage from './pages/model-setup/ModelSetsPage'
 import ModelRegistryPage from './pages/model-setup/ModelRegistryPage'
-import ModelSetEditorPage from './pages/model-setup/ModelSetEditorPage'
 import ModelSetupFab from './components/model-setup/ModelSetupFab'
 
 const queryClient = new QueryClient()
 
 function RedirectPresetEdit() {
   const { profileId } = useParams()
-  return <Navigate to={`/model-setup/sets/${profileId}/edit`} replace />
+  return <Navigate to={`/model-setup/sets?edit=${profileId}`} replace />
 }
 
 function AppShell() {
@@ -42,12 +41,12 @@ function AppShell() {
           <Route path="/model-setup" element={<ModelSetupLayout />}>
             <Route index element={<ModelSetupEntryPage />} />
             <Route path="models" element={<ModelRegistryPage />} />
-            <Route path="sets" element={<ModelSetupPresetListPage />} />
-            <Route path="sets/new" element={<ModelSetEditorPage mode="create" />} />
-            <Route path="sets/:profileId/edit" element={<ModelSetEditorPage mode="edit" />} />
+            <Route path="sets" element={<ModelSetsPage />} />
             {/* 이전 경로 호환 */}
+            <Route path="sets/new" element={<Navigate to="/model-setup/sets" replace />} />
+            <Route path="sets/:profileId/edit" element={<RedirectPresetEdit />} />
             <Route path="presets" element={<Navigate to="/model-setup/sets" replace />} />
-            <Route path="new" element={<Navigate to="/model-setup/sets/new" replace />} />
+            <Route path="new" element={<Navigate to="/model-setup/sets" replace />} />
             <Route path="presets/:profileId/edit" element={<RedirectPresetEdit />} />
           </Route>
         </Routes>

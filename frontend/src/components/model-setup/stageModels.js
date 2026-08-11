@@ -8,6 +8,15 @@ export const VERSION_TO_MODEL_ID = {
   'Claude Haiku 4.5': 'claude-haiku-4.5',
   'Grok-4': 'grok-4',
   'Grok-4 Mini': 'grok-4-mini',
+  'Gemini 3 Pro': 'gemini-3-pro',
+  'Gemini 3 Flash': 'gemini-3-flash',
+  'Gemini 3 Flash Lite': 'gemini-3-flash-lite',
+  'DeepSeek V4': 'deepseek-v4',
+  'DeepSeek V4 Flash': 'deepseek-v4-flash',
+  'Gemma 3 27B': 'gemma3:27b',
+  'Gemma 3 9B': 'gemma3:9b',
+  'Qwen 3 32B': 'qwen3:32b',
+  'Qwen 3 14B': 'qwen3:14b',
 }
 
 export const MODEL_ID_TO_VERSION = Object.fromEntries(
@@ -46,6 +55,9 @@ export function modelIdToProviderType(modelId) {
     return 'anthropic'
   }
   if (id.startsWith('grok') || id.startsWith('xai')) return 'xai'
+  if (id.startsWith('gemini')) return 'gemini'
+  if (id.startsWith('deepseek')) return 'deepseek'
+  if (id.includes(':')) return 'ollama'
   return null
 }
 

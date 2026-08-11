@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  CUSTOM_VERSION,
   PROVIDERS_META,
   detectProvider,
   llmLabel,
   loadRegisteredLlms,
   maskKey,
   nextLlmId,
+  providerRequiresKey,
   saveRegisteredLlms,
   versionToModelId,
 } from '../../components/model-setup/llmRegistry'
+
+const NO_KEY_LABEL = '로컬 (키 불필요)'
 
 export default function ModelRegistryPage() {
   const navigate = useNavigate()
@@ -17,14 +21,20 @@ export default function ModelRegistryPage() {
   const [providerSelect, setProviderSelect] = useState('auto')
   const [keyValue, setKeyValue] = useState('')
   const [version, setVersion] = useState('')
-  const [showHelp, setShowHelp] = useState(false)
-  const [remember, setRemember] = useState(true)
+  const [customVersion, setCustomVersion] = useState('')
+  // const [showHelp, setShowHelp] = useState(false)
+  const [editingId, setEditingId] = useState(null)
+  const [editProviderSelect, setEditProviderSelect] = useState('auto')
+  const [editKeyValue, setEditKeyValue] = useState('')
+  const [editVersion, setEditVersion] = useState('')
+  const [editCustomVersion, setEditCustomVersion] = useState('')
 
   const resolvedType = useMemo(() => {
     if (providerSelect !== 'auto') return providerSelect
     return detectProvider(keyValue.trim()) || ''
   }, [providerSelect, keyValue])
 
+  const keyRequired = resolvedType ? providerRequiresKey(resolvedType) : true
   const versionOptions = resolvedType ? PROVIDERS_META[resolvedType].versions : []
 
   useEffect(() => {
@@ -33,47 +43,80 @@ export default function ModelRegistryPage() {
       return
     }
     const options = PROVIDERS_META[resolvedType].versions
-    setVersion(current => (options.includes(current) ? current : options[0]))
+    setVersion(current => (current === CUSTOM_VERSION || options.includes(current) ? current : options[0]))
   }, [resolvedType])
+
+  const editingLlm = editingId ? llms.find(llm => llm.id === editingId) : null
+
+  const editResolvedType = useMemo(() => {
+    if (editProviderSelect !== 'auto') return editProviderSelect
+    return detectProvider(editKeyValue.trim()) || (editingLlm ? editingLlm.type : '')
+  }, [editProviderSelect, editKeyValue, editingLlm])
+
+  const editKeyRequired = editResolvedType ? providerRequiresKey(editResolvedType) : true
+  const editVersionOptions = editResolvedType ? PROVIDERS_META[editResolvedType].versions : []
+
+  useEffect(() => {
+    if (!editingId) return
+    const options = editResolvedType ? PROVIDERS_META[editResolvedType].versions : []
+    setEditVersion(current => (
+      current === CUSTOM_VERSION || options.includes(current) ? current : (options[0] || '')
+    ))
+  }, [editingId, editResolvedType])
 
   const persist = next => {
     setLlms(next)
-    if (remember) saveRegisteredLlms(next)
-    else localStorage.removeItem('verilec_registered_llms')
+    saveRegisteredLlms(next)
   }
 
   const handleAdd = () => {
     const key = keyValue.trim()
-    if (!key) {
-      window.alert('API 키를 입력해주세요.')
-      return
-    }
-
-    const detected = detectProvider(key)
     let finalType = providerSelect
+
     if (providerSelect === 'auto') {
+      if (!key) {
+        window.alert('API 키를 입력해주세요.')
+        return
+      }
+      const detected = detectProvider(key)
       if (!detected) {
         window.alert('키 형식을 인식할 수 없어요. provider를 직접 선택해주세요.')
         return
       }
       finalType = detected
-    } else if (detected && detected !== providerSelect) {
-      const useDetected = window.confirm(
-        `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n`
-        + `선택하신 ${PROVIDERS_META[providerSelect].name} 대신 ${PROVIDERS_META[detected].name}로 등록할까요?`,
-      )
-      if (!useDetected) return
-      finalType = detected
+    } else if (keyRequired) {
+      if (!key) {
+        window.alert('API 키를 입력해주세요.')
+        return
+      }
+      const detected = detectProvider(key)
+      if (detected && detected !== providerSelect) {
+        const useDetected = window.confirm(
+          `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n`
+          + `선택하신 ${PROVIDERS_META[providerSelect].name} 대신 ${PROVIDERS_META[detected].name}로 등록할까요?`,
+        )
+        if (!useDetected) return
+        finalType = detected
+      }
     }
 
     const meta = PROVIDERS_META[finalType]
-    const selectedVersion = versionOptions.includes(version) ? version : meta.versions[0]
+    const selectedVersion = version === CUSTOM_VERSION
+      ? customVersion.trim()
+      : (versionOptions.includes(version) ? version : meta.versions[0])
+    if (!selectedVersion) {
+      window.alert('모델명을 입력해주세요.')
+      return
+    }
+
     const modelId = versionToModelId(selectedVersion)
+    const keyMasked = providerRequiresKey(finalType) ? maskKey(key) : NO_KEY_LABEL
     const duplicate = llms.some(
-      llm => llm.type === finalType && llm.modelId === modelId && llm.keyMasked === maskKey(key),
+      llm => llm.type === finalType && llm.modelId === modelId
+        && (!providerRequiresKey(finalType) || llm.keyMasked === keyMasked),
     )
     if (duplicate) {
-      window.alert('이미 같은 키·모델로 등록되어 있어요.')
+      window.alert(providerRequiresKey(finalType) ? '이미 같은 키·모델로 등록되어 있어요.' : '이미 등록된 로컬 모델이에요.')
       return
     }
 
@@ -84,13 +127,14 @@ export default function ModelRegistryPage() {
         type: finalType,
         version: selectedVersion,
         modelId,
-        keyMasked: maskKey(key),
+        keyMasked,
         providerName: meta.name,
       },
     ]
     persist(next)
     setKeyValue('')
     setVersion('')
+    setCustomVersion('')
     setProviderSelect('auto')
   }
 
@@ -99,47 +143,91 @@ export default function ModelRegistryPage() {
     persist(llms.filter(llm => llm.id !== id))
   }
 
+  const handleEditStart = llm => {
+    setEditingId(llm.id)
+    setEditProviderSelect(llm.type)
+    setEditKeyValue(llm.keyMasked)
+    const meta = PROVIDERS_META[llm.type]
+    const isPresetVersion = meta?.versions.includes(llm.version)
+    setEditVersion(isPresetVersion ? llm.version : CUSTOM_VERSION)
+    setEditCustomVersion(isPresetVersion ? '' : llm.version)
+  }
+
+  const handleEditCancel = () => {
+    setEditingId(null)
+    setEditProviderSelect('auto')
+    setEditKeyValue('')
+    setEditVersion('')
+    setEditCustomVersion('')
+  }
+
+  const handleEditSave = () => {
+    const current = llms.find(llm => llm.id === editingId)
+    if (!current) return
+
+    const key = editKeyValue.trim()
+    const keyChanged = key !== current.keyMasked
+    let finalType = editProviderSelect === 'auto' ? current.type : editProviderSelect
+    let keyMasked = current.keyMasked
+
+    if (editKeyRequired && keyChanged && key) {
+      const detected = detectProvider(key)
+      if (editProviderSelect === 'auto') {
+        if (!detected) {
+          window.alert('키 형식을 인식할 수 없어요. provider를 직접 선택해주세요.')
+          return
+        }
+        finalType = detected
+      } else if (detected && detected !== editProviderSelect) {
+        const useDetected = window.confirm(
+          `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n`
+          + `선택하신 ${PROVIDERS_META[editProviderSelect].name} 대신 ${PROVIDERS_META[detected].name}로 변경할까요?`,
+        )
+        finalType = useDetected ? detected : editProviderSelect
+      }
+      keyMasked = maskKey(key)
+    } else if (!providerRequiresKey(finalType)) {
+      keyMasked = NO_KEY_LABEL
+    }
+
+    const meta = PROVIDERS_META[finalType]
+    const selectedVersion = editVersion === CUSTOM_VERSION
+      ? editCustomVersion.trim()
+      : (meta.versions.includes(editVersion) ? editVersion : meta.versions[0])
+    if (!selectedVersion) {
+      window.alert('모델명을 입력해주세요.')
+      return
+    }
+    const modelId = versionToModelId(selectedVersion)
+
+    const next = llms.map(llm => (llm.id === editingId
+      ? { ...llm, type: finalType, version: selectedVersion, modelId, keyMasked, providerName: meta.name }
+      : llm))
+    persist(next)
+    handleEditCancel()
+  }
+
   return (
     <section className="model-setup">
       <div className="ms-header-row">
         <h2 className="ms-app-title">LLM 모델 등록</h2>
-        <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={() => navigate('/model-setup')}>
-          선택 화면으로
+        <button className="ms-back-btn" type="button" onClick={() => navigate('/model-setup')} aria-label="선택 화면으로">
+          ←
         </button>
       </div>
 
-      <div className="ms-layout">
-        <aside className="ms-side-panel">
-          <p>
-            API 키로 LLM을 등록해요. 여기서 등록한 모델만 LLM 셋 만들기에서 선택할 수 있어요.
-          </p>
-        </aside>
-
-        <div className="ms-main-panel">
+      <div className="ms-stack">
+        <div className="ms-stack-section">
+          <h3 className="ms-split-title">새 모델 등록</h3>
           <div className="ms-card">
-            <p className="ms-label">등록된 LLM</p>
-            {llms.length ? (
-              <div className="ms-provider-list">
-                {llms.map(llm => (
-                  <div className="ms-provider-row" key={llm.id}>
-                    <span className="ms-provider-name">{PROVIDERS_META[llm.type]?.name || llm.type}</span>
-                    <span className="ms-llm-version-chip">{llm.version}</span>
-                    <span className="ms-provider-key" title={llm.keyMasked}>{llm.keyMasked}</span>
-                    <span className="ms-provider-check">등록됨</span>
-                    <button className="ms-icon-btn" type="button" onClick={() => handleRemove(llm.id)} aria-label={`${llmLabel(llm)} 삭제`}>
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="ms-empty">아직 등록된 LLM이 없어요.</p>
-            )}
-
+            <p className="ms-hint" style={{ marginBottom: 12 }}>
+              API 키(또는 로컬 모델명)를 등록하면 여기서 등록한 모델만 LLM 셋 만들기에서 선택할 수 있어요.
+            </p>
             <div className="ms-add-row ms-add-row--wrap">
               <select value={providerSelect} onChange={event => {
                 setProviderSelect(event.target.value)
                 setVersion('')
+                setCustomVersion('')
               }}
               >
                 <option value="auto">자동 감지</option>
@@ -150,7 +238,8 @@ export default function ModelRegistryPage() {
               <input
                 type="password"
                 value={keyValue}
-                placeholder="API Key 입력"
+                placeholder={keyRequired ? 'API Key 입력' : '로컬 모델은 키가 필요 없어요'}
+                disabled={!keyRequired}
                 onChange={event => setKeyValue(event.target.value)}
                 onKeyDown={event => {
                   if (event.key === 'Enter') handleAdd()
@@ -165,26 +254,25 @@ export default function ModelRegistryPage() {
                 {versionOptions.map(option => (
                   <option value={option} key={option}>{option}</option>
                 ))}
+                {resolvedType && <option value={CUSTOM_VERSION}>직접 입력...</option>}
               </select>
+              {version === CUSTOM_VERSION && (
+                <input
+                  type="text"
+                  value={customVersion}
+                  placeholder="모델명 직접 입력 (예: gemma3:12b)"
+                  onChange={event => setCustomVersion(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter') handleAdd()
+                  }}
+                />
+              )}
               <button className="ms-btn-primary ms-add-btn" type="button" onClick={handleAdd}>
                 등록
               </button>
             </div>
 
-            <label className="ms-checkbox-row">
-              <input
-                type="checkbox"
-                checked={remember}
-                onChange={event => {
-                  const next = event.target.checked
-                  setRemember(next)
-                  if (next) saveRegisteredLlms(llms)
-                  else localStorage.removeItem('verilec_registered_llms')
-                }}
-              />
-              이 브라우저에 등록 정보 저장
-            </label>
-
+            {/* API 키 발급 안내: 나중에 필요하면 복원
             <button className="ms-link-btn" type="button" onClick={() => setShowHelp(current => !current)}>
               {showHelp ? '도움말 접기' : 'API 키 발급 안내'}
             </button>
@@ -204,15 +292,96 @@ export default function ModelRegistryPage() {
                 </div>
               </div>
             )}
+            */}
           </div>
+        </div>
 
-          <div className="ms-actions">
-            <button className="ms-btn-secondary" type="button" onClick={() => navigate('/model-setup')}>
-              돌아가기
-            </button>
-            <button className="ms-btn-primary" type="button" onClick={() => navigate('/model-setup/sets/new')}>
-              셋 만들기로
-            </button>
+        <div className="ms-stack-section">
+          <h3 className="ms-split-title">등록된 모델 <span className="ms-split-title-count">{llms.length}</span></h3>
+          <div className="ms-card">
+            {llms.length ? (
+              <div className="ms-provider-list">
+                {llms.map((llm, index) => (
+                  editingId === llm.id ? (
+                    <div className="ms-provider-row ms-provider-row--edit" key={llm.id}>
+                      <span className="ms-provider-index">{index + 1}</span>
+                      <div className="ms-provider-edit-fields">
+                        <select
+                          value={editProviderSelect}
+                          onChange={event => setEditProviderSelect(event.target.value)}
+                        >
+                          <option value="auto">자동 감지</option>
+                          {Object.entries(PROVIDERS_META).map(([type, meta]) => (
+                            <option value={type} key={type}>{meta.name}</option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={editKeyValue}
+                          placeholder={editKeyRequired ? 'API 키' : '로컬 모델은 키가 필요 없어요'}
+                          disabled={!editKeyRequired}
+                          onChange={event => setEditKeyValue(event.target.value)}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter') handleEditSave()
+                            if (event.key === 'Escape') handleEditCancel()
+                          }}
+                        />
+                        <select
+                          value={editVersion || ''}
+                          onChange={event => setEditVersion(event.target.value)}
+                          disabled={!editVersionOptions.length}
+                        >
+                          <option value="">{editVersionOptions.length ? '모델 선택' : '키/provider 먼저'}</option>
+                          {editVersionOptions.map(option => (
+                            <option value={option} key={option}>{option}</option>
+                          ))}
+                          {editResolvedType && <option value={CUSTOM_VERSION}>직접 입력...</option>}
+                        </select>
+                        {editVersion === CUSTOM_VERSION && (
+                          <input
+                            type="text"
+                            value={editCustomVersion}
+                            placeholder="모델명 직접 입력 (예: gemma3:12b)"
+                            onChange={event => setEditCustomVersion(event.target.value)}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter') handleEditSave()
+                              if (event.key === 'Escape') handleEditCancel()
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="ms-provider-actions">
+                        <button className="ms-btn-primary ms-add-btn" type="button" onClick={handleEditSave}>
+                          저장
+                        </button>
+                        <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={handleEditCancel}>
+                          취소
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="ms-provider-row" key={llm.id}>
+                      <span className="ms-provider-index">{index + 1}</span>
+                      <div className="ms-provider-info">
+                        <span className="ms-provider-name">{PROVIDERS_META[llm.type]?.name || llm.type}</span>
+                        <span className="ms-provider-key-masked">{llm.keyMasked}</span>
+                        <span className={`ms-llm-version-chip ms-llm-version-chip--${llm.type}`}>{llm.version}</span>
+                      </div>
+                      <div className="ms-provider-actions">
+                        <button className="ms-icon-btn" type="button" onClick={() => handleEditStart(llm)} aria-label={`${llmLabel(llm)} 수정`}>
+                          ✎
+                        </button>
+                        <button className="ms-icon-btn" type="button" onClick={() => handleRemove(llm.id)} aria-label={`${llmLabel(llm)} 삭제`}>
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  )
+                ))}
+              </div>
+            ) : (
+              <p className="ms-empty">아직 등록된 LLM이 없어요. 위에서 새 모델을 등록해보세요.</p>
+            )}
           </div>
         </div>
       </div>
