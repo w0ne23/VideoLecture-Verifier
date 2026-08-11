@@ -24,8 +24,8 @@ export default function LecturesPage() {
     <section className="lectures-page">
       <div className="page-header-row">
         <h2 className="list-heading">강의 목록</h2>
-        <button type="button" className="btn" onClick={() => navigate('/')}>
-          메인으로
+        <button className="ms-back-btn" type="button" onClick={() => navigate('/verify')} aria-label="강의 검증으로">
+          ←
         </button>
       </div>
 
