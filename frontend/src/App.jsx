@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import MainPage from './pages/MainPage'
+import VerifyEntryPage from './pages/VerifyEntryPage'
 import UploadPage from './pages/UploadPage'
 import LecturesPage from './pages/LecturesPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
@@ -33,6 +34,7 @@ function AppShell() {
       <main>
         <Routes>
           <Route path="/" element={<MainPage />} />
+          <Route path="/verify" element={<VerifyEntryPage />} />
           <Route path="/upload" element={<UploadPage />} />
           <Route path="/lectures" element={<LecturesPage />} />
           <Route path="/stats" element={<StatsPage />} />

@@ -5,7 +5,7 @@ export default function MainPage() {
   const navigate = useNavigate()
 
   return (
-    <div className="main-menu">
+    <div className="main-menu main-menu--three">
       <button type="button" className="main-menu-item" onClick={() => navigate('/model-setup')}>
         <span className="main-menu-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24">
@@ -19,7 +19,7 @@ export default function MainPage() {
 
       <div className="main-menu-verify-wrap">
         <ActiveLlmSetBanner />
-        <button type="button" className="main-menu-item" onClick={() => navigate('/upload')}>
+        <button type="button" className="main-menu-item" onClick={() => navigate('/verify')}>
           <span className="main-menu-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24">
               <path d="M9 12l2 2 4-4" />
@@ -27,24 +27,9 @@ export default function MainPage() {
             </svg>
           </span>
           <span className="main-menu-title">강의 검증</span>
-          <span className="main-menu-desc">강의 영상을 업로드하고 검증을 시작합니다.</span>
+          <span className="main-menu-desc">강의를 검증하거나 검증된 강의 목록을 확인합니다.</span>
         </button>
       </div>
-
-      <button type="button" className="main-menu-item" onClick={() => navigate('/lectures')}>
-        <span className="main-menu-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <path d="M8 6h13" />
-            <path d="M8 12h13" />
-            <path d="M8 18h13" />
-            <path d="M3 6h.01" />
-            <path d="M3 12h.01" />
-            <path d="M3 18h.01" />
-          </svg>
-        </span>
-        <span className="main-menu-title">강의 목록</span>
-        <span className="main-menu-desc">업로드한 강의의 진행 상태와 검증 결과를 확인합니다.</span>
-      </button>
 
       <button type="button" className="main-menu-item" onClick={() => navigate('/stats')}>
         <span className="main-menu-icon" aria-hidden="true">

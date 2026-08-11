@@ -111,6 +111,12 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
   width: 100%;
 }
 
+.main-menu--three {
+  grid-template-columns: repeat(3, 260px);
+  width: min(100vw - 40px, 860px);
+  margin-inline: calc((880px - min(100vw - 40px, 860px)) / 2);
+}
+
 .main-llm-set-banner {
   position: absolute;
   left: 0;
