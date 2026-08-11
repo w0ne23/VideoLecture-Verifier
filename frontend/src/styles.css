@@ -147,6 +147,15 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
   font-weight: 700;
 }
 
+.main-llm-set-banner-models {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
 .main-llm-set-modal {
   width: min(100%, 640px);
 }

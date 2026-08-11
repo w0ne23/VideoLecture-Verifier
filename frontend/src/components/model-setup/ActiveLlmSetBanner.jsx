@@ -44,8 +44,18 @@ export default function ActiveLlmSetBanner() {
         aria-label={`현재 적용 LLM 셋: ${label}`}
       >
         <span className="main-llm-set-banner-text">
-          현재 적용 LLM 셋: <strong>{label}</strong>
+          <strong>{label}</strong>
         </span>
+        {activeProfile && summary.models.length > 0 && (
+          <span className="main-llm-set-banner-models">
+            {summary.models.map(model => (
+              <span key={model.id} className={`ms-preset-tag ms-preset-tag--${model.type}`}>
+                {model.isMain && <span aria-hidden="true">★</span>}
+                {model.version}
+              </span>
+            ))}
+          </span>
+        )}
       </button>
 
       {open && (
