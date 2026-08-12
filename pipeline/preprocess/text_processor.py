@@ -40,6 +40,11 @@ IMAGE_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").s
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "12"))
 PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_PARALLEL_REQUESTS", "12")))
+# Ollama는 OLLAMA_NUM_PARALLEL(기본 4)개까지만 서버에서 동시 처리한다. 그보다
+# 많은 요청을 동시에 쏘면 대기열에 밀려 클라이언트 타임아웃(600초)을 넘겨버려서,
+# 로컬 모델을 쓸 때는 서버 동시 처리 한도에 맞춰 요청 수를 낮춘다. 상용 API는
+# 그런 제약이 없으므로 기존 PARALLEL_REQUESTS(12)를 그대로 쓴다.
+OLLAMA_PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_OLLAMA_PARALLEL_REQUESTS", "4")))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
 TRANSITION_TAIL_SEC = float(os.getenv("MERGE_TRANSITION_TAIL_SEC", "0.2"))
 ASSIGN_MAX_GAP_SEC = float(os.getenv("MERGE_ASSIGN_MAX_GAP_SEC", "3.0"))
@@ -167,6 +172,34 @@ def _add_openai_usage(response, *, stage: str, model: str, prompt_chars: int = 0
         pass
 
 
+def _is_ollama_model(model: str) -> bool:
+    spec = str(model or "").strip().lower()
+    return spec.startswith("ollama:") or spec.startswith("ollama/")
+
+
+def _effective_parallel_requests(*models: str) -> int:
+    """models 중 하나라도 Ollama면 서버 동시 처리 한도(OLLAMA_PARALLEL_REQUESTS)를,
+    전부 상용 API면 기존 PARALLEL_REQUESTS를 반환한다."""
+    if any(_is_ollama_model(model) for model in models):
+        return OLLAMA_PARALLEL_REQUESTS
+    return PARALLEL_REQUESTS
+
+
+def _resolve_ollama_model(model: str) -> tuple[str, Optional[bool]]:
+    """`ollama:` prefix를 떼어내고, `#think`/`#nothink` 접미사가 있으면 (모델, think여부)로 반환."""
+    spec = str(model or "").strip()
+    lowered = spec.lower()
+    if lowered.startswith("ollama:"):
+        spec = spec.split(":", 1)[1].strip()
+    elif lowered.startswith("ollama/"):
+        spec = spec.split("/", 1)[1].strip()
+    if spec.endswith("#nothink"):
+        return spec[: -len("#nothink")].strip(), False
+    if spec.endswith("#think"):
+        return spec[: -len("#think")].strip(), True
+    return spec, None
+
+
 def _call_openai_text_correction(
     prompt: str,
     *,
@@ -175,14 +208,24 @@ def _call_openai_text_correction(
     system_prompt: str,
     max_output_tokens: int = 8192,
 ) -> str:
-    from .config import get_openai_client
+    is_ollama = _is_ollama_model(model)
+    if is_ollama:
+        from .config import get_ollama_client
 
-    client = get_openai_client()
-    if client is None and os.getenv("OPENAI_API_KEY"):
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    if client is None:
-        raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+        client = get_ollama_client()
+        if client is None:
+            raise RuntimeError("Ollama 클라이언트를 만들 수 없습니다 (openai 패키지 확인 필요).")
+        resolved_model, think_override = _resolve_ollama_model(model)
+    else:
+        from .config import get_openai_client
+
+        client = get_openai_client()
+        if client is None and os.getenv("OPENAI_API_KEY"):
+            from openai import OpenAI
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        if client is None:
+            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+        resolved_model, think_override = model, None
 
     def call():
         reasoning_effort = TEXT_REASONING_EFFORT
@@ -191,7 +234,7 @@ def _call_openai_text_correction(
         elif "pass3" in stage:
             reasoning_effort = PASS3_REASONING_EFFORT
         kwargs = {
-            "model": model,
+            "model": resolved_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
@@ -199,7 +242,10 @@ def _call_openai_text_correction(
             "response_format": {"type": "json_object"},
             "max_completion_tokens": max_output_tokens,
         }
-        if reasoning_effort:
+        if is_ollama:
+            if think_override is not None:
+                kwargs["extra_body"] = {"think": think_override}
+        elif reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         temperature = os.getenv("GRAPHLEC_TEXT_PROCESSOR_OPENAI_TEMPERATURE", "0").strip()
         if temperature:
@@ -862,6 +908,9 @@ def parse_pass3_response(text: str) -> dict[str, list[dict]]:
     if not isinstance(parsed, dict):
         return {"accepted_changes": []}
 
+    broken_raw = parsed.get("broken", [])
+    broken_indices = {v for v in broken_raw if isinstance(v, int)} if isinstance(broken_raw, list) else set()
+
     raw_items = parsed.get("changes", parsed.get("accepted_changes", parsed.get("accepted", [])))
     accepted_changes: list[dict] = []
     for item in raw_items:
@@ -871,6 +920,10 @@ def parse_pass3_response(text: str) -> dict[str, list[dict]]:
         from_text = str(item.get("from", item.get("from_text", "")) or "")
         to_text = str(item.get("to", item.get("to_text", "")) or "")
         if not isinstance(idx, int) or not from_text or not to_text:
+            continue
+        if isinstance(parsed.get("broken"), list) and idx not in broken_indices:
+            # 1단계(원문 자체 판정)에서 broken으로 표시하지 않은 i는
+            # 2단계(후보 선택) 결과를 신뢰하지 않고 무시한다.
             continue
         candidate_number = item.get("c", item.get("candidate_number"))
         occurrence = item.get("occ", item.get("occurrence", 1))
@@ -968,8 +1021,30 @@ def _validate_candidates_pass3(
 ## 검증 대상
 {items_text}
 
+## 판단 절차 (반드시 이 순서로, 두 단계를 분리해서 판단한다)
+
+1단계 — 원문 자체 판정 (후보는 참고하지 않는다):
+각 [i]의 "원문"만 읽고, 후보가 있든 없든 상관없이 원문 자체가 그 자리에서 한국어로 성립하기 어려운지 스스로 판단한다.
+- 성립하기 어려운 경우만: 발음이 이상한 단어, 전문용어/슬라이드 용어 표기 오류, 문맥상 깨진 어절/구절, 조사가 안 맞는 경우, 영문/코드/고유명사 오인식, 같은 단어가 자기 자신을 가리키며 반복돼 의미가 중복되는 경우(예: "응용 소프트웨어는... 다양한 소프트웨어를 사용한다").
+- 이 판단에는 후보 내용을 근거로 쓰지 않는다. "후보가 다르게 썼으니까 원문이 이상하다"는 판단 금지.
+- 성립하기 어렵다고 판단한 i만 "broken"에 넣는다. 나머지 i는 "broken"에 넣지 않는다.
+
+2단계 — 후보에서 최소 span 추출 (1단계에서 broken으로 판단한 i에 대해서만 수행):
+1. 그 i의 후보를 원문과 왼쪽부터 오른쪽까지 끝까지 비교한다.
+2. 원문의 깨진 단어/구절과 후보의 같은 위치 대응어를 찾는다.
+3. 하나를 찾은 뒤에도 멈추지 말고, 같은 항목의 남은 차이를 계속 검사한다.
+4. 서로 독립된 오류는 하나의 큰 span으로 합치지 말고 별도 changes로 출력한다.
+5. 후보 전체가 자연화/재작성이어도, 명확한 단어/구절 대응만 따로 출력한다.
+6. from_text는 원문에 실제로 존재해야 하고, to_text는 해당 후보에 실제로 존재해야 한다.
+7. 한국어 오류 span은 한 글자나 어절 내부 일부만 자르지 말고, 깨진 어절/용어 단위로 잡는다.
+   - 금지: 외 -> 회, 한해 -> 환산, 재활 -> 재화
+   - 허용: 관리외계 -> 관리회계, 외계에서 -> 회계에서, 한해봐야겠죠 -> 환산해봐야겠죠, 재활을 -> 재화를
+8. 조사/어미와 결합했을 때 최종 문장이 깨지면, 조사/어미까지 포함한 span을 출력한다.
+9. broken에 없는 i는 changes에 넣지 않는다. 여러 후보가 상충하면, 1단계에서 찾은 원문의 문제를 실제로 해소하는 후보를 우선한다.
+
 ## 출력(JSON만)
 {{
+  "broken":[0,3],
   "changes":[
     {{"i":0,"c":1,"from":"원문 연속 문자열","to":"후보 근거 문자열","occ":1,"r":1}}
   ]
@@ -984,30 +1059,19 @@ reason_code는 아래 번호 중 하나만 사용한다. 번호를 고를 수 �
 6 영문/코드/약어 오인식 복원
 7 고유명사 복원
 
-## 실행 순서
-1. 각 후보를 원문과 왼쪽부터 오른쪽까지 끝까지 비교한다.
-2. 원문의 깨진 단어/구절과 후보의 같은 위치 대응어를 찾는다.
-3. 하나를 찾은 뒤에도 멈추지 말고, 같은 항목의 남은 차이를 계속 검사한다.
-4. 서로 독립된 오류는 하나의 큰 span으로 합치지 말고 별도 changes로 출력한다.
-5. 후보 전체가 자연화/재작성이어도, 명확한 단어/구절 대응만 따로 출력한다.
-6. from_text는 원문에 실제로 존재해야 하고, to_text는 해당 후보에 실제로 존재해야 한다.
-7. 한국어 오류 span은 한 글자나 어절 내부 일부만 자르지 말고, 깨진 어절/용어 단위로 잡는다.
-   - 금지: 외 -> 회, 한해 -> 환산, 재활 -> 재화
-   - 허용: 관리외계 -> 관리회계, 외계에서 -> 회계에서, 한해봐야겠죠 -> 환산해봐야겠죠, 재활을 -> 재화를
-8. 조사/어미와 결합했을 때 최종 문장이 깨지면, 조사/어미까지 포함한 span을 출력한다.
-
 출력 키 의미:
-- i: 검증 대상의 [] 번호
+- broken: 1단계에서 원문 자체가 성립하기 어렵다고 판단한 [] 번호 목록
+- i: 검증 대상의 [] 번호 (반드시 broken에 포함된 번호여야 한다)
 - c: 후보 번호
 - from: 원문에 실제로 있는 연속 문자열
 - to: 후보 문장에 실제로 있는 문자열
 - occ: 같은 from이 원문에 여러 번 있으면 몇 번째인지, 모두면 "all"
 - r: reason_code
 
-## accepted 기준
-- 고유명사, 영문 토큰, 코드/함수명, 제품명, 슬라이드 표기 용어, 운영체제/컴퓨터 구조 전문용어의 오인식은 적극 출력한다.
-- 같은 강의에서 반복되는 전문용어의 오인식도 적극 출력한다.
-- 일반 명사구/술어구는 원문이 문맥상 성립하기 어렵고, 후보가 같은 위치에서 음가/문맥상 자연스럽게 복원할 때만 출력한다.
+## accepted 기준 (1단계 판정 기준)
+- 고유명사, 영문 토큰, 코드/함수명, 제품명, 슬라이드 표기 용어, 운영체제/컴퓨터 구조 전문용어의 오인식은 적극 broken 처리한다.
+- 같은 강의에서 반복되는 전문용어의 오인식도 적극 broken 처리한다.
+- 일반 명사구/술어구는 원문이 문맥상 성립하기 어려울 때만 broken 처리한다.
 - 비문은 전체 문장을 고치지 말고, 비문을 만든 깨진 단어/구절만 출력한다.
 
 ## rejected span
@@ -1026,7 +1090,9 @@ reason_code는 아래 번호 중 하나만 사용한다. 번호를 고를 수 �
             model=PASS3_TEXT_MODEL,
             system_prompt=(
                 "당신은 한국어 강의 STT 후보 edit 추출기입니다. "
-                "후보 문장 전체를 승인/거절하지 말고 원문에서 실제로 교체할 최소 from_text/to_text를 모두 출력하세요. "
+                "먼저 후보를 보지 않고 원문 자체가 성립하기 어려운 항목만 broken으로 판정한 뒤, "
+                "broken인 항목에 대해서만 후보에서 실제로 교체할 최소 from_text/to_text를 출력하세요. "
+                "후보 문장 전체를 승인/거절하지 마세요. "
                 "문장 전체, 절 전체, 새 문장은 출력하지 마세요. "
                 "JSON만 출력하세요."
             ),
@@ -1164,6 +1230,55 @@ def _expand_llm_change(raw_text: str, change: dict, candidates: list[dict]) -> l
     return expanded
 
 
+_BATCHIM_PARTICLE_PAIRS = [("을", "를"), ("은", "는"), ("이", "가"), ("과", "와")]
+_BATCHIM_PARTICLE_ONE_CHARS = {ch for pair in _BATCHIM_PARTICLE_PAIRS for ch in pair}
+
+
+def _hangul_batchim_index(ch: str) -> Optional[int]:
+    """완성형 한글 음절의 종성(받침) 인덱스. 0=받침없음, 1~27=받침 있음. 한글 음절이 아니면 None."""
+    if not ch:
+        return None
+    code = ord(ch)
+    if not (0xAC00 <= code <= 0xD7A3):
+        return None
+    return (code - 0xAC00) % 28
+
+
+def _fix_trailing_batchim_particle(text: str, insert_end: int, last_inserted_char: str) -> str:
+    """to_text 삽입 직후 원문에 남아있던 조사(을/를, 은/는, 이/가, 과/와, 으로/로)를
+    방금 삽입한 단어의 받침 유무에 맞게 결정론적으로 교정한다.
+
+    최소 span 교체 방식상 후보 단어만 바뀌고 뒤에 남은 조사는 원문 그대로 남는데,
+    받침 유무가 바뀌는 치환(예: 욕구를->목적을)에서 조사가 안 맞게 되는 문제를 막는다.
+    한글 음절이 아니거나(영어/숫자/기호) 판정 불가능한 경우는 건드리지 않는다.
+    """
+    final_index = _hangul_batchim_index(last_inserted_char)
+    if final_index is None:
+        return text
+    has_batchim = final_index != 0
+
+    one = text[insert_end:insert_end + 1]
+    two = text[insert_end:insert_end + 2]
+    if two == "으로" or one == "로":
+        current_len = 2 if two == "으로" else 1
+        # ㄹ받침(final_index==8)은 으로가 아니라 로를 쓴다.
+        want_short = (not has_batchim) or final_index == 8
+        correct = "로" if want_short else "으로"
+        current = two if current_len == 2 else one
+        if current != correct:
+            return text[:insert_end] + correct + text[insert_end + current_len:]
+        return text
+
+    if one in _BATCHIM_PARTICLE_ONE_CHARS:
+        for with_batchim, without_batchim in _BATCHIM_PARTICLE_PAIRS:
+            if one in (with_batchim, without_batchim):
+                correct = with_batchim if has_batchim else without_batchim
+                if one != correct:
+                    return text[:insert_end] + correct + text[insert_end + 1:]
+                break
+    return text
+
+
 def _apply_accepted_edits(raw_text: str, edits: list[dict]) -> tuple[str, list[dict]]:
     raw_text = str(raw_text or "")
     valid_edits: list[dict] = []
@@ -1192,6 +1307,8 @@ def _apply_accepted_edits(raw_text: str, edits: list[dict]) -> tuple[str, list[d
         raw_end = int(edit.get("raw_end", raw_start) or raw_start)
         to_text = str(edit.get("to_text", "") or "")
         corrected = corrected[:raw_start] + to_text + corrected[raw_end:]
+        if to_text:
+            corrected = _fix_trailing_batchim_particle(corrected, raw_start + len(to_text), to_text[-1])
     return corrected, valid_edits
 
 
@@ -1242,16 +1359,18 @@ def _build_pass2_batch_from_pass1(
     return [(global_i, seg.copy()) for global_i, seg in batch]
 
 
-def correct_segments_three_pass(
+def _prepare_pass3_jobs(
     segments: list[dict],
     metadata: list[dict],
     textualized_data: dict,
     textualized_dir: Path,
     use_pass2: bool = True,
-) -> list[dict]:
-    if not segments:
-        return []
+) -> dict:
+    """Pass1/Pass2를 실행해 Pass3 검증용 후보 job을 만든다.
 
+    Pass3 재현성 테스트 등에서 동일한 Pass1/2 후보 세트를 재사용하기 위해
+    correct_segments_three_pass에서 Pass1/2 단계만 분리했다.
+    """
     scene_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
     scene_meta_by_index = _build_scene_metadata_index(metadata)
     extracted_slide_texts = _load_integrated_slide_texts(
@@ -1353,12 +1472,13 @@ def correct_segments_three_pass(
             sub = no_slide[offset:offset + BATCH_SIZE]
             parallel_jobs.append((sub, "", "", ""))
 
+    pass12_workers = _effective_parallel_requests(PASS1_TEXT_MODEL, PASS2_TEXT_MODEL)
     print(
-        f"    총 {len(parallel_jobs)}개 batch를 최대 {PARALLEL_REQUESTS}개 병렬로 교정 중...",
+        f"    총 {len(parallel_jobs)}개 batch를 최대 {pass12_workers}개 병렬로 교정 중...",
         end="",
         flush=True,
     )
-    with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as executor:
+    with ThreadPoolExecutor(max_workers=pass12_workers) as executor:
         futures = [
             executor.submit(process_sub_batch, sub, context, slide_title, glossary)
             for sub, context, slide_title, glossary in parallel_jobs
@@ -1377,15 +1497,26 @@ def correct_segments_three_pass(
         for offset in range(0, len(items), PASS3_ITEM_BATCH_SIZE):
             pass3_jobs.append((items[offset:offset + PASS3_ITEM_BATCH_SIZE], context))
 
+    return {
+        "pass3_jobs": pass3_jobs,
+        "seg_scene": seg_scene,
+        "scene_meta_by_index": scene_meta_by_index,
+    }
+
+
+def _run_pass3_jobs(pass3_jobs: list[tuple[list[dict], str]]) -> dict[int, dict]:
+    """Pass3(merge_pass3_items)만 실행. PASS3_TEXT_MODEL을 바꿔가며 동일한
+    pass3_jobs(=동일 Pass1/2 후보)를 재사용해 재현성을 테스트할 때 쓴다."""
     all_corrections: dict[int, dict] = {}
     total_pass3_items = sum(len(items) for items, _ in pass3_jobs)
     if pass3_jobs:
+        pass3_workers = _effective_parallel_requests(PASS3_TEXT_MODEL)
         print(
             f"    Pass3 후보 {total_pass3_items}개를 {len(pass3_jobs)}개 batch로 검증 중...",
             end="",
             flush=True,
         )
-        with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as executor:
+        with ThreadPoolExecutor(max_workers=pass3_workers) as executor:
             futures = [
                 executor.submit(merge_pass3_items, items, context)
                 for items, context in pass3_jobs
@@ -1394,7 +1525,15 @@ def correct_segments_three_pass(
                 all_corrections.update(future.result())
                 print(".", end="", flush=True)
         print()
+    return all_corrections
 
+
+def _assemble_corrected_segments(
+    segments: list[dict],
+    seg_scene: dict[int, int],
+    scene_meta_by_index: dict[int, dict],
+    all_corrections: dict[int, dict],
+) -> list[dict]:
     corrected_segments: list[dict] = []
     applied_count = 0
     for i, seg in enumerate(segments):
@@ -1448,6 +1587,26 @@ def correct_segments_three_pass(
 
     print(f"    교정 적용: {applied_count}건 / 후보 출력: 0건 / 전체 {len(segments)}건")
     return corrected_segments
+
+
+def correct_segments_three_pass(
+    segments: list[dict],
+    metadata: list[dict],
+    textualized_data: dict,
+    textualized_dir: Path,
+    use_pass2: bool = True,
+) -> list[dict]:
+    if not segments:
+        return []
+
+    prepared = _prepare_pass3_jobs(segments, metadata, textualized_data, textualized_dir, use_pass2)
+    all_corrections = _run_pass3_jobs(prepared["pass3_jobs"])
+    return _assemble_corrected_segments(
+        segments,
+        prepared["seg_scene"],
+        prepared["scene_meta_by_index"],
+        all_corrections,
+    )
 
 
 # 외부 호출 호환용 별칭. 구현은 현재 3-pass이다.
