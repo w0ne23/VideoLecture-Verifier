@@ -766,9 +766,22 @@ ASR 오인식 가능성이 있는 후보는 Pass3가 검증할 수 있도록 출
         )
 
     try:
-        response = api_call_with_retry(call)
-        _add_usage(response, stage="stage3b_text_processor_pass1")
-        local_corrections = parse_batch_response(response.text or "")
+        if _is_ollama_model(PASS1_TEXT_MODEL):
+            response_text = _call_openai_text_correction(
+                prompt,
+                stage="stage3b_text_processor_pass1",
+                model=PASS1_TEXT_MODEL,
+                system_prompt=(
+                    "당신은 한국어 강의 STT 오인식 후보 생성기입니다. "
+                    "슬라이드 제목과 용어 사전만 참고하여 ASR 오인식 가능성이 높은 교정 후보를 JSON으로 출력하세요."
+                ),
+                max_output_tokens=TEXT_MAX_OUTPUT_TOKENS,
+            )
+        else:
+            response = api_call_with_retry(call)
+            _add_usage(response, stage="stage3b_text_processor_pass1")
+            response_text = response.text or ""
+        local_corrections = parse_batch_response(response_text)
     except Exception as exc:
         print(f"  [Pass1 오류 무시] {exc}")
         return {}
