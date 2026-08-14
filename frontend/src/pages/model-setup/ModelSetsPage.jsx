@@ -540,40 +540,47 @@ export default function ModelSetsPage() {
               </div>
 
               {availableLlms.length ? (
-                <div className="ms-llm-pick-grid">
-                  {availableLlms.map(llm => {
-                    const checked = selectedIds.includes(llm.id)
-                    const isMain = mainLlmId === llm.id
-                    return (
-                      <label
-                        className={`ms-llm-pick-card${checked ? ' ms-llm-pick-card--on' : ''}`}
-                        key={llm.id}
-                      >
-                        <input
-                          type="checkbox"
-                          className="ms-visually-hidden"
-                          checked={checked}
-                          onChange={() => toggleLlm(llm.id)}
-                        />
-                        <strong>{llm.version}</strong>
-                        {checked && (
-                          <button
-                            type="button"
-                            className={`ms-llm-pick-main-star${isMain ? ' ms-llm-pick-main-star--on' : ''}`}
-                            disabled={isMain}
-                            aria-label={isMain ? '메인으로 지정됨' : '메인으로 지정'}
-                            onClick={event => {
-                              event.preventDefault()
-                              event.stopPropagation()
-                              setMainLlmId(llm.id)
-                            }}
-                          >
-                            {isMain ? '★' : '☆'}
-                          </button>
-                        )}
-                      </label>
-                    )
-                  })}
+                <div className="ms-llm-pick-wrap">
+                  {selectedIds.length > 0 && (
+                    <p className="ms-main-bubble" role="note">
+                      대표 모델은 Claim 추출·슬라이드 오류 검사·웹 그라운딩처럼 모델 하나만 쓰는 단계에서 사용돼요.
+                    </p>
+                  )}
+                  <div className="ms-llm-pick-grid">
+                    {availableLlms.map(llm => {
+                      const checked = selectedIds.includes(llm.id)
+                      const isMain = mainLlmId === llm.id
+                      return (
+                        <label
+                          className={`ms-llm-pick-card${checked ? ' ms-llm-pick-card--on' : ''}`}
+                          key={llm.id}
+                        >
+                          <input
+                            type="checkbox"
+                            className="ms-visually-hidden"
+                            checked={checked}
+                            onChange={() => toggleLlm(llm.id)}
+                          />
+                          <strong>{llm.version}</strong>
+                          {checked && (
+                            <button
+                              type="button"
+                              className={`ms-llm-pick-main-star${isMain ? ' ms-llm-pick-main-star--on' : ''}`}
+                              disabled={isMain}
+                              aria-label={isMain ? '메인으로 지정됨' : '메인으로 지정'}
+                              onClick={event => {
+                                event.preventDefault()
+                                event.stopPropagation()
+                                setMainLlmId(llm.id)
+                              }}
+                            >
+                              {isMain ? '★' : '☆'}
+                            </button>
+                          )}
+                        </label>
+                      )
+                    })}
+                  </div>
                 </div>
               ) : (
                 <p className="ms-empty">등록된 LLM이 없어요. 먼저 LLM 모델 화면에서 등록해 주세요.</p>
