@@ -1485,6 +1485,36 @@ button.ms-stage-box { cursor: pointer; }
 }
 .ms-llm-pick-main-star:hover:not(:disabled) { color: #f5a623; }
 .ms-llm-pick-main-star--on { color: #f5a623; cursor: default; }
+.ms-llm-pick-wrap { position: relative; }
+.ms-main-bubble { display: none; }
+@media (min-width: 1400px) {
+  .ms-main-bubble {
+    display: block;
+    position: absolute;
+    top: 0;
+    right: calc(100% + 16px);
+    width: 190px;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid #c4c9ec;
+    border-radius: 10px;
+    background: #eef1fb;
+    color: #1e3a6e;
+    font-size: 0.72rem;
+    line-height: 1.4;
+  }
+  .ms-main-bubble::after {
+    content: '';
+    position: absolute;
+    top: 14px;
+    right: -6px;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 6px 0 6px 6px;
+    border-color: transparent transparent transparent #eef1fb;
+  }
+}
 .ms-visually-hidden {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
