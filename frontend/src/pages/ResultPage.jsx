@@ -47,6 +47,11 @@ export default function ResultPage() {
       <div className="detail-head">
         <button type="button" className="btn" onClick={goToList}>← 목록으로</button>
         <h2>{lecture.title || lectureId}</h2>
+        {phase === PHASES.VERIFY_READY && (
+          <button type="button" className="btn" onClick={() => navigate(`/result/${lectureId}/stages`)}>
+            검증 과정 보기
+          </button>
+        )}
       </div>
 
       {lecture.video_url && (

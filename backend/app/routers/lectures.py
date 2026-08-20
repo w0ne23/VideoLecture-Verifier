@@ -143,6 +143,11 @@ async def get_lecture_result(lecture_id: str, db: AsyncSession = Depends(get_db)
     return await lecture_service.get_verified_result(db, lecture_id)
 
 
+@router.get('/{lecture_id}/artifacts/{stage}')
+async def get_lecture_artifact(lecture_id: str, stage: str, db: AsyncSession = Depends(get_db)):
+    return await lecture_service.get_lecture_artifact(db, lecture_id, stage)
+
+
 @router.post('/{lecture_id}/jobs')
 async def create_lecture_job(lecture_id: str, mode: Optional[str] = Query(None), db: AsyncSession = Depends(get_db)):
     result = await lecture_service.create_job(db, lecture_id, mode=mode)

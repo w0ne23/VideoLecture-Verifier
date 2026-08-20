@@ -32,6 +32,12 @@ export async function getLectureResult(lectureId) {
   return res.json()
 }
 
+export async function getLectureArtifact(lectureId, stage) {
+  const res = await fetch(`${API_BASE}/lectures/${lectureId}/artifacts/${stage}`)
+  if (!res.ok) throw new Error(await readError(res, 'Artifact fetch failed'))
+  return res.json()
+}
+
 export async function retryLecture(lectureId) {
   const res = await fetch(`${API_BASE}/lectures/${lectureId}/jobs?mode=verify`, { method: 'POST' })
   if (!res.ok) throw new Error(await readError(res, 'Retry failed'))

@@ -7,6 +7,7 @@ import UploadPage from './pages/UploadPage'
 import LecturesPage from './pages/LecturesPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
+import VerifyStageReportPage from './pages/VerifyStageReportPage'
 import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
@@ -52,6 +53,7 @@ function AppShell() {
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
             <Route path="/result/:lectureId" element={<ResultPage />} />
+            <Route path="/result/:lectureId/stages" element={<VerifyStageReportPage />} />
             <Route path="/model-setup" element={<ModelSetupLayout />}>
               <Route index element={<ModelSetupEntryPage />} />
               <Route path="models" element={<ModelRegistryPage />} />
