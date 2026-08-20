@@ -30,7 +30,7 @@ export const PROVIDERS_META = {
     versions: ['DeepSeek V4', 'DeepSeek V4 Flash'],
   },
   ollama: {
-    name: 'Ollama (로컬)',
+    name: 'Ollama',
     prefix: null,
     versions: ['Gemma 3 27B', 'Gemma 3 9B', 'Qwen 3 32B', 'Qwen 3 14B'],
     requiresKey: false,

@@ -5,13 +5,13 @@ import llmSetsIcon from '../../assets/group1-icon-gold.png'
 const ENTRIES = [
   {
     path: '/model-setup/models',
-    title: 'LLM 모델',
+    title: 'LLM 모델 등록',
     desc: '등록된 LLM을 확인하고, API 키로 새 모델을 등록합니다.',
     icon: brainIcon,
   },
   {
     path: '/model-setup/sets',
-    title: 'LLM 셋',
+    title: 'Multi LLM 셋 만들기',
     desc: '만들어 둔 셋을 확인·적용하고, 새 셋을 구성합니다.',
     icon: llmSetsIcon,
   },
