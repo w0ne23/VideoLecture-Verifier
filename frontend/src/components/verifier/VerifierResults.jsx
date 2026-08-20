@@ -33,6 +33,14 @@ const VERDICT_LABELS = {
   unclear: '불명확',
 }
 
+const SOURCE_PRIORITY_LABELS = {
+  official_docs: '공식 문서',
+  standards_or_government: '표준/정부 자료',
+  academic: '학술 자료',
+  educational: '교육 자료',
+  encyclopedia: '백과사전',
+}
+
 // 지식 오류로 분류되는 4개 카테고리 + 슬라이드 오류를 합쳐 5개 필터 버튼을 구성한다.
 const KNOWLEDGE_CATEGORY_KEYS = ['factual_error', 'temporal_error', 'scope_overclaim', 'confusing_explanation']
 const CATEGORY_DEFS = [
@@ -257,14 +265,22 @@ function TextBlock({ children }) {
   return <p className="claim-detail-text">{children}</p>
 }
 
-function DetailGroup({ title, children }) {
+function DetailGroup({ title, children, noDivider = false }) {
   if (!children) return null
   return (
-    <div className="claim-detail-group">
+    <div className={cx('claim-detail-group', noDivider && 'claim-detail-group--no-divider')}>
       <h4>{title}</h4>
       {children}
     </div>
   )
+}
+
+// LLM이 "원문 → 수정문" 형태로 쓰는 경우가 있는데, 원문은 바로 위 '원 발화' 행에 이미 있으므로
+// 화살표 뒤 수정문만 남긴다.
+function stripArrowPrefix(text) {
+  if (!text) return text
+  const idx = text.indexOf('→')
+  return idx === -1 ? text : text.slice(idx + 1).trim()
 }
 
 function ScoreGrid({ item }) {
@@ -280,14 +296,10 @@ function ScoreGrid({ item }) {
 
   if (!rows.length) return null
   return (
-    <div className="claim-score-grid">
-      {rows.map(([label, value]) => (
-        <div className="claim-score-cell" key={label}>
-          <span>{label}</span>
-          <strong>{value}</strong>
-        </div>
-      ))}
-    </div>
+    <details className="claim-score-details">
+      <summary>점수</summary>
+      <p className="claim-detail-text">{rows.map(([label, value]) => `${label} ${value}`).join(' · ')}</p>
+    </details>
   )
 }
 
@@ -304,7 +316,7 @@ function CompositeScoringPanel({ item }) {
     : [...new Set([...Object.keys(scores), ...Object.keys(contributions)])]
 
   return (
-    <DetailGroup title="복합 오류 점수">
+    <DetailGroup title="복합 오류 점수" noDivider>
       <div className="composite-summary">
         <span>방식: {scoring.method || 'weighted_expected_severity'}</span>
         {scoring.primary_issue_type_label && <span>대표 유형: {scoring.primary_issue_type_label}</span>}
@@ -329,48 +341,6 @@ function CompositeScoringPanel({ item }) {
         </div>
       )}
     </DetailGroup>
-  )
-}
-
-function SearchQueries({ queries }) {
-  if (!queries) return null
-  const rows = isObject(queries)
-    ? Object.entries(queries).flatMap(([model, values]) => asArray(values).map(value => ({ model, value })))
-    : asArray(queries).map(value => ({ model: '', value }))
-
-  if (!rows.length) return null
-  return (
-    <div className="grounding-subblock">
-      <strong>검색어</strong>
-      <ul className="grounding-query-list">
-        {rows.map((row, index) => (
-          <li key={`${row.model}-${row.value}-${index}`}>
-            {row.model && <span>{row.model}</span>}
-            <code>{row.value}</code>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-function SourceList({ sources, title = '근거 출처' }) {
-  const items = asArray(sources).filter(sourceUrl)
-  if (!items.length) return null
-  return (
-    <div className="grounding-subblock">
-      <strong>{title}</strong>
-      <div className="grounding-source-list">
-        {items.map((source, index) => {
-          const url = sourceUrl(source)
-          return (
-            <a href={url} target="_blank" rel="noreferrer" key={`${url}-${index}`}>
-              {sourceLabel(source, index)}
-            </a>
-          )
-        })}
-      </div>
-    </div>
   )
 }
 
@@ -421,7 +391,7 @@ function VerifiedSources({ trials }) {
             <div className="grounding-diagnostic-head">
               <strong>{source.domain || source.url || `source ${index + 1}`}</strong>
               {source.fetch_status && <span>{source.fetch_status}</span>}
-              {source.source_priority_label && <span>{source.source_priority_label}</span>}
+              {source.source_priority_label && <span>{SOURCE_PRIORITY_LABELS[source.source_priority_label] || source.source_priority_label}</span>}
               {source.trust_score !== undefined && <span>trust {formatRatio(source.trust_score)}</span>}
             </div>
             {source.url && <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>}
@@ -453,19 +423,59 @@ function WebGroundingPanel({ item }) {
       ? compactEvidence
       : evidence.web_sources
 
+  const judgmentParts = [
+    grounding.status && (STATUS_LABELS[grounding.status] || grounding.status),
+    grounding.claim_verdict && (VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict),
+    grounding.selected_source_priority_label
+      ? `${SOURCE_PRIORITY_LABELS[grounding.selected_source_priority_label] || grounding.selected_source_priority_label} 선정 ${grounding.selected_source_count ?? 0}건`
+      : grounding.selected_source_count !== undefined && `선정 ${grounding.selected_source_count}건`,
+  ].filter(Boolean)
+
+  const passageText = asArray(passages)
+    .map(passage => passage.key_sentence || passage.quote_or_paragraph || passage.matched_text)
+    .filter(Boolean)
+    .join(' / ')
+
+  const queryRows = isObject(grounding.search_queries)
+    ? Object.entries(grounding.search_queries).flatMap(([model, values]) => asArray(values).map(value => ({ model, value })))
+    : asArray(grounding.search_queries).map(value => ({ model: '', value }))
+
+  const sourceItems = asArray(sources).filter(sourceUrl)
+
+  const queryValue = queryRows.length > 0
+    ? queryRows.map((row, index) => (
+        <span key={`${row.model}-${row.value}-${index}`}>
+          {index > 0 && ', '}
+          {row.model && `${row.model}: `}
+          <code>{row.value}</code>
+        </span>
+      ))
+    : null
+
+  const sourceValue = sourceItems.length > 0
+    ? sourceItems.map((source, index) => {
+        const url = sourceUrl(source)
+        return (
+          <span key={`${url}-${index}`}>
+            {index > 0 && ' · '}
+            <a href={url} target="_blank" rel="noreferrer">{sourceLabel(source, index)}</a>
+          </span>
+        )
+      })
+    : null
+
   return (
-    <DetailGroup title="웹 그라운딩">
-      <div className="grounding-status-row">
-        {grounding.status && <span>{STATUS_LABELS[grounding.status] || grounding.status}</span>}
-        {grounding.claim_verdict && <span>{VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict}</span>}
-        {grounding.selected_source_priority_label && <span>{grounding.selected_source_priority_label}</span>}
-        {grounding.selected_source_count !== undefined && <span>선정 {grounding.selected_source_count}건</span>}
+    <DetailGroup title="웹 검색 결과" noDivider>
+      <div className="grounding-card">
+        <dl className="claim-detail-list">
+          <DetailRow label="판단 결과" value={judgmentParts.join(', ')} wide />
+          <DetailRow label="근거 문단" value={passageText} wide />
+          <DetailRow label="자료 요약" value={grounding.evidence_summary} wide />
+          <DetailRow label="판정 이유" value={grounding.reason} wide />
+          <DetailRow label="검색어" value={queryValue} wide />
+          <DetailRow label="근거 출처" value={sourceValue} wide />
+        </dl>
       </div>
-      <TextBlock>{grounding.reason}</TextBlock>
-      <TextBlock>{grounding.evidence_summary}</TextBlock>
-      <SearchQueries queries={grounding.search_queries} />
-      <SourceList sources={sources} />
-      <PassageList passages={passages} />
       <VerifiedSources trials={trials} />
     </DetailGroup>
   )
@@ -481,7 +491,7 @@ function ModelJudgments({ item }) {
 
   if (!results.length) return null
   return (
-    <DetailGroup title="모델별 판단">
+    <DetailGroup title="모델별 판단" noDivider>
       <div className="model-judgment-list">
         {results.map((judgment, index) => (
           <div className="model-judgment" key={`${judgment.model || 'model'}-${judgment.category || ''}-${index}`}>
@@ -492,7 +502,6 @@ function ModelJudgments({ item }) {
               {judgment.final_model_score !== undefined && <span>{formatScore(judgment.final_model_score)}</span>}
             </div>
             <TextBlock>{judgment.reason || judgment.explanation || judgment.summary}</TextBlock>
-            {judgment.minimal_fix && <p className="model-minimal-fix">수정안: {judgment.minimal_fix}</p>}
           </div>
         ))}
       </div>
@@ -504,14 +513,10 @@ function ClaimDetail({ item }) {
   const problem = item.problem || {}
   const feedback = item.professor_feedback || {}
   const evidence = item.evidence || {}
-  const verifier = item.classified_issue_verifier || {}
   const summary = problem.summary || feedback.summary
   const rawWhyWrong = problem.why_wrong || feedback.why_wrong
   const rawRecommendation = problem.recommendation || feedback.suggested_rephrase
   const correctInfo = problem.correct_info
-  const whyWrong = uniqueText(rawWhyWrong, [summary])
-  const recommendation = uniqueText(rawRecommendation, [summary, rawWhyWrong, correctInfo])
-  const teachingNote = uniqueText(feedback.teaching_note, [summary, rawWhyWrong, rawRecommendation, correctInfo])
   const evidenceInContext = uniqueText(evidence.evidence_in_context, [
     summary,
     rawWhyWrong,
@@ -524,24 +529,16 @@ function ClaimDetail({ item }) {
     <div className="claim-detail-body">
       <DetailGroup title="문제 요약">
         <dl className="claim-detail-list">
-          <DetailRow label="정규화 주장" value={item.resolved_claim} wide />
           <DetailRow label="원 발화" value={item.claim_text} wide />
-          <DetailRow label="문제 내용" value={problem.problematic_content} wide />
-          <DetailRow label="요약" value={summary} wide />
-          <DetailRow label="왜 문제인가" value={whyWrong} wide />
-          <DetailRow label="권장 수정" value={recommendation} wide />
-          <DetailRow label="정정 정보" value={correctInfo} wide />
-          <DetailRow label="수업 메모" value={teachingNote} wide />
+          <DetailRow label="판단 대상 주장" value={item.resolved_claim} wide />
+          <DetailRow label="수정 제안" value={stripArrowPrefix(correctInfo)} wide />
           <DetailRow label="문맥 근거" value={evidenceInContext} wide />
-          <DetailRow label="검토 필요" value={verifier.needs_manual_review === true ? '예' : verifier.needs_manual_review === false ? '아니오' : ''} />
         </dl>
       </DetailGroup>
-      <DetailGroup title="점수">
-        <ScoreGrid item={item} />
-      </DetailGroup>
       <CompositeScoringPanel item={item} />
-      <WebGroundingPanel item={item} />
       <ModelJudgments item={item} />
+      <WebGroundingPanel item={item} />
+      <ScoreGrid item={item} />
       <details className="claim-debug-json">
         <summary>디버그 JSON</summary>
         <pre>{JSON.stringify(item, null, 2)}</pre>

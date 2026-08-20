@@ -803,6 +803,7 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 }
 .claim-detail-body { display: flex; flex-direction: column; gap: 12px; padding-top: 10px; }
 .claim-detail-group { border-top: 1px solid var(--surface-2); padding-top: 12px; }
+.claim-detail-group--no-divider { border-top: none; padding-top: 0; }
 .claim-detail-group h4 { margin: 0 0 8px; font-size: 0.86rem; color: var(--text); }
 .claim-detail-list {
   margin: 0; display: grid; grid-template-columns: minmax(92px, 0.24fr) 1fr; gap: 7px 12px;
@@ -813,14 +814,8 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .claim-detail-row--wide dd { line-height: 1.55; }
 .claim-detail-text { margin: 0; font-size: 0.84rem; color: var(--text); white-space: pre-wrap; }
 
-.claim-score-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px;
-}
-.claim-score-cell {
-  min-height: 58px; border: 1px solid var(--surface-2); border-radius: 8px; padding: 9px 10px; background: var(--surface-2);
-}
-.claim-score-cell span { display: block; color: var(--muted); font-size: 0.74rem; }
-.claim-score-cell strong { display: block; margin-top: 2px; font-size: 0.98rem; color: var(--text); }
+.claim-score-details { margin-top: 2px; }
+.claim-score-details > p { margin-top: 6px; }
 
 .composite-summary {
   display: flex; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 8px; color: var(--muted); font-size: 0.8rem;
@@ -833,19 +828,17 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .composite-row:first-child { border-top: none; }
 .composite-row--head { background: var(--surface-2); color: var(--muted); font-size: 0.74rem; font-weight: 600; }
 
-.grounding-status-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .grounding-subblock { margin-top: 10px; }
 .grounding-subblock > strong {
   display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.76rem;
 }
-.grounding-query-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
-.grounding-query-list li { display: flex; align-items: flex-start; gap: 6px; font-size: 0.78rem; }
-.grounding-query-list span { color: var(--muted); min-width: 42px; }
-.grounding-query-list code {
-  white-space: normal; word-break: break-word; background: var(--surface-2); border-radius: 6px; padding: 2px 6px;
+.grounding-card {
+  border: 1px solid var(--surface-2); border-radius: 8px; padding: 9px 10px; background: var(--surface-2);
 }
-.grounding-source-list { display: flex; flex-direction: column; gap: 5px; }
-.grounding-source-list a,
+.grounding-card .claim-detail-list a { color: var(--primary); overflow-wrap: anywhere; }
+.grounding-card .claim-detail-list code {
+  white-space: normal; word-break: break-word; background: var(--card); border-radius: 6px; padding: 2px 6px;
+}
 .grounding-passage a,
 .grounding-diagnostic a {
   color: var(--primary); font-size: 0.8rem; overflow-wrap: anywhere;
@@ -871,12 +864,12 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
 .model-judgment-head span {
   padding: 1px 7px; border-radius: 999px; background: var(--surface-2);
 }
-.grounding-relevance,
-.model-minimal-fix {
+.grounding-relevance {
   margin: 6px 0 0; color: var(--muted); font-size: 0.8rem; white-space: pre-wrap;
 }
 .grounding-diagnostics { margin-top: 10px; }
 .grounding-diagnostics summary,
+.claim-score-details summary,
 .claim-debug-json summary {
   font-size: 0.74rem; color: var(--muted); cursor: pointer;
 }
