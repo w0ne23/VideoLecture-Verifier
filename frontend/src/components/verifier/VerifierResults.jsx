@@ -42,12 +42,9 @@ const CATEGORY_DEFS = [
   { key: 'confusing_explanation', label: '혼동 가능 설명' },
   { key: 'slide', label: '슬라이드 오류' },
 ]
-const TYPE_SORT_ORDER = CATEGORY_DEFS.map(def => def.key)
-
 const SORT_OPTIONS = [
   { key: 'time', label: '시간순' },
   { key: 'severity', label: '심각도순' },
-  { key: 'type', label: '유형별' },
 ]
 
 function cx(...classNames) {
@@ -738,12 +735,6 @@ function sortEntries(entries, mode) {
       if (a.severity == null) return 1
       if (b.severity == null) return -1
       return b.severity - a.severity
-    })
-  } else if (mode === 'type') {
-    sorted.sort((a, b) => {
-      const aRank = TYPE_SORT_ORDER.indexOf(a.categories[0])
-      const bRank = TYPE_SORT_ORDER.indexOf(b.categories[0])
-      return (aRank === -1 ? TYPE_SORT_ORDER.length : aRank) - (bRank === -1 ? TYPE_SORT_ORDER.length : bRank)
     })
   } else {
     const rankOf = buildTimeRank(sorted)
