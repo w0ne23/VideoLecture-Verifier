@@ -855,7 +855,6 @@ export default function VerifierResults({ verifier, onSeek }) {
   const confirmed = verifier.final_confirmed_claims || []
   const needsReview = verifier.needs_review_claims || []
   const slideErrors = verifier.slide_errors || []
-  const summary = verifier.summary || {}
 
   // 기각된 주장은 오류가 아니므로 총 개수·필터·목록 어디에도 포함하지 않는다.
   const knowledgeItems = [...confirmed, ...needsReview]
@@ -866,12 +865,6 @@ export default function VerifierResults({ verifier, onSeek }) {
       <div className="result-total">
         <span className="result-total-label">이 영상의 총 오류 개수</span>
         <strong className="result-total-value">{totalCount}</strong>
-      </div>
-
-      <div className="result-meta-panel">
-        {verifier.verification_date && <span>검증 시각: {verifier.verification_date}</span>}
-        {Array.isArray(verifier.models) && verifier.models.length > 0 && <span>모델: {verifier.models.join(', ')}</span>}
-        {summary.web_grounding_adjusted_count !== undefined && <span>점수 조정: {summary.web_grounding_adjusted_count}건</span>}
       </div>
 
       <IssueExplorer knowledgeItems={knowledgeItems} slideErrors={slideErrors} onSeek={onSeek} />
