@@ -1,6 +1,6 @@
-import { useCallback } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import SiteHeader from './components/layout/SiteHeader'
 import MainPage from './pages/MainPage'
 import VerifyEntryPage from './pages/VerifyEntryPage'
 import UploadPage from './pages/UploadPage'
@@ -13,7 +13,6 @@ import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
 import ModelSetsPage from './pages/model-setup/ModelSetsPage'
 import ModelRegistryPage from './pages/model-setup/ModelRegistryPage'
-import ModelSetupFab from './components/model-setup/ModelSetupFab'
 
 const queryClient = new QueryClient()
 
@@ -23,27 +22,13 @@ function RedirectPresetEdit() {
 }
 
 function AppShell() {
-  const navigate = useNavigate()
-  const goHome = useCallback(() => navigate('/'), [navigate])
+  const location = useLocation()
+  const isHome = location.pathname === '/'
 
   return (
     <>
-      <header className="app-header">
-        <div className="app-header-inner">
-          <h1 onClick={goHome}>
-            <span className="app-logo-mark" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path d="M12 2.5l3.4 6.4-3.4 1.1-3.4-1.1 3.4-6.4z" fill="currentColor" />
-                <rect x="9" y="9.5" width="6" height="9.5" rx="1.4" fill="currentColor" opacity="0.85" />
-                <path d="M6.5 21h11" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </span>
-            LID
-          </h1>
-          <p>강의 영상 속 오류를 찾아 품질 향상으로 이끈다!</p>
-        </div>
-      </header>
-      <div className="app">
+      <SiteHeader />
+      <div className={isHome ? 'app app--home' : 'app'}>
         <main>
           <Routes>
             <Route path="/" element={<MainPage />} />
@@ -68,7 +53,6 @@ function AppShell() {
           </Routes>
         </main>
       </div>
-      <ModelSetupFab />
     </>
   )
 }

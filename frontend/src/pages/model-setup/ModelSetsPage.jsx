@@ -688,7 +688,8 @@ export default function ModelSetsPage() {
                         )) : (
                           <span className="ms-preset-tag ms-preset-tag--empty">모델 미설정</span>
                         )}
-                        <span className="ms-preset-tag ms-preset-tag--meta">
+                        <span className={`ms-preset-tag ms-preset-tag--meta${summary.includeGrounding ? '' : ' ms-preset-tag--off'}`}>
+                          <span aria-hidden="true">{summary.includeGrounding ? '✓' : '✕'}</span>
                           웹그라운딩 {summary.includeGrounding ? '포함' : '미포함'}
                         </span>
                       </div>
@@ -792,28 +793,13 @@ export default function ModelSetsPage() {
               )) : (
                 <span className="ms-preset-tag ms-preset-tag--empty">모델 미설정</span>
               )}
-              <span className="ms-preset-tag ms-preset-tag--meta">
+              <span className={`ms-preset-tag ms-preset-tag--meta${detailSummary?.includeGrounding ? '' : ' ms-preset-tag--off'}`}>
+                <span aria-hidden="true">{detailSummary?.includeGrounding ? '✓' : '✕'}</span>
                 웹그라운딩 {detailSummary?.includeGrounding ? '포함' : '미포함'}
               </span>
             </div>
 
             {detailFlow && <PresetFlow flow={detailFlow} />}
-
-            <div className="ms-preset-detail-actions">
-              <button
-                className="ms-btn-secondary"
-                type="button"
-                onClick={() => {
-                  setDetailId(null)
-                  startEdit(detailProfile.id)
-                }}
-              >
-                수정
-              </button>
-              <button className="ms-btn-secondary" type="button" onClick={() => setDetailId(null)}>
-                닫기
-              </button>
-            </div>
           </div>
         </div>,
         document.body,

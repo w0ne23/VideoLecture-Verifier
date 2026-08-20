@@ -13,7 +13,7 @@ import {
   versionToModelId,
 } from '../../components/model-setup/llmRegistry'
 
-const NO_KEY_LABEL = '로컬 (키 불필요)'
+const NO_KEY_LABEL = '키 불필요'
 
 export default function ModelRegistryPage() {
   const navigate = useNavigate()
