@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 const TYPE_LABELS = {
   factual_error: '사실 오류',
@@ -32,6 +32,23 @@ const VERDICT_LABELS = {
   claim_true: '주장 맞음',
   unclear: '불명확',
 }
+
+// 지식 오류로 분류되는 4개 카테고리 + 슬라이드 오류를 합쳐 5개 필터 버튼을 구성한다.
+const KNOWLEDGE_CATEGORY_KEYS = ['factual_error', 'temporal_error', 'scope_overclaim', 'confusing_explanation']
+const CATEGORY_DEFS = [
+  { key: 'factual_error', label: '사실 오류' },
+  { key: 'temporal_error', label: '오래된 내용' },
+  { key: 'scope_overclaim', label: '과도한 일반화' },
+  { key: 'confusing_explanation', label: '혼동 가능 설명' },
+  { key: 'slide', label: '슬라이드 오류' },
+]
+const TYPE_SORT_ORDER = CATEGORY_DEFS.map(def => def.key)
+
+const SORT_OPTIONS = [
+  { key: 'time', label: '시간순' },
+  { key: 'severity', label: '심각도순' },
+  { key: 'type', label: '유형별' },
+]
 
 function cx(...classNames) {
   return classNames.filter(Boolean).join(' ')
@@ -122,7 +139,20 @@ function normalizeCandidateKey(candidate) {
   return candidate?.category || candidate?.issue_type || candidate?.type || candidate?.key || ''
 }
 
-function compositeTypeLabel(item) {
+function isCompositeItem(item) {
+  const type = item.feedback_type || item.category || item.issue_type || item.type
+  return type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite
+}
+
+// 지식 오류 항목이 속하는 카테고리 목록을 반환한다.
+// 단일 유형이면 그 유형 하나, 복합 오류면 구성 후보 카테고리 전부를 반환해
+// 태그로도, 필터 버튼 매칭에도 그대로 쓸 수 있게 한다.
+function itemCategories(item) {
+  const type = item.feedback_type || item.category || item.issue_type || item.type
+  if (!isCompositeItem(item)) {
+    return type ? [type] : []
+  }
+
   const verifier = item.classified_issue_verifier || {}
   const scoring = item.composite_scoring || verifier.composite_scoring || {}
   const candidateKeys = [
@@ -134,25 +164,8 @@ function compositeTypeLabel(item) {
     .map(normalizeCandidateKey)
     .filter(Boolean)
 
-  const labels = [...new Set(candidateKeys.map(labelForType))]
-  if (labels.length) return `복합 오류(${labels.join(', ')})`
-  return item.feedback_label || item.category_label || '복합 오류'
-}
-
-function issueTypeLabel(item) {
-  const type = item.feedback_type || item.category || item.issue_type || item.type
-  if (type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite) {
-    return compositeTypeLabel(item)
-  }
-  return item.feedback_label || item.category_label || labelForType(type)
-}
-
-function issueTypeKey(item) {
-  const type = item.feedback_type || item.category || item.issue_type || item.type
-  if (type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite) {
-    return 'composite_issue'
-  }
-  return type || 'unknown'
+  const known = [...new Set(candidateKeys)].filter(key => KNOWLEDGE_CATEGORY_KEYS.includes(key))
+  return known.length ? known : ['composite_issue']
 }
 
 function getSeverity(item) {
@@ -174,6 +187,12 @@ function getSeverity(item) {
     ['severity_score', 'final_severity_score']
   )
   return score == null ? null : score * 100
+}
+
+function getSlideSeverity(item) {
+  const num = Number(item.severity_score)
+  if (!Number.isFinite(num)) return null
+  return num <= 1 ? num * 100 : num
 }
 
 function getGrounding(item) {
@@ -440,12 +459,10 @@ function WebGroundingPanel({ item }) {
   return (
     <DetailGroup title="웹 그라운딩">
       <div className="grounding-status-row">
-        {grounding.status && <span className="claim-tag claim-tag--grounding">{STATUS_LABELS[grounding.status] || grounding.status}</span>}
-        {grounding.claim_verdict && <span className="claim-tag">{VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict}</span>}
-        {grounding.selected_source_priority_label && <span className="claim-tag">{grounding.selected_source_priority_label}</span>}
-        {(grounding.selected_source_count !== undefined || compactEvidence.length > 0) && (
-          <span className="claim-tag">선정 {grounding.selected_source_count ?? compactEvidence.length}건</span>
-        )}
+        {grounding.status && <span>{STATUS_LABELS[grounding.status] || grounding.status}</span>}
+        {grounding.claim_verdict && <span>{VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict}</span>}
+        {grounding.selected_source_priority_label && <span>{grounding.selected_source_priority_label}</span>}
+        {grounding.selected_source_count !== undefined && <span>선정 {grounding.selected_source_count}건</span>}
       </div>
       <TextBlock>{grounding.reason}</TextBlock>
       <TextBlock>{grounding.evidence_summary}</TextBlock>
@@ -536,16 +553,14 @@ function ClaimDetail({ item }) {
   )
 }
 
-function ClaimCard({ item, index, tone, onSeek }) {
+function ClaimCard({ item, index, categories, onSeek }) {
   const [open, setOpen] = useState(false)
   const claimText = pick(item, ['resolved_claim', 'claim_text', 'claim', 'statement', 'text', 'content'])
   const status = item.status || item.severity_status || pick(item, ['verdict', 'final_verdict', 'decision'])
   const severity = getSeverity(item)
-  const grounding = getGrounding(item)
   const { slideNumber, startTime, endTime } = locationOf(item)
   const timeLabel = timeRangeLabel(startTime, endTime)
-  const typeLabel = issueTypeLabel(item)
-  const typeKey = issueTypeKey(item)
+  const primaryCategory = categories[0] || 'factual_error'
 
   const toggle = () => setOpen(prev => !prev)
   const handleKeyDown = event => {
@@ -555,7 +570,7 @@ function ClaimCard({ item, index, tone, onSeek }) {
   }
 
   return (
-    <article className={cx(`claim-card claim-card--${tone}`, open && 'claim-card--open')}>
+    <article className={cx(`claim-card claim-card--${primaryCategory}`, open && 'claim-card--open')}>
       <div
         className="claim-card-summary"
         role="button"
@@ -567,9 +582,12 @@ function ClaimCard({ item, index, tone, onSeek }) {
         <div className="claim-card-main">
           <div className="claim-card-head">
             <span className="claim-card-index">#{index + 1}</span>
-            {typeLabel && <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${typeKey}`)}>{typeLabel}</span>}
+            {categories.map(catKey => (
+              <span key={catKey} className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${catKey}`)}>
+                {labelForType(catKey)}
+              </span>
+            ))}
             {status && <span className="claim-tag claim-tag--verdict">{STATUS_LABELS[status] || status}</span>}
-            {grounding.status && <span className="claim-tag claim-tag--grounding">{STATUS_LABELS[grounding.status] || grounding.status}</span>}
             {slideNumber && <span className="claim-location-chip">slide {slideNumber}</span>}
             {startTime != null && (
               <button
@@ -673,78 +691,190 @@ function SlideErrorCard({ item, index }) {
   )
 }
 
-function Section({ title, items, tone, onSeek, defaultOpen = true, renderItem }) {
-  const [open, setOpen] = useState(defaultOpen)
+function buildEntries(knowledgeItems, slideErrors) {
+  const claimEntries = knowledgeItems.map((item, sourceIndex) => ({
+    kind: 'claim',
+    item,
+    sourceIndex,
+    categories: itemCategories(item),
+    severity: getSeverity(item),
+    // 지식 오류는 실제 영상 재생 시간(초)을 정렬 키로 쓴다.
+    time: locationOf(item).startTime,
+  }))
+  const slideEntries = slideErrors.map((item, sourceIndex) => ({
+    kind: 'slide',
+    item,
+    sourceIndex,
+    categories: ['slide'],
+    severity: getSlideSeverity(item),
+    // 슬라이드 오류에는 초 단위 재생 시간이 없고 슬라이드 번호만 있다(스케일이 다름).
+    time: item.slide_number != null ? Number(item.slide_number) : null,
+  }))
+  return [...claimEntries, ...slideEntries]
+}
+
+// 지식 오류(초)와 슬라이드 오류(슬라이드 번호)는 척도가 달라 값을 그대로 비교할 수 없다.
+// 각자의 그룹 안에서 0~1 사이 상대적 위치로 정규화한 뒤 섞어야 하나의 시간순 목록처럼 보인다.
+function buildTimeRank(entries) {
+  const claimTimes = entries.filter(entry => entry.kind === 'claim' && entry.time != null).map(entry => entry.time)
+  const slideTimes = entries.filter(entry => entry.kind === 'slide' && entry.time != null).map(entry => entry.time)
+  const claimMin = claimTimes.length ? Math.min(...claimTimes) : 0
+  const claimMax = claimTimes.length ? Math.max(...claimTimes) : 0
+  const slideMin = slideTimes.length ? Math.min(...slideTimes) : 0
+  const slideMax = slideTimes.length ? Math.max(...slideTimes) : 0
+
+  return entry => {
+    if (entry.time == null) return null
+    if (entry.kind === 'slide') return slideMax === slideMin ? 0 : (entry.time - slideMin) / (slideMax - slideMin)
+    return claimMax === claimMin ? 0 : (entry.time - claimMin) / (claimMax - claimMin)
+  }
+}
+
+function sortEntries(entries, mode) {
+  const sorted = [...entries]
+  if (mode === 'severity') {
+    sorted.sort((a, b) => {
+      if (a.severity == null && b.severity == null) return 0
+      if (a.severity == null) return 1
+      if (b.severity == null) return -1
+      return b.severity - a.severity
+    })
+  } else if (mode === 'type') {
+    sorted.sort((a, b) => {
+      const aRank = TYPE_SORT_ORDER.indexOf(a.categories[0])
+      const bRank = TYPE_SORT_ORDER.indexOf(b.categories[0])
+      return (aRank === -1 ? TYPE_SORT_ORDER.length : aRank) - (bRank === -1 ? TYPE_SORT_ORDER.length : bRank)
+    })
+  } else {
+    const rankOf = buildTimeRank(sorted)
+    sorted.sort((a, b) => {
+      const ar = rankOf(a)
+      const br = rankOf(b)
+      if (ar == null && br == null) return 0
+      if (ar == null) return 1
+      if (br == null) return -1
+      return ar - br
+    })
+  }
+  return sorted
+}
+
+function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
+  const [activeCategory, setActiveCategory] = useState(null)
+  const [sortMode, setSortMode] = useState('time')
+
+  const entries = useMemo(() => buildEntries(knowledgeItems, slideErrors), [knowledgeItems, slideErrors])
+
+  const counts = useMemo(() => {
+    const next = Object.fromEntries(CATEGORY_DEFS.map(def => [def.key, 0]))
+    entries.forEach(entry => {
+      entry.categories.forEach(key => {
+        if (next[key] !== undefined) next[key] += 1
+      })
+    })
+    return next
+  }, [entries])
+
+  const filtered = useMemo(
+    () => (activeCategory ? entries.filter(entry => entry.categories.includes(activeCategory)) : entries),
+    [entries, activeCategory]
+  )
+  const sorted = useMemo(() => sortEntries(filtered, sortMode), [filtered, sortMode])
+
   return (
-    <section className="result-section">
-      <button type="button" className="result-section-head" onClick={() => setOpen(prev => !prev)}>
-        <span>{title}</span>
-        <span className={`count-badge count-badge--${tone}`}>{items.length}</span>
-        <span className="result-section-toggle">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && (
-        items.length === 0
-          ? <p className="result-empty">항목이 없습니다.</p>
-          : <div className="claim-list">
-              {items.map((item, index) => (
-                renderItem
-                  ? renderItem(item, index)
-                  : <ClaimCard key={item.feedback_id || item.issue_id || index} item={item} index={index} tone={tone} onSeek={onSeek} />
-              ))}
-            </div>
+    <div className="issue-explorer">
+      <div className="issue-filter-bar" role="group" aria-label="오류 유형 필터">
+        {CATEGORY_DEFS.map(def => (
+          <button
+            key={def.key}
+            type="button"
+            className={cx(
+              'issue-filter-btn',
+              `issue-filter-btn--${def.key}`,
+              activeCategory === def.key && 'issue-filter-btn--active'
+            )}
+            aria-pressed={activeCategory === def.key}
+            onClick={() => setActiveCategory(prev => (prev === def.key ? null : def.key))}
+          >
+            <span className="issue-filter-count">{counts[def.key]}</span>
+            <span className="issue-filter-label">{def.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="issue-list-toolbar">
+        <span className="issue-list-count">{sorted.length}건</span>
+        <div className="issue-sort-group" role="radiogroup" aria-label="정렬 기준">
+          {SORT_OPTIONS.map(option => (
+            <button
+              key={option.key}
+              type="button"
+              role="radio"
+              aria-checked={sortMode === option.key}
+              className={cx('issue-sort-btn', sortMode === option.key && 'issue-sort-btn--active')}
+              onClick={() => setSortMode(option.key)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {sorted.length === 0 ? (
+        <p className="result-empty">항목이 없습니다.</p>
+      ) : (
+        <div className="claim-list">
+          {sorted.map(entry =>
+            entry.kind === 'slide'
+              ? (
+                <SlideErrorCard
+                  key={entry.item.slide_error_id || `slide-${entry.sourceIndex}`}
+                  item={entry.item}
+                  index={entry.sourceIndex}
+                />
+              )
+              : (
+                <ClaimCard
+                  key={entry.item.feedback_id || entry.item.issue_id || `claim-${entry.sourceIndex}`}
+                  item={entry.item}
+                  index={entry.sourceIndex}
+                  categories={entry.categories}
+                  onSeek={onSeek}
+                />
+              )
+          )}
+        </div>
       )}
-    </section>
+    </div>
   )
 }
 
 export default function VerifierResults({ verifier, onSeek }) {
   if (!verifier) return null
 
-  const counts = verifier.counts || {}
   const confirmed = verifier.final_confirmed_claims || []
   const needsReview = verifier.needs_review_claims || []
-  const rejected = verifier.verifier_rejected_claims || []
   const slideErrors = verifier.slide_errors || []
   const summary = verifier.summary || {}
 
+  // 기각된 주장은 오류가 아니므로 총 개수·필터·목록 어디에도 포함하지 않는다.
+  const knowledgeItems = [...confirmed, ...needsReview]
+  const totalCount = knowledgeItems.length + slideErrors.length
+
   return (
     <div className="verifier-results">
-      <div className="count-grid">
-        <div className="count-cell count-cell--confirmed">
-          <div className="count-value">{counts.final_confirmed ?? confirmed.length}</div>
-          <div className="count-label">확정 이슈</div>
-        </div>
-        <div className="count-cell count-cell--review">
-          <div className="count-value">{counts.needs_review ?? needsReview.length}</div>
-          <div className="count-label">검토 필요</div>
-        </div>
-        <div className="count-cell count-cell--slide">
-          <div className="count-value">{counts.slide_errors ?? slideErrors.length}</div>
-          <div className="count-label">슬라이드 오류</div>
-        </div>
-        <div className="count-cell count-cell--rejected">
-          <div className="count-value">{counts.verifier_rejected ?? rejected.length}</div>
-          <div className="count-label">기각</div>
-        </div>
+      <div className="result-total">
+        <span className="result-total-label">이 영상의 총 오류 개수</span>
+        <strong className="result-total-value">{totalCount}</strong>
       </div>
 
       <div className="result-meta-panel">
         {verifier.verification_date && <span>검증 시각: {verifier.verification_date}</span>}
         {Array.isArray(verifier.models) && verifier.models.length > 0 && <span>모델: {verifier.models.join(', ')}</span>}
-        {summary.grounded_issue_count !== undefined && <span>웹 그라운딩: {summary.grounded_issue_count}건</span>}
         {summary.web_grounding_adjusted_count !== undefined && <span>점수 조정: {summary.web_grounding_adjusted_count}건</span>}
       </div>
 
-      <Section title="확정 이슈" items={confirmed} tone="confirmed" onSeek={onSeek} />
-      <Section title="검토 필요" items={needsReview} tone="review" onSeek={onSeek} />
-      <Section
-        title="슬라이드 오류"
-        items={slideErrors}
-        tone="slide"
-        onSeek={onSeek}
-        renderItem={(item, index) => <SlideErrorCard key={item.slide_error_id || index} item={item} index={index} />}
-      />
-      <Section title="기각된 주장" items={rejected} tone="rejected" onSeek={onSeek} defaultOpen={false} />
+      <IssueExplorer knowledgeItems={knowledgeItems} slideErrors={slideErrors} onSeek={onSeek} />
     </div>
   )
 }
