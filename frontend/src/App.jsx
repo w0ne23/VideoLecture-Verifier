@@ -8,6 +8,7 @@ import LecturesPage from './pages/LecturesPage'
 import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
 import VerifyStageReportPage from './pages/VerifyStageReportPage'
+import VerifyDemoPage from './pages/VerifyDemoPage'
 import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
@@ -39,6 +40,8 @@ function AppShell() {
             <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
             <Route path="/result/:lectureId" element={<ResultPage />} />
             <Route path="/result/:lectureId/stages" element={<VerifyStageReportPage />} />
+            {/* 개발용: 파이프라인 진행 UI만 확인하는 데모. 실제 업로드/검증을 하지 않으며 어디에도 링크되지 않는다. */}
+            <Route path="/dev/verify-demo" element={<VerifyDemoPage />} />
             <Route path="/model-setup" element={<ModelSetupLayout />}>
               <Route index element={<ModelSetupEntryPage />} />
               <Route path="models" element={<ModelRegistryPage />} />
