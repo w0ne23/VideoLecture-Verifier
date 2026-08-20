@@ -110,12 +110,6 @@ function formatTime(seconds) {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
 }
 
-function formatPercent(value) {
-  const num = Number(value)
-  if (!Number.isFinite(num)) return ''
-  return `${num.toFixed(num >= 10 ? 1 : 2)}%`
-}
-
 function formatScore(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return ''
@@ -550,7 +544,6 @@ function ClaimDetail({ item }) {
 function ClaimCard({ item, index, categories, onSeek }) {
   const [open, setOpen] = useState(false)
   const claimText = pick(item, ['resolved_claim', 'claim_text', 'claim', 'statement', 'text', 'content'])
-  const status = item.status || item.severity_status || pick(item, ['verdict', 'final_verdict', 'decision'])
   const severity = getSeverity(item)
   const { slideNumber, startTime, endTime } = locationOf(item)
   const timeLabel = timeRangeLabel(startTime, endTime)
@@ -581,7 +574,6 @@ function ClaimCard({ item, index, categories, onSeek }) {
                 {labelForType(catKey)}
               </span>
             ))}
-            {status && <span className="claim-tag claim-tag--verdict">{STATUS_LABELS[status] || status}</span>}
             {slideNumber && <span className="claim-location-chip">slide {slideNumber}</span>}
             {startTime != null && (
               <button
@@ -602,7 +594,6 @@ function ClaimCard({ item, index, categories, onSeek }) {
           {severity != null && (
             <div className="claim-card-score">
               <strong>{formatPoint(severity)}</strong>
-              <span>최종 심각도</span>
             </div>
           )}
           <span className={cx('claim-card-toggle', open && 'claim-card-toggle--open')} aria-hidden="true">▾</span>
@@ -643,7 +634,6 @@ function SlideErrorCard({ item, index }) {
             <span className="claim-card-index">#{index + 1}</span>
             <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${slideTypeKey}`)}>{item.error_type_label || '슬라이드 오류'}</span>
             {item.slide_number && <span className="claim-location-chip">slide {item.slide_number}</span>}
-            {item.confidence !== undefined && <span className="claim-tag">신뢰도 {formatPercent(Number(item.confidence) * 100)}</span>}
           </div>
           <p className="slide-error-change slide-error-change--compact">
             <span>{compactText(item.problematic_text, '-')}</span>
@@ -655,7 +645,6 @@ function SlideErrorCard({ item, index }) {
           {item.severity_score !== undefined && (
             <div className="claim-card-score">
               <strong>{formatScore(item.severity_score)}</strong>
-              <span>심각도</span>
             </div>
           )}
           <span className={cx('claim-card-toggle', open && 'claim-card-toggle--open')} aria-hidden="true">▾</span>
