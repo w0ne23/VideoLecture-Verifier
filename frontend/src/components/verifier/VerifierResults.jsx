@@ -8,6 +8,12 @@ const TYPE_LABELS = {
   composite_issue: '복합 오류',
 }
 
+const MODEL_DISPLAY_NAMES = {
+  gpt: 'gpt-5.4',
+  claude: 'claude-sonnet-5',
+  grok: 'grok-4.5',
+}
+
 const STATUS_LABELS = {
   confirmed: '확정',
   professor_check: '검토 필요',
@@ -50,6 +56,13 @@ const CATEGORY_DEFS = [
   { key: 'confusing_explanation', label: '혼동 가능 설명' },
   { key: 'slide', label: '슬라이드 오류' },
 ]
+const SLIDE_ERROR_TYPE_LABELS = {
+  text_error: '철자/표기 오류',
+  numeric_unit: '숫자/단위 표기 오류',
+  code_syntax: '코드/수식 문법 오류',
+  visual_defect: '이미지 깨짐·텍스트 겹침 등 시각적 결함',
+}
+
 const SORT_OPTIONS = [
   { key: 'time', label: '시간순' },
   { key: 'severity', label: '심각도순' },
@@ -90,17 +103,6 @@ function compactText(value, fallback = '') {
   return text || fallback
 }
 
-function uniqueText(value, existing = []) {
-  const text = compactText(value)
-  if (!text) return ''
-  const normalized = text.replace(/\s+/g, ' ').trim()
-  const duplicate = existing.some(item => {
-    const other = compactText(item).replace(/\s+/g, ' ').trim()
-    return other && other === normalized
-  })
-  return duplicate ? '' : text
-}
-
 function formatTime(seconds) {
   const total = Math.max(0, Math.floor(Number(seconds) || 0))
   const hh = Math.floor(total / 3600)
@@ -114,13 +116,13 @@ function formatScore(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return ''
   const percent = num <= 1 ? num * 100 : num
-  return `${percent.toFixed(percent >= 10 ? 1 : 2)}점`
+  return percent.toFixed(percent >= 10 ? 1 : 2)
 }
 
 function formatPoint(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return ''
-  return `${num.toFixed(num >= 10 ? 1 : 2)}점`
+  return num.toFixed(num >= 10 ? 1 : 2)
 }
 
 function formatRatio(value) {
@@ -259,6 +261,24 @@ function TextBlock({ children }) {
   return <p className="claim-detail-text">{children}</p>
 }
 
+// 모델별 판단·웹 검색 결과의 근거 문단은 몇 문장씩 이어지는 긴 글이라, 1~2줄만 잘라서 보여준다.
+function ClampedText({ children, lines = 2 }) {
+  const [expanded, setExpanded] = useState(false)
+  if (!children) return null
+  return (
+    <p
+      className={cx('claim-detail-text', 'clamped-text-clickable', !expanded && 'clamped-text')}
+      style={!expanded ? { WebkitLineClamp: lines } : undefined}
+      onClick={() => setExpanded(prev => !prev)}
+      role="button"
+      tabIndex={0}
+      title={expanded ? '접으려면 클릭' : '전체 보기'}
+    >
+      {children}
+    </p>
+  )
+}
+
 function DetailGroup({ title, children, noDivider = false }) {
   if (!children) return null
   return (
@@ -313,7 +333,7 @@ function CompositeScoringPanel({ item }) {
     <DetailGroup title="복합 오류 점수" noDivider>
       <div className="composite-summary">
         <span>방식: {scoring.method || 'weighted_expected_severity'}</span>
-        {scoring.primary_issue_type_label && <span>대표 유형: {scoring.primary_issue_type_label}</span>}
+        {scoring.primary_issue_type && <span>대표 유형: {labelForType(scoring.primary_issue_type)}</span>}
         {scoring.weighted_score !== undefined && <span>가중 점수: {formatScore(scoring.weighted_score)}</span>}
       </div>
       {keys.length > 0 && (
@@ -403,48 +423,11 @@ function WebGroundingPanel({ item }) {
   const evidence = item.evidence || {}
   if (!grounding || !Object.keys(grounding).length) return null
 
-  const trials = asArray(grounding.trials)
-  const trialPassages = trials.flatMap(trial => asArray(trial.evidence_passages))
-  const compactEvidence = asArray(grounding.evidence)
-  const passages = grounding.evidence_passages?.length
-    ? grounding.evidence_passages
-    : compactEvidence.length
-      ? compactEvidence
-      : trialPassages
-  const sources = grounding.evidence_sources?.length
-    ? grounding.evidence_sources
-    : compactEvidence.length
-      ? compactEvidence
-      : evidence.web_sources
-
-  const judgmentParts = [
-    grounding.status && (STATUS_LABELS[grounding.status] || grounding.status),
-    grounding.claim_verdict && (VERDICT_LABELS[grounding.claim_verdict] || grounding.claim_verdict),
-    grounding.selected_source_priority_label
-      ? `${SOURCE_PRIORITY_LABELS[grounding.selected_source_priority_label] || grounding.selected_source_priority_label} 선정 ${grounding.selected_source_count ?? 0}건`
-      : grounding.selected_source_count !== undefined && `선정 ${grounding.selected_source_count}건`,
-  ].filter(Boolean)
-
-  const passageText = asArray(passages)
-    .map(passage => passage.key_sentence || passage.quote_or_paragraph || passage.matched_text)
-    .filter(Boolean)
-    .join(' / ')
-
-  const queryRows = isObject(grounding.search_queries)
-    ? Object.entries(grounding.search_queries).flatMap(([model, values]) => asArray(values).map(value => ({ model, value })))
-    : asArray(grounding.search_queries).map(value => ({ model: '', value }))
-
+  const sources = grounding.evidence_sources?.length ? grounding.evidence_sources : evidence.web_sources
   const sourceItems = asArray(sources).filter(sourceUrl)
 
-  const queryValue = queryRows.length > 0
-    ? queryRows.map((row, index) => (
-        <span key={`${row.model}-${row.value}-${index}`}>
-          {index > 0 && ', '}
-          {row.model && `${row.model}: `}
-          <code>{row.value}</code>
-        </span>
-      ))
-    : null
+  const reasonText = grounding.reason || grounding.evidence_summary || ''
+  const statusLabel = STATUS_LABELS[grounding.status] || grounding.status || ''
 
   const sourceValue = sourceItems.length > 0
     ? sourceItems.map((source, index) => {
@@ -462,15 +445,11 @@ function WebGroundingPanel({ item }) {
     <DetailGroup title="웹 검색 결과" noDivider>
       <div className="grounding-card">
         <dl className="claim-detail-list">
-          <DetailRow label="판단 결과" value={judgmentParts.join(', ')} wide />
-          <DetailRow label="근거 문단" value={passageText} wide />
-          <DetailRow label="자료 요약" value={grounding.evidence_summary} wide />
-          <DetailRow label="판정 이유" value={grounding.reason} wide />
-          <DetailRow label="검색어" value={queryValue} wide />
-          <DetailRow label="근거 출처" value={sourceValue} wide />
+          <DetailRow label="검증 상태" value={!reasonText && !sourceValue ? statusLabel : null} wide />
+          <DetailRow label="판정 이유" value={reasonText ? <ClampedText lines={2}>{reasonText}</ClampedText> : null} wide />
+          <DetailRow label="근거 출처" value={sourceValue ? <ClampedText lines={1}>{sourceValue}</ClampedText> : null} wide />
         </dl>
       </div>
-      <VerifiedSources trials={trials} />
     </DetailGroup>
   )
 }
@@ -489,13 +468,15 @@ function ModelJudgments({ item }) {
       <div className="model-judgment-list">
         {results.map((judgment, index) => (
           <div className="model-judgment" key={`${judgment.model || 'model'}-${judgment.category || ''}-${index}`}>
-            <div className="model-judgment-head">
-              <strong>{judgment.model || judgment.provider || `model ${index + 1}`}</strong>
-              {judgment.category && <span>{labelForType(judgment.category)}</span>}
-              {judgment.judgment && <span>{judgment.judgment}</span>}
-              {judgment.final_model_score !== undefined && <span>{formatScore(judgment.final_model_score)}</span>}
+            <div className="model-judgment-name">
+              <strong>{MODEL_DISPLAY_NAMES[judgment.model] || judgment.model || judgment.provider || `model ${index + 1}`}</strong>
+              <div className="model-judgment-meta">
+                {judgment.category && <span>{labelForType(judgment.category)}</span>}
+                {judgment.judgment && <span>{judgment.judgment}</span>}
+                {judgment.final_model_score !== undefined && <span>{formatScore(judgment.final_model_score)}</span>}
+              </div>
             </div>
-            <TextBlock>{judgment.reason || judgment.explanation || judgment.summary}</TextBlock>
+            <ClampedText lines={2}>{judgment.reason || judgment.explanation || judgment.summary}</ClampedText>
           </div>
         ))}
       </div>
@@ -505,38 +486,21 @@ function ModelJudgments({ item }) {
 
 function ClaimDetail({ item }) {
   const problem = item.problem || {}
-  const feedback = item.professor_feedback || {}
-  const evidence = item.evidence || {}
-  const summary = problem.summary || feedback.summary
-  const rawWhyWrong = problem.why_wrong || feedback.why_wrong
-  const rawRecommendation = problem.recommendation || feedback.suggested_rephrase
   const correctInfo = problem.correct_info
-  const evidenceInContext = uniqueText(evidence.evidence_in_context, [
-    summary,
-    rawWhyWrong,
-    rawRecommendation,
-    correctInfo,
-    feedback.teaching_note,
-  ])
 
   return (
     <div className="claim-detail-body">
       <DetailGroup title="문제 요약">
-        <dl className="claim-detail-list">
-          <DetailRow label="원 발화" value={item.claim_text} wide />
-          <DetailRow label="판단 대상 주장" value={item.resolved_claim} wide />
-          <DetailRow label="수정 제안" value={stripArrowPrefix(correctInfo)} wide />
-          <DetailRow label="문맥 근거" value={evidenceInContext} wide />
-        </dl>
+        <div className="claim-detail-card">
+          <dl className="claim-detail-list">
+            <DetailRow label="원 발화" value={item.claim_text} wide />
+            <DetailRow label="수정 제안" value={stripArrowPrefix(correctInfo)} wide />
+          </dl>
+        </div>
       </DetailGroup>
       <CompositeScoringPanel item={item} />
       <ModelJudgments item={item} />
       <WebGroundingPanel item={item} />
-      <ScoreGrid item={item} />
-      <details className="claim-debug-json">
-        <summary>디버그 JSON</summary>
-        <pre>{JSON.stringify(item, null, 2)}</pre>
-      </details>
     </div>
   )
 }
@@ -632,7 +596,7 @@ function SlideErrorCard({ item, index }) {
         <div className="claim-card-main">
           <div className="claim-card-head">
             <span className="claim-card-index">#{index + 1}</span>
-            <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${slideTypeKey}`)}>{item.error_type_label || '슬라이드 오류'}</span>
+            <span className={cx('claim-tag', 'claim-tag--type', `claim-tag--type-${slideTypeKey}`)}>{SLIDE_ERROR_TYPE_LABELS[slideTypeKey] || '슬라이드 오류'}</span>
             {item.slide_number && <span className="claim-location-chip">slide {item.slide_number}</span>}
           </div>
           <p className="slide-error-change slide-error-change--compact">
@@ -658,16 +622,11 @@ function SlideErrorCard({ item, index }) {
             </div>
           )}
           <dl className="claim-detail-list slide-error-detail-list">
+            <DetailRow label="슬라이드 번호" value={item.slide_number} />
             <DetailRow label="슬라이드 제목" value={item.slide_title} wide />
-            <DetailRow label="오류 유형" value={item.error_type_label || item.error_type} />
-            <DetailRow label="오류 텍스트" value={item.problematic_text} />
-            <DetailRow label="수정 텍스트" value={item.corrected_text} />
+            <DetailRow label="오류 유형" value={SLIDE_ERROR_TYPE_LABELS[item.error_type] || item.error_type} />
             <DetailRow label="판단 이유" value={item.reason} wide />
           </dl>
-          <details className="claim-debug-json">
-            <summary>디버그 JSON</summary>
-            <pre>{JSON.stringify(item, null, 2)}</pre>
-          </details>
         </div>
       )}
     </article>
@@ -840,7 +799,7 @@ export default function VerifierResults({ verifier, onSeek }) {
   return (
     <div className="verifier-results">
       <div className="result-total">
-        <span className="result-total-label">이 영상의 총 오류 개수</span>
+        <span className="result-total-label">총 오류 개수</span>
         <strong className="result-total-value">{totalCount}</strong>
       </div>
 
