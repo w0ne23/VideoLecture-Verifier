@@ -1039,12 +1039,18 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
   box-shadow: 0 16px 34px rgba(30, 40, 90, 0.14);
 }
 .ms-hero-entry-band {
-  width: 100%; padding: 64px 0 42px;
+  width: 100%;
   display: flex; align-items: center; justify-content: center;
   transition: transform 0.18s ease;
 }
 .ms-hero-entry-card:hover .ms-hero-entry-band { transform: scale(1.03); }
-.ms-hero-entry-band img { height: 200px; width: auto; max-width: 80%; }
+.ms-hero-entry-band img { width: auto; max-width: 80%; }
+
+.ms-entry-page--verify .ms-hero-entry-band { padding: 99px 0 77px; }
+.ms-entry-page--verify .ms-hero-entry-band img { height: 120px; }
+
+.ms-entry-page--model-setup .ms-hero-entry-band { padding: 74px 0 52px; }
+.ms-entry-page--model-setup .ms-hero-entry-band img { height: 170px; }
 .ms-hero-entry-body { width: 100%; padding: 0 24px 44px; }
 .ms-hero-entry-title {
   display: block; margin: 0 0 12px; font-size: 2.1rem; font-weight: 700;

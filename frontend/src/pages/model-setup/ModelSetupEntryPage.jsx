@@ -21,7 +21,7 @@ export default function ModelSetupEntryPage() {
   const navigate = useNavigate()
 
   return (
-    <section className="model-setup ms-entry-page">
+    <section className="model-setup ms-entry-page ms-entry-page--model-setup">
       <div className="ms-header-row">
         <h2 className="ms-app-title">Multi-LLM 사용자 설정</h2>
         <button className="ms-back-btn" type="button" onClick={() => navigate('/')} aria-label="메인으로">
