@@ -9,6 +9,8 @@ import VerifyProgressPage from './pages/VerifyProgressPage'
 import ResultPage from './pages/ResultPage'
 import VerifyStageReportPage from './pages/VerifyStageReportPage'
 import VerifyDemoPage from './pages/VerifyDemoPage'
+import VerifyDemoDiagramPage from './pages/VerifyDemoDiagramPage'
+import VerifyDemoLivePage from './pages/VerifyDemoLivePage'
 import StatsPage from './pages/StatsPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
@@ -40,8 +42,14 @@ function AppShell() {
             <Route path="/verify/:lectureId" element={<VerifyProgressPage />} />
             <Route path="/result/:lectureId" element={<ResultPage />} />
             <Route path="/result/:lectureId/stages" element={<VerifyStageReportPage />} />
-            {/* 개발용: 파이프라인 진행 UI만 확인하는 데모. 실제 업로드/검증을 하지 않으며 어디에도 링크되지 않는다. */}
-            <Route path="/dev/verify-demo" element={<VerifyDemoPage />} />
+            {/* 개발용: 다이어그램 파이프라인 + 실제 강의 결과물로 완성된 흐름을 보여주는 데모.
+                실제 파이프라인이 아직 없어 결과는 하드코딩된 강의 하나의 실제 결과를 재사용한다.
+                어디에도 링크하지 않고 개발자가 URL로 직접 들어가는 용도. */}
+            <Route path="/dev/verify-demo" element={<VerifyDemoLivePage />} />
+            {/* 개발용: 첨부된 아키텍처 다이어그램(전처리/검증, 병렬 두 갈래) 구조를 확인하는 데모. */}
+            <Route path="/dev/verify-demo-diagram" element={<VerifyDemoDiagramPage />} />
+            {/* 개발용: 파이프라인 진행 UI만 확인하는 데모(아이콘 애니메이션 포함). 실제 업로드/검증을 하지 않으며 어디에도 링크되지 않는다. */}
+            <Route path="/dev/verify-demo-anime" element={<VerifyDemoPage />} />
             <Route path="/model-setup" element={<ModelSetupLayout />}>
               <Route index element={<ModelSetupEntryPage />} />
               <Route path="models" element={<ModelRegistryPage />} />

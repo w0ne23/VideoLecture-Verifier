@@ -609,6 +609,81 @@ main { margin-top: 28px; display: flex; flex-direction: column; gap: 20px; }
   88%, 100% { opacity: 0; }
 }
 
+/* ── /dev/verify-demo-diagram 전용 아키텍처 다이어그램 (실제 검증 화면에는 쓰이지 않음) ── */
+/* 전처리(영상 분석/오디오 분석 두 갈래 → 통합 텍스트)와 검증(발화 검증/슬라이드 검증 두
+   갈래 → 오류) 두 구간을 하나의 SVG로 그린다. 노드/연결선 상태는 wait·run·done·error
+   4가지이며 색은 기존 데모의 언어(골드=진행/완료, 빨강=오류)를 그대로 따른다. */
+/* 이 페이지 컨텐츠 폭(.app max-width 880px)을 벗어나서 다이어그램만 더 넓게 쓴다.
+   음수 마진으로 좌우로 확장 — 1280px 안팎의 데스크톱 화면을 기준으로 한 개발용 데모라
+   아주 좁은 화면에서의 반응형은 신경 쓰지 않는다. */
+.diag-breakout { margin-left: -95px; margin-right: -95px; }
+.diag-svg { width: 100%; max-width: 1080px; height: auto; display: block; margin: 0 auto; }
+
+.diag-colorlab {
+  margin: 0 auto 12px; padding: 10px 14px; max-width: 1080px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  font-size: 0.85rem;
+}
+.diag-colorlab-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.diag-colorlab-label { font-weight: 600; color: var(--muted); white-space: nowrap; }
+.diag-colorlab label.field { white-space: nowrap; }
+
+.diag-group-bracket { fill: none; stroke-width: 3; stroke-dasharray: 9 6; }
+.diag-group-bracket--pre { stroke: var(--orange); }
+.diag-group-bracket--verify { stroke: var(--violet); }
+.diag-group-caption { font-size: 17px; font-weight: 700; fill: var(--muted); }
+.diag-lane-label { font-size: 13px; font-weight: 600; fill: var(--muted); letter-spacing: 0.2px; }
+.diag-lane-bracket { fill: none; stroke-width: 2; stroke-linecap: round; opacity: 0.6; }
+.diag-lane-bracket--pre { stroke: var(--orange); }
+.diag-lane-bracket--verify { stroke: var(--violet); }
+
+.diag-node-label { font-size: 13px; fill: var(--muted); }
+
+.diag-node { stroke-width: 2.5; }
+.diag-node--wait { fill: var(--surface-2); stroke: var(--border); }
+.diag-node--run { fill: var(--primary); stroke: var(--primary); }
+.diag-node--done { fill: var(--primary); stroke: var(--primary); opacity: 0.85; }
+.diag-node--error { fill: var(--red); stroke: var(--red); }
+.diag-node-halo {
+  fill: none; stroke: var(--primary); stroke-width: 2.5; opacity: 0.6;
+  animation: diag-pulse 1.2s ease-out infinite;
+}
+@keyframes diag-pulse {
+  0% { r: 12; opacity: 0.6; }
+  100% { r: 26; opacity: 0; }
+}
+
+.diag-connector { fill: none; stroke-width: 2.5; }
+.diag-connector--wait { stroke: var(--border); stroke-dasharray: 6 6; }
+.diag-connector--done { stroke: var(--primary); opacity: 0.55; }
+.diag-connector--run { stroke: var(--primary); stroke-dasharray: 7 7; animation: demo-dash 1s linear infinite; }
+.diag-connector--error { stroke: var(--red); stroke-dasharray: 6 6; }
+
+/* 발화(로즈)·슬라이드(틸) 검증 색 비교(diffLine/diffNode 토글)는 켜졌을 때만 색을 칠해야
+   해서 CSS 클래스 대신 인라인 style로 칠한다 — DiagramPipeline.jsx의 LANE_COLORS 참고. */
+
+/* 강의 영상·통합 멀티모달 텍스트·오류 산출물 3개 아이콘은 나머지 골드 노드들과 구분되게
+   블루 계열을 쓴다 — "다 노란색이라 구분 안 된다"는 피드백 반영. */
+.diag-icon-box { fill: var(--card); stroke-width: 2.5; }
+.diag-icon-box--wait { stroke: var(--border); opacity: 0.7; }
+.diag-icon-box--run { stroke: var(--info); animation: diag-icon-glow 1.2s ease-in-out infinite; }
+.diag-icon-box--done { stroke: var(--info); }
+.diag-icon-box--error { stroke: var(--red); }
+@keyframes diag-icon-glow {
+  0%, 100% { stroke-width: 2.5; }
+  50% { stroke-width: 5; }
+}
+/* 아이콘 안의 재생 삼각형/텍스트 줄은 해당 단계가 아직 대기 중이면 회색, 진행/완료되면
+   블루, 실패하면 빨강으로 — 단계 상태와 무관하게 항상 노란색으로 보이던 것을 고쳤다. */
+.diag-icon-play--wait, .diag-icon-docline--wait { fill: var(--border); }
+.diag-icon-play--run, .diag-icon-docline--run,
+.diag-icon-play--done, .diag-icon-docline--done { fill: var(--info); }
+.diag-icon-play--error, .diag-icon-docline--error { fill: var(--red); }
+.diag-icon-docline { opacity: 0.55; }
+.diag-stack-sheet { fill: var(--card); stroke: var(--border); stroke-width: 2; }
+.diag-stack-sheet--back { opacity: 0.5; }
+.diag-stack-sheet--mid { opacity: 0.75; }
+
 /* ── 검증 결과 ── */
 .verifier-results { display: flex; flex-direction: column; gap: 16px; }
 
