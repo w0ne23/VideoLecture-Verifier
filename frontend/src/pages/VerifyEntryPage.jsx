@@ -21,7 +21,7 @@ export default function VerifyEntryPage() {
   const navigate = useNavigate()
 
   return (
-    <section className="model-setup ms-entry-page">
+    <section className="model-setup ms-entry-page ms-entry-page--verify">
       <div className="ms-header-row">
         <h2 className="ms-app-title">강의 검증</h2>
         <button className="ms-back-btn" type="button" onClick={() => navigate('/')} aria-label="메인으로">
