@@ -37,10 +37,6 @@ export default function VerifyProgressPage() {
         <h2>{lecture.title || lectureId}</h2>
       </div>
 
-      {lecture.video_url && (
-        <video className="detail-video" src={lecture.video_url} controls preload="metadata" />
-      )}
-
       {phase === PHASES.PIPELINE && (
         <PipelineProgress stages={pipelineStages} statusMessage={currentStage} />
       )}
