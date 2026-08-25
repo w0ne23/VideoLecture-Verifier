@@ -37,31 +37,26 @@ export default function UploadForm({ onUploaded }) {
           onChange={event => actions.selectFile(event.target.files?.[0])}
         />
       </div>
-      <label className="field">
-        <span>강의 제목</span>
-        <input
-          type="text"
-          value={title}
-          placeholder="미입력 시 파일명 사용"
-          onChange={event => actions.setTitle(event.target.value)}
-        />
-      </label>
-      {errorMessage && <p className="error-text">{errorMessage}</p>}
-      <div className="button-row">
+      <div className="upload-title-row">
+        <label className="field upload-title-field">
+          <span>강의 제목</span>
+          <input
+            type="text"
+            value={title}
+            placeholder="미입력 시 파일명 사용"
+            onChange={event => actions.setTitle(event.target.value)}
+          />
+        </label>
         <button
           type="button"
-          className="btn btn--primary"
+          className="btn btn--primary upload-title-submit"
           disabled={!file || isSubmitting}
           onClick={actions.submit}
         >
           {isSubmitting ? '업로드 중...' : '검증 시작'}
         </button>
-        {file && (
-          <button type="button" className="btn" disabled={isSubmitting} onClick={actions.reset}>
-            초기화
-          </button>
-        )}
       </div>
+      {errorMessage && <p className="error-text">{errorMessage}</p>}
     </div>
   )
 }
