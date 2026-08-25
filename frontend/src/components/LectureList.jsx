@@ -65,10 +65,14 @@ export default function LectureList({ onSelect, filters = {} }) {
 
   return (
     <ul className="lecture-list">
-      {visible.map(lecture => (
+      {visible.map((lecture, index) => (
         <li key={lecture.id}>
           <button type="button" className="lecture-row" onClick={() => onSelect(lecture.id)}>
-            <span className="lecture-title">{lecture.title}</span>
+            <span className="lecture-title">
+              <span className="lecture-title-index">{index + 1}</span>
+              {lecture.title}
+              {lecture.created_at && <span className="lecture-title-date">{formatDate(lecture.created_at)}</span>}
+            </span>
             <span className="lecture-row-meta">
               {lecture.source_tag && (
                 <span className="tag-chip">{lectureTagLabel(lecture.source_tag)}</span>
@@ -78,8 +82,7 @@ export default function LectureList({ onSelect, filters = {} }) {
               </span>
             </span>
             <span className="lecture-stage">
-              {lecture.status === 'error' ? lecture.error_message : lecture.current_stage}
-              {lecture.created_at ? ` · ${formatDate(lecture.created_at)}` : ''}
+              {lecture.status === 'error' ? lecture.error_message : (lecture.status === 'done' ? '' : lecture.current_stage)}
             </span>
           </button>
         </li>

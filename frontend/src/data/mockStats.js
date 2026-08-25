@@ -45,7 +45,7 @@ export const MOCK_BY_TAG = [
   series('kocw', 'KOCW', {
     factual_error: 6, temporal_error: 3, scope_overclaim: 5, confusing_explanation: 4, composite_issue: 2,
   }),
-  series('instructor', '강의자 직접 제작', {
+  series('instructor', '교수자 제공', {
     factual_error: 5, temporal_error: 2, scope_overclaim: 3, confusing_explanation: 6, composite_issue: 1,
   }),
   series('etc', '기타', {
@@ -110,7 +110,7 @@ export function buildInsight(view, rows) {
         `전체적으로 ${ranked[0]?.label}이(가) 가장 많고, 이어서 ${ranked[1]?.label} 순입니다.`,
         `${top.label} 출처에서 추출 Issue가 가장 많습니다 (${top.total}건).`,
         instructorTop
-          ? `강의자 직접 제작은 ${instructorTop.label} 비중이 두드러집니다.`
+          ? `교수자 제공은 ${instructorTop.label} 비중이 두드러집니다.`
           : '출처마다 유형 구성이 다릅니다.',
         '기각·슬라이드 오류는 집계에서 제외했습니다.',
       ],
@@ -158,7 +158,7 @@ export const MOCK_BEFORE_AFTER_PAIRS = [
   {
     id: 'pair-os-intro',
     title: '운영체제 개론 — 프로세스 스케줄링',
-    tagLabel: '강의자 직접 제작',
+    tagLabel: '교수자 제공',
     domainLabel: '공학',
     durationMin: 28,
     before: {
