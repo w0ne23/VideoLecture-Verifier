@@ -21,6 +21,10 @@ const DEMO_RESULT_LECTURE_ID = '9018dee3-a130-4c0e-a4a2-45caaf8c4136'
 // 머무는 편이 진행되는 느낌이 더 자연스럽다.
 const TICK_DELAY_MS = 3000
 
+// 통합 텍스트·피드백은 "무언가를 만들어내는" 단계라 다른 단계와 달리 "진행 중" 대신
+// "생성 중"으로 표현한다.
+const GENERATION_STAGE_LABELS = new Set(['멀티모달 통합 텍스트', '피드백'])
+
 function DemoUploadStep({ flow }) {
   const inputRef = useRef(null)
   const { file, title, actions } = flow
@@ -74,20 +78,48 @@ function DemoUploadStep({ flow }) {
   )
 }
 
-function DemoPipelineStep({ flow, navigate }) {
-  const { title, file, status, activeLabels } = flow
-  const stageMessage = `${activeLabels.join(' · ')} 진행 중`
+function DemoPipelineStep({ flow, onViewResult }) {
+  const { title, file, phase, status, activeLabels, autoPlay, actions } = flow
+  const isDone = phase === DEMO_PHASES.DONE
+  const stageMessage = isDone
+    ? '모든 단계가 완료되었습니다.'
+    : activeLabels.length === 1 && GENERATION_STAGE_LABELS.has(activeLabels[0])
+      ? `${activeLabels[0]} 생성 중`
+      : `${activeLabels.join(' · ')} 진행 중`
+
+  // 발표용: 자동 진행·버튼 없이 방향키(← 이전 단계 / → 다음 단계)로만 넘긴다.
+  useEffect(() => {
+    if (autoPlay) actions.toggleAutoPlay()
+  }, [autoPlay, actions])
+
+  useEffect(() => {
+    if (isDone) return undefined
+    function handleKeyDown(event) {
+      if (event.key === 'ArrowRight') actions.next()
+      if (event.key === 'ArrowLeft') actions.prev()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isDone, actions])
 
   return (
     <div className="detail">
       <div className="page-header-row demo-standard-width">
         <h2 className="list-heading">{title || file?.name || '강의'}</h2>
-        <button type="button" className="btn" onClick={() => navigate('/')}>← 메인으로</button>
+        <button className="ms-back-btn" type="button" onClick={actions.backToUpload} aria-label="이전으로">
+          ←
+        </button>
       </div>
 
       <div className="vf-pipe demo-standard-width">
-        <div className="vf-progress-message">{stageMessage}</div>
+        <div className="vf-progress-message vf-progress-message--divided">{stageMessage}</div>
         <DiagramPipeline status={status} diffLine diffNode compact />
+        {isDone && (
+          <div className="button-row button-row--center">
+            <button type="button" className="btn" onClick={actions.start}>다시하기</button>
+            <button type="button" className="btn btn--primary" onClick={onViewResult}>피드백 보기</button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -99,6 +131,7 @@ function DemoResultStep({ flow, videoUrl, navigate }) {
   const [verifier, setVerifier] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [showVideo, setShowVideo] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -124,9 +157,21 @@ function DemoResultStep({ flow, videoUrl, navigate }) {
       <div className="detail-head">
         <button type="button" className="btn" onClick={() => navigate('/')}>← 메인으로</button>
         <h2>{title || file?.name || '강의'}</h2>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => navigate(`/result/${DEMO_RESULT_LECTURE_ID}/stages`)}
+        >
+          검증 과정 보기
+        </button>
+        {videoUrl && (
+          <button type="button" className="btn" onClick={() => setShowVideo(v => !v)}>
+            {showVideo ? '강의 숨기기' : '강의 같이 보기'}
+          </button>
+        )}
       </div>
 
-      {videoUrl && (
+      {videoUrl && showVideo && (
         <video ref={videoRef} className="detail-video" src={videoUrl} controls preload="metadata" />
       )}
 
@@ -141,9 +186,15 @@ export default function VerifyDemoLivePage() {
   const navigate = useNavigate()
   const flow = useDemoDiagramFlow(TICK_DELAY_MS)
   const { file, phase } = flow
+  // 파이프라인이 다 끝나도 바로 결과 화면으로 넘어가지 않고, "피드백 보기"를 눌러야만
+  // 넘어가게 한다. "다시하기"로 reset하면 phase가 UPLOAD로 돌아가면서 이 상태도 초기화된다.
+  const [showResult, setShowResult] = useState(false)
 
   const videoUrl = useMemo(() => (file ? URL.createObjectURL(file) : ''), [file])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
+  useEffect(() => {
+    if (phase === DEMO_PHASES.UPLOAD) setShowResult(false)
+  }, [phase])
 
   if (phase === DEMO_PHASES.UPLOAD) {
     return (
@@ -159,8 +210,8 @@ export default function VerifyDemoLivePage() {
     )
   }
 
-  if (phase === DEMO_PHASES.PIPELINE) {
-    return <DemoPipelineStep flow={flow} navigate={navigate} />
+  if (phase === DEMO_PHASES.PIPELINE || (phase === DEMO_PHASES.DONE && !showResult)) {
+    return <DemoPipelineStep flow={flow} onViewResult={() => setShowResult(true)} />
   }
 
   return <DemoResultStep flow={flow} videoUrl={videoUrl} navigate={navigate} />

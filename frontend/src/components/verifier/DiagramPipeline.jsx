@@ -34,32 +34,41 @@ const NODE_POS = {
 const LANE_MAX_WIDTH = { video: 100, audio: 100, utterance: 68, slide: 68 }
 const ICON_MAX_WIDTH = 150
 
-// 발화 검증(로즈)·슬라이드 검증(틸) 선/노드 색, 아이콘(강의 영상·통합 텍스트·오류 산출물)
-// 블루 색 — 여러 팔레트를 만들어봤지만 비교해보니 이 조합이 제일 나아서 고정했다.
-// "선만 다르게"/"노드만 다르게" 토글만 남긴다.
-const LANE_COLORS = { utterance: 'var(--rose)', slide: 'var(--teal)' }
-const ICON_COLOR = 'var(--info)'
+// 발화 검증(로즈)·슬라이드 검증(틸) 선/노드 색 — 여러 팔레트를 만들어봤지만 비교해보니
+// 이 조합이 제일 나아서 고정했다. "선만 다르게"/"노드만 다르게" 토글만 남긴다.
+const LANE_COLORS = { utterance: 'var(--rose)', slide: 'var(--amber)' }
+// 강의 영상·멀티모달 통합 텍스트·피드백의 겉모양(박스/문서/스택)은 차콜 무채색으로 —
+// 안에 든 그림·음성 아이콘만 별도 색(diag-mini-mark)을 그대로 유지한다.
+const ICON_COLOR = 'var(--charcoal)'
 
 // 발화검증/슬라이드검증 구간에 속하는 연결선만 lane을 표시해 둔다 — 색 비교 실험(diffLine)
 // 켰을 때 이 lane 값으로 팔레트에서 어느 색을 쓸지 정한다. 전처리 쪽 연결선은 실험 대상이
 // 아니라 lane이 없다.
+// 같은 레인 안에서 노드끼리 이어지던 연결선은 이제 알약 배경(LaneCapsule)이 그 역할을
+// 대신하므로 제거했다. 레인을 넘나드는 연결선만 남긴다.
 const CONNECTORS = [
   { target: 'slide_extract', d: 'M79 138 C 110 100, 130 78, 146 70' },
   { target: 'audio_quality', d: 'M79 182 C 110 220, 126 245, 146 250' },
-  { target: 'slide_analyze', d: 'M164 68 L252 68' },
-  { target: 'voice_transcribe', d: 'M164 252 L252 252' },
   { target: 'integrated_text', d: 'M270 68 C 297 85, 314 110, 328 138' },
   { target: 'integrated_text', d: 'M270 252 C 297 230, 314 205, 328 182' },
   { target: 'claim_extract', d: 'M406 138 C 432 100, 456 75, 480 64', lane: 'utterance' },
   { target: 'slide_inspect', d: 'M406 182 C 424 210, 452 245, 479 258', lane: 'slide' },
-  { target: 'issue_detect', d: 'M498 60 L557 60', lane: 'utterance' },
-  { target: 'issue_classify', d: 'M575 60 L635 60', lane: 'utterance' },
-  { target: 'issue_filter', d: 'M653 60 L712 60', lane: 'utterance' },
-  { target: 'issue_judge', d: 'M730 60 L790 60', lane: 'utterance' },
-  { target: 'syntax_verify', d: 'M499 260 L557 260', lane: 'slide' },
-  { target: 'error_output', d: 'M799 72 L799 231', lane: 'utterance' },
-  { target: 'error_output', d: 'M576 260 L765 260', lane: 'slide' },
+  // 곧바로 아래로 내려가면 이슈 판단 라벨 글자 위를 지나가므로, 노드 오른쪽으로 살짝
+  // 빠져나와 라벨을 비켜간 뒤 완만한 곡선 하나로 내려온다.
+  { target: 'error_output', d: 'M813 58 C 855 62, 855 190, 818 227', lane: 'utterance' },
+  // 슬라이드 검증(문법 검증)은 발화 검증보다 먼저 끝나므로, 이 엣지는 error_output이 아니라
+  // syntax_verify 자신의 완료 여부로 상태를 잡아 발화 검증이 끝나기 전에 먼저 뻗어나가 있게 한다.
+  { target: 'error_output', source: 'syntax_verify', d: 'M576 260 L765 260', lane: 'slide' },
 ]
+
+// source가 target보다 먼저 끝나는 엣지(예: 슬라이드 검증→피드백)는 source가 끝나기 전엔
+// wait(연결 전) 그대로 두고, source가 끝나면 target이 끝나기 전까지는 "이미 도착해서
+// 기다리는" run(점선)으로, target까지 끝나야 비로소 done(실선)으로 바뀐다.
+function edgeStatus(sourceStatus, targetStatus) {
+  if (targetStatus === 'done') return 'done'
+  if (sourceStatus === 'done') return 'run'
+  return 'wait'
+}
 
 function connectorStyle(status, lane, diffLine) {
   const classes = ['diag-connector']
@@ -82,8 +91,8 @@ function estimateTextWidth(label, fontSize) {
   return width
 }
 
-function DiagLabel({ label, x, y, maxWidth = 100 }) {
-  if (estimateTextWidth(label, NODE_FONT_SIZE) <= maxWidth) {
+function DiagLabel({ label, x, y, maxWidth = 100, forceWrap = false }) {
+  if (!forceWrap && estimateTextWidth(label, NODE_FONT_SIZE) <= maxWidth) {
     return <text x={x} y={y} textAnchor="middle" className="diag-node-label">{label}</text>
   }
   const [first, ...rest] = label.split(' ')
@@ -95,6 +104,9 @@ function DiagLabel({ label, x, y, maxWidth = 100 }) {
     </text>
   )
 }
+
+// 슬라이드 추출·슬라이드 분석은 폭에 여유가 있어도 "슬라이드"에서 줄바꿈해 두 줄로 고정한다.
+const FORCE_WRAP_IDS = new Set(['slide_extract', 'slide_analyze'])
 
 function PlainNode({ id, label, lane, status, diffNode }) {
   const { x, y } = NODE_POS[id]
@@ -109,7 +121,13 @@ function PlainNode({ id, label, lane, status, diffNode }) {
         <circle cx={x} cy={y} r="12" className="diag-node-halo" style={style && { stroke: style.stroke }} />
       )}
       <circle cx={x} cy={y} r="12" className={`diag-node diag-node--${status}`} style={style} />
-      <DiagLabel label={label} x={x} y={y + 30} maxWidth={LANE_MAX_WIDTH[lane]} />
+      <DiagLabel
+        label={label}
+        x={x}
+        y={y + 35}
+        maxWidth={LANE_MAX_WIDTH[lane]}
+        forceWrap={FORCE_WRAP_IDS.has(id)}
+      />
     </g>
   )
 }
@@ -126,10 +144,47 @@ function VideoIcon({ status }) {
   const { x, y } = NODE_POS.video
   const s = iconStyles(status)
   return (
-    <g transform={`translate(${x - 43},${y - 31})`}>
-      <rect width="86" height="62" rx="10" className={`diag-icon-box diag-icon-box--${status}`} style={s.box} />
-      <polygon points="34,18 34,44 57,31" className={`diag-icon-play diag-icon-play--${status}`} style={s.fill} />
-      <DiagLabel label="강의 영상" x={43} y={84} maxWidth={ICON_MAX_WIDTH} />
+    <g transform={`translate(${x - 37},${y - 27})`}>
+      <rect width="74" height="54" rx="9" className={`diag-icon-box diag-icon-box--${status}`} style={s.box} />
+      <polygon points="29,16 29,38 49,27" className={`diag-icon-play diag-icon-play--${status}`} style={s.fill} />
+      <DiagLabel label="강의 영상" x={37} y={82} maxWidth={ICON_MAX_WIDTH} />
+    </g>
+  )
+}
+
+// 오른쪽 위 모서리를 접은 문서 모양. 접힌 삼각형도 본체와 같은 상태색 클래스를 써서
+// 배경색(카드색)은 본체와 같고 테두리만 도드라지게 해 "접힌 자국"처럼 보이게 한다.
+function DocumentIcon({ x, y, w, h, fold, status }) {
+  const boxClass = `diag-icon-box diag-icon-box--${status}`
+  return (
+    <>
+      <path d={`M${x} ${y} L${x + w - fold} ${y} L${x + w} ${y + fold} L${x + w} ${y + h} L${x} ${y + h} Z`} className={boxClass} />
+      <path d={`M${x + w - fold} ${y} L${x + w - fold} ${y + fold} L${x + w} ${y + fold} Z`} className={boxClass} />
+    </>
+  )
+}
+
+// 영상(그림/사진 아이콘)·음성(스피커+음파) 미니 아이콘 — 통합 텍스트가 두 입력을
+// 합친 것임을 보여준다. 색은 문서 안 글자줄과 같은 상태색 클래스를 그대로 쓴다.
+// 재생 버튼·필름 스트립은 알아보기 어려워서, 흔히 쓰는 "사진" 픽토그램(액자 + 해 +
+// 산 모양)으로 바꿨다.
+function MiniImageGlyph({ x, y, status, scale = 1 }) {
+  const markClass = `diag-mini-mark diag-mini-mark--${status}`
+  return (
+    <g transform={`translate(${x},${y}) scale(${scale})`}>
+      <rect width="20" height="14" rx="2" className={`diag-icon-frame diag-icon-frame--${status}`} />
+      <circle cx="5.5" cy="4.5" r="1.8" className={markClass} />
+      <polygon points="2,12 8,6 11.5,9.5 15,6.5 18,12" className={markClass} />
+    </g>
+  )
+}
+
+function MiniAudioGlyph({ x, y, status, scale = 1 }) {
+  return (
+    <g transform={`translate(${x},${y}) scale(${scale})`}>
+      <polygon points="0,4 5,4 10,0 10,14 5,10 0,10" className={`diag-mini-mark diag-mini-mark--${status}`} />
+      <path d="M13,3 C16,7 16,7 13,11" className={`diag-icon-wave diag-icon-wave--${status}`} />
+      <path d="M16,0 C20,7 20,7 16,14" className={`diag-icon-wave diag-icon-wave--${status}`} />
     </g>
   )
 }
@@ -137,29 +192,41 @@ function VideoIcon({ status }) {
 function TextIcon({ status }) {
   const { x, y } = NODE_POS.integrated_text
   const s = iconStyles(status)
+  const w = 84
+  const h = 96
+  const fold = 16
   return (
-    <g transform={`translate(${x - 49},${y - 34})`}>
-      <rect width="98" height="68" rx="10" className={`diag-icon-box diag-icon-box--${status}`} style={s.box} />
-      <rect x="14" y="18" width="69" height="7" rx="3.5" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <rect x="14" y="32" width="55" height="7" rx="3.5" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <rect x="14" y="46" width="62" height="7" rx="3.5" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <DiagLabel label="통합 멀티모달 텍스트" x={49} y={90} maxWidth={ICON_MAX_WIDTH} />
+    <g transform={`translate(${x - w / 2},${y - h / 2})`}>
+      <DocumentIcon x={0} y={0} w={w} h={h} fold={fold} status={status} />
+      <MiniImageGlyph x={10} y={20} status={status} scale={1.3} />
+      <MiniAudioGlyph x={48} y={21} status={status} scale={1.3} />
+      <rect x="10" y="52" width="58" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <rect x="10" y="62" width="42" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <rect x="10" y="72" width="50" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <DiagLabel label="멀티모달 통합 텍스트" x={w / 2} y={h + 28} maxWidth={ICON_MAX_WIDTH} forceWrap />
     </g>
   )
 }
 
+// 피드백은 문서 한 장이 아니라 여러 건이므로 뒤에 종이 두 장을 더 겹쳐 "여러 개"임을
+// 보여주고, 안에는 줄글 대신 경고 표시 하나로 "오류"라는 걸 바로 알아보게 한다.
 function StackIcon({ status }) {
   const { x, y } = NODE_POS.error_output
   const s = iconStyles(status)
+  const w = 62
+  const h = 76
   return (
-    <g transform={`translate(${x - 42},${y - 34})`}>
-      <rect x="12" y="12" width="74" height="56" rx="10" className={`diag-stack-sheet diag-stack-sheet--back diag-icon-box--${status}`} style={s.box} />
-      <rect x="6" y="6" width="74" height="56" rx="10" className={`diag-stack-sheet diag-stack-sheet--mid diag-icon-box--${status}`} style={s.box} />
-      <rect width="74" height="56" rx="10" className={`diag-stack-sheet diag-icon-box--${status}`} style={s.box} />
-      <rect x="12" y="17" width="47" height="6" rx="3" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <rect x="12" y="30" width="37" height="6" rx="3" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <rect x="12" y="43" width="42" height="6" rx="3" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
-      <DiagLabel label="오류 산출물" x={43} y={90} maxWidth={ICON_MAX_WIDTH} />
+    <g transform={`translate(${x - (w + 12) / 2},${y - 46})`}>
+      <rect x="12" y="12" width={w} height={h} rx="10" className={`diag-stack-sheet diag-stack-sheet--back diag-icon-box--${status}`} style={s.box} />
+      <rect x="6" y="6" width={w} height={h} rx="10" className={`diag-stack-sheet diag-stack-sheet--mid diag-icon-box--${status}`} style={s.box} />
+      <DocumentIcon x={0} y={0} w={w} h={h} fold={14} status={status} />
+      <polygon points="31,10 43,32 19,32" className={`diag-warning-triangle diag-warning-triangle--${status}`} />
+      <rect x="29.5" y="16" width="3" height="10" rx="1.5" className="diag-warning-mark" />
+      <circle cx="31" cy="29" r="1.6" className="diag-warning-mark" />
+      <rect x="10" y="42" width="38" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <rect x="10" y="52" width="30" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <rect x="10" y="62" width="34" height="4" rx="2" className={`diag-icon-docline diag-icon-docline--${status}`} style={s.fill} />
+      <DiagLabel label="피드백(지식 오류)" x={w / 2} y={h + 40} maxWidth={ICON_MAX_WIDTH} />
     </g>
   )
 }
@@ -178,37 +245,59 @@ function GroupBracket({ x1, x2, y, captionX, caption, variant }) {
   )
 }
 
-// 레인 라벨: 그룹 브래킷과 같은 언어(작은 꺾은선)로 자기 줄의 노드 범위를 가리킨다.
-// 그룹 색(전처리=주황, 검증=보라)을 그대로 물려받아 "이 레인이 어느 그룹 소속인지"까지
-// 은은하게 드러낸다.
-function LaneLabel({ x1, x2, labelY, underlineY, label, variant }) {
-  const midX = (x1 + x2) / 2
-  const tick = 5
+function LaneLabel({ x, y, label }) {
+  return <text x={x} y={y} textAnchor="start" className="diag-lane-label">{label}</text>
+}
+
+// 레인 안의 노드들을 밑줄 대신 알약 모양 배경으로 한 번에 묶어서 보여준다.
+// 노드 라벨 텍스트와 겹치지 않도록 반지름을 노드 반지름(12)보다 살짝만 크게 둔다.
+// 레인 안 노드가 하나라도 run/done이 되기 전까지는 옅게 죽어있다가, 하나라도
+// 불이 들어오는 순간 진하게 살아난다. 색 자체는 그대로 두고 투명도만 바꾼다.
+function LaneCapsule({ x1, x2, y, r = 17, tone, active }) {
   return (
-    <g>
-      <text x={midX} y={labelY} textAnchor="middle" className="diag-lane-label">{label}</text>
-      <path
-        d={`M${x1} ${underlineY - tick} L${x1} ${underlineY} L${x2} ${underlineY} L${x2} ${underlineY - tick}`}
-        className={`diag-lane-bracket diag-lane-bracket--${variant}`}
-      />
-    </g>
+    <rect
+      x={x1 - r}
+      y={y - r}
+      width={x2 - x1 + r * 2}
+      height={r * 2}
+      rx={r}
+      ry={r}
+      className={`diag-lane-capsule diag-lane-capsule--${tone}${active ? '' : ' diag-lane-capsule--dim'}`}
+    />
   )
 }
 
+function isLaneActive(status, ids) {
+  return ids.some(id => status[id] === 'run' || status[id] === 'done')
+}
+
 export default function DiagramPipeline({ status, diffLine = false, diffNode = false, compact = false }) {
+  const videoLaneActive = isLaneActive(status, ['slide_extract', 'slide_analyze'])
+  const audioLaneActive = isLaneActive(status, ['audio_quality', 'voice_transcribe'])
+  const utteranceLaneActive = isLaneActive(status, ['claim_extract', 'issue_detect', 'issue_classify', 'issue_filter', 'issue_judge'])
+  const slideLaneActive = isLaneActive(status, ['slide_inspect', 'syntax_verify'])
+
   return (
     <svg
       viewBox="0 0 880 400"
       className={compact ? 'diag-svg diag-svg--compact' : 'diag-svg'}
       aria-hidden="true"
     >
-      <LaneLabel x1={139} x2={277} labelY={26} underlineY={38} label="영상 분석" variant="pre" />
-      <LaneLabel x1={139} x2={277} labelY={210} underlineY={222} label="오디오 분석" variant="pre" />
-      <LaneLabel x1={473} x2={815} labelY={22} underlineY={34} label="발화 검증" variant="verify" />
-      <LaneLabel x1={473} x2={583} labelY={210} underlineY={222} label="슬라이드 검증" variant="verify" />
+      <LaneLabel x={148} y={41} label="영상 분석" />
+      <LaneLabel x={148} y={225} label="오디오 분석" />
+      <LaneLabel x={482} y={33} label="발화 검증" />
+      <LaneLabel x={482} y={233} label="슬라이드 검증" />
+
+      <LaneCapsule x1={155} x2={261} y={68} tone="pre" active={videoLaneActive} />
+      <LaneCapsule x1={155} x2={261} y={252} tone="pre" active={audioLaneActive} />
+      <LaneCapsule x1={489} x2={799} y={60} tone="utterance" active={utteranceLaneActive} />
+      <LaneCapsule x1={489} x2={566} y={260} tone="slide" active={slideLaneActive} />
 
       {CONNECTORS.map((c, i) => {
-        const { className, style } = connectorStyle(status[c.target], c.lane, diffLine)
+        const rawStatus = c.source
+          ? edgeStatus(status[c.source], status[c.target])
+          : status[c.target]
+        const { className, style } = connectorStyle(rawStatus, c.lane, diffLine)
         return <path key={i} d={c.d} className={className} style={style} />
       })}
 
@@ -229,8 +318,8 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
         )
       })}
 
-      <GroupBracket x1={114} x2={411} y={345} captionX={262} caption="① 전처리" variant="pre" />
-      <GroupBracket x1={444} x2={843} y={345} captionX={644} caption="② 검증" variant="verify" />
+      <GroupBracket x1={2} x2={360} y={345} captionX={181} caption="① 멀티모달 강의 영상 분석" variant="pre" />
+      <GroupBracket x1={374} x2={836} y={345} captionX={605} caption="② 지식 오류 탐지" variant="verify" />
     </svg>
   )
 }
