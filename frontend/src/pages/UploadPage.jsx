@@ -14,7 +14,7 @@ export default function UploadPage() {
           ←
         </button>
       </div>
-      <p className="upload-page-hint">강의 영상을 업로드하면 검증이 시작됩니다. 진행·결과는 강의 목록에서 확인할 수 있어요.</p>
+      <p className="upload-page-hint">강의 영상을 업로드하면 검증이 시작됩니다.</p>
       <UploadForm onUploaded={openLecture} />
     </section>
   )

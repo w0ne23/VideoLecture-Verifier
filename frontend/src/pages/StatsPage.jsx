@@ -71,7 +71,7 @@ export default function StatsPage() {
     <div className="stats-page">
       <div className="stats-page-head">
         <h2>통계</h2>
-        <p>확정·교수확인 Issue만 집계합니다. 기각과 슬라이드 오류는 제외합니다.</p>
+        <p>확정된 최종 오류만 집계하며, 오류 탐지에 소요된 시간과 탐지 결과를 확인할 수 있습니다.</p>
       </div>
 
       <div className="stats-tabs" role="tablist" aria-label="통계 보기">
