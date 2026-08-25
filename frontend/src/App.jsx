@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import SiteHeader from './components/layout/SiteHeader'
+import SiteFooter from './components/layout/SiteFooter'
 import MainPage from './pages/MainPage'
 import VerifyEntryPage from './pages/VerifyEntryPage'
 import UploadPage from './pages/UploadPage'
@@ -64,6 +65,7 @@ function AppShell() {
           </Routes>
         </main>
       </div>
+      {isHome && <SiteFooter />}
     </>
   )
 }

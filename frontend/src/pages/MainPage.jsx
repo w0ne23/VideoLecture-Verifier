@@ -155,12 +155,6 @@ export default function MainPage() {
         )}
       </div>
 
-      <footer className="home-footer">
-        <div className="home-footer-inner">
-          <span>VeriLec</span>
-          <span>Multi-LLM 기반 강의 자료 오류 검증</span>
-        </div>
-      </footer>
     </div>
   )
 }
