@@ -1,5 +1,5 @@
 export const LECTURE_SOURCE_TAGS = [
-  { value: 'youtube', label: '유튜브' },
+  { value: 'youtube', label: 'YouTube' },
   { value: 'kmooc', label: 'K-MOOC' },
   { value: 'kocw', label: 'KOCW' },
   { value: 'instructor', label: '교수자 제공' },
