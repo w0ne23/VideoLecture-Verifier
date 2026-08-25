@@ -33,6 +33,7 @@ export function useDemoPipelineFlow() {
   const [phase, setPhase] = useState(DEMO_PHASES.UPLOAD)
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
+  const [isTitleManual, setIsTitleManual] = useState(false)
   const [stageIndex, setStageIndex] = useState(0)
   const [autoPlay, setAutoPlay] = useState(true)
 
@@ -57,7 +58,13 @@ export function useDemoPipelineFlow() {
   function selectFile(nextFile) {
     if (!nextFile) return
     setFile(nextFile)
-    setTitle(prev => (prev.trim() ? prev : fileTitle(nextFile)))
+    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
+    setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
+  }
+
+  function setTitleManual(value) {
+    setIsTitleManual(true)
+    setTitle(value)
   }
 
   function start() {
@@ -71,6 +78,7 @@ export function useDemoPipelineFlow() {
     setPhase(DEMO_PHASES.UPLOAD)
     setFile(null)
     setTitle('')
+    setIsTitleManual(false)
     setStageIndex(0)
     setAutoPlay(true)
   }
@@ -129,7 +137,7 @@ export function useDemoPipelineFlow() {
     currentStage,
     actions: {
       selectFile,
-      setTitle,
+      setTitle: setTitleManual,
       start,
       reset,
       next,

@@ -4,6 +4,7 @@ import DiagramPipeline from '../components/verifier/DiagramPipeline'
 import VerifierResults from '../components/verifier/VerifierResults'
 import { DEMO_PHASES } from '../hooks/useDemoPipelineFlow'
 import { useDemoDiagramFlow } from '../hooks/useDemoDiagramFlow'
+import { useVideoThumbnail } from '../hooks/useVideoThumbnail'
 import { getLectureResult } from '../api/pipeline'
 
 // 실제 흐름(/upload → /verify/:id → /result/:id)과 화면·문구가 동일하게 보이도록 만든
@@ -23,6 +24,7 @@ const TICK_DELAY_MS = 3000
 function DemoUploadStep({ flow }) {
   const inputRef = useRef(null)
   const { file, title, actions } = flow
+  const thumbnailUrl = useVideoThumbnail(file)
 
   function onDrop(event) {
     event.preventDefault()
@@ -39,7 +41,12 @@ function DemoUploadStep({ flow }) {
         onDrop={onDrop}
       >
         {file
-          ? <span>{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
+          ? (
+            <div className="dropzone-preview">
+              {thumbnailUrl && <img className="dropzone-thumbnail" src={thumbnailUrl} alt="" />}
+              <span className="dropzone-filename">{file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
+            </div>
+          )
           : <span>클릭하거나 영상 파일을 끌어다 놓으세요 (.mp4)</span>}
         <input
           ref={inputRef}
