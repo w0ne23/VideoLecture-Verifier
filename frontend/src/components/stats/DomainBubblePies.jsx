@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ISSUE_TYPES } from '../../data/mockStats'
 
 function polar(cx, cy, r, angle) {
@@ -36,63 +37,97 @@ function slicesFor(typeDist, total) {
   }).filter(Boolean)
 }
 
-export default function DomainBubblePies({ rows, animKey }) {
-  const maxTotal = Math.max(1, ...rows.map(row => row.total))
-  const minR = 52
-  const maxR = 96
+// 현재 도메인 하나를 중앙에 크게, 이전·다음 도메인은 옆에 반투명하게 보여주는 캐러셀.
+// 화살표(이등변 삼각형) 버튼으로 도메인을 넘겨볼 수 있다.
+function DomainPie({ row, radius, showLabels }) {
+  const size = radius * 2 + 8
+  const cx = size / 2
+  const cy = size / 2
+  const slices = slicesFor(row.typeDist, row.total)
 
   return (
-    <div key={animKey} className="stats-bubbles" role="img" aria-label="도메인별 이슈 원 그래프">
-      {rows.map((row, index) => {
-        const radius = minR + (row.total / maxTotal) * (maxR - minR)
-        const size = radius * 2 + 8
-        const cx = size / 2
-        const cy = size / 2
-        const slices = slicesFor(row.typeDist, row.total)
+    <figure className="stats-bubble">
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <g className="stats-bubble-spin" style={{ transformOrigin: `${cx}px ${cy}px` }}>
+          {slices.map(slice => (
+            <path key={slice.key} d={arcPath(cx, cy, radius, slice.start, slice.end)} fill={slice.color}>
+              <title>{`${row.label} · ${slice.label}: ${slice.value}`}</title>
+            </path>
+          ))}
+        </g>
+        {showLabels && slices.map(slice => {
+          const [lx, ly] = polar(cx, cy, radius * 0.62, slice.mid)
+          return (
+            <text
+              key={`${slice.key}-label`}
+              className={`stats-data-label stats-data-label--on-bar stats-data-label--pie${slice.sweep < 24 ? ' stats-data-label--tight' : ''}`}
+              x={lx}
+              y={ly}
+              textAnchor="middle"
+              dominantBaseline="middle"
+            >
+              {slice.value}
+            </text>
+          )
+        })}
+      </svg>
+      <figcaption>
+        <strong>{row.label}</strong>
+        <span>오류 {row.total}건</span>
+      </figcaption>
+    </figure>
+  )
+}
 
-        return (
-          <figure
-            key={row.key}
-            className="stats-bubble"
-            style={{ animationDelay: `${index * 100}ms` }}
-          >
-            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-              <g className="stats-bubble-spin" style={{ transformOrigin: `${cx}px ${cy}px` }}>
-                {slices.map(slice => (
-                  <path
-                    key={slice.key}
-                    d={arcPath(cx, cy, radius, slice.start, slice.end)}
-                    fill={slice.color}
-                  >
-                    <title>{`${row.label} · ${slice.label}: ${slice.value}`}</title>
-                  </path>
-                ))}
-              </g>
-              {slices.map(slice => {
-                // 모든 숫자는 원 안쪽 동일 비율 위치에 두어 밸런스를 맞춤
-                const [lx, ly] = polar(cx, cy, radius * 0.62, slice.mid)
-                return (
-                  <text
-                    key={`${slice.key}-label`}
-                    className={`stats-data-label stats-data-label--on-bar${slice.sweep < 24 ? ' stats-data-label--tight' : ''}`}
-                    x={lx}
-                    y={ly}
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    style={{ animationDelay: `${180 + index * 100}ms` }}
-                  >
-                    {slice.value}
-                  </text>
-                )
-              })}
-            </svg>
-            <figcaption>
-              <strong>{row.label}</strong>
-              <span>Issue {row.total}건</span>
-            </figcaption>
-          </figure>
-        )
-      })}
+export default function DomainBubblePies({ rows, animKey }) {
+  const [index, setIndex] = useState(0)
+  const count = rows.length
+  const safeIndex = ((index % count) + count) % count
+
+  const goPrev = () => setIndex(current => current - 1)
+  const goNext = () => setIndex(current => current + 1)
+
+  const currentRow = rows[safeIndex]
+  const prevRow = count > 1 ? rows[(safeIndex - 1 + count) % count] : null
+  const nextRow = count > 1 ? rows[(safeIndex + 1) % count] : null
+
+  return (
+    <div key={animKey} className="stats-bubbles-carousel" role="img" aria-label="도메인별 이슈 원 그래프">
+      <button
+        type="button"
+        className="stats-bubbles-nav stats-bubbles-nav--prev"
+        onClick={goPrev}
+        disabled={count <= 1}
+        aria-label="이전 도메인"
+      >
+        <span className="stats-bubbles-nav-arrow" />
+      </button>
+
+      <div className="stats-bubbles-track">
+        {prevRow && (
+          <div className="stats-bubble-slot stats-bubble-slot--side">
+            <DomainPie row={prevRow} radius={112} showLabels={false} />
+          </div>
+        )}
+        <div className="stats-bubble-slot stats-bubble-slot--current">
+          <DomainPie row={currentRow} radius={112} showLabels />
+        </div>
+        {nextRow && (
+          <div className="stats-bubble-slot stats-bubble-slot--side">
+            <DomainPie row={nextRow} radius={112} showLabels={false} />
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        className="stats-bubbles-nav stats-bubbles-nav--next"
+        onClick={goNext}
+        disabled={count <= 1}
+        aria-label="다음 도메인"
+      >
+        <span className="stats-bubbles-nav-arrow" />
+      </button>
     </div>
   )
 }

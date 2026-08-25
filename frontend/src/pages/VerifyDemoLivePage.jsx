@@ -154,7 +154,6 @@ export default function VerifyDemoLivePage() {
             ←
           </button>
         </div>
-        <p className="upload-page-hint">강의 영상을 업로드하면 검증이 시작됩니다.</p>
         <DemoUploadStep flow={flow} />
       </section>
     )

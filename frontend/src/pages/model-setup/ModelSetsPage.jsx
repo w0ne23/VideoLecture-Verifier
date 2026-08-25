@@ -644,8 +644,6 @@ export default function ModelSetsPage() {
 
         <div className="ms-stack-section">
           <h3 className="ms-split-title">생성된 셋 <span className="ms-split-title-count">{profiles.length}</span></h3>
-          <p className="ms-preset-hint">적용 중인 셋이 자동으로 위에 표시돼요. 항목을 누르면 선택되고, 카드 안의 적용 버튼을 누르면 이 셋이 적용돼요.</p>
-
           {isLoading && <div className="ms-card"><p className="ms-empty">셋을 불러오는 중이에요…</p></div>}
           {error && <div className="ms-card"><p className="ms-save-error">{String(error.message || error)}</p></div>}
 

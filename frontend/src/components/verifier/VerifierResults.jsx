@@ -5,7 +5,7 @@ const TYPE_LABELS = {
   temporal_error: '오래된 내용',
   scope_overclaim: '과도한 일반화',
   confusing_explanation: '혼동 가능 설명',
-  composite_issue: '복합 오류',
+  composite_issue: '슬라이드 오류',
 }
 
 const MODEL_DISPLAY_NAMES = {
