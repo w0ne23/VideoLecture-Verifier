@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { PHASES } from '../components/verifier/verifierConstants'
 import VerifierResults from '../components/verifier/VerifierResults'
@@ -9,6 +9,7 @@ export default function ResultPage() {
   const navigate = useNavigate()
   const videoRef = useRef(null)
   const goToList = () => navigate('/lectures')
+  const [showVideo, setShowVideo] = useState(false)
 
   const {
     phase,
@@ -52,9 +53,14 @@ export default function ResultPage() {
             검증 과정 보기
           </button>
         )}
+        {phase === PHASES.VERIFY_READY && lecture.video_url && (
+          <button type="button" className="btn" onClick={() => setShowVideo(v => !v)}>
+            {showVideo ? '강의 숨기기' : '강의 같이 보기'}
+          </button>
+        )}
       </div>
 
-      {lecture.video_url && (
+      {lecture.video_url && showVideo && (
         <video ref={videoRef} className="detail-video" src={lecture.video_url} controls preload="metadata" />
       )}
 
