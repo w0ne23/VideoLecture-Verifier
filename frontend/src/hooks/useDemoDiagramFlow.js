@@ -29,6 +29,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
   const [phase, setPhase] = useState(DEMO_PHASES.UPLOAD)
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
+  const [isTitleManual, setIsTitleManual] = useState(false)
   const [tickIndex, setTickIndex] = useState(0)
   const [autoPlay, setAutoPlay] = useState(true)
 
@@ -53,7 +54,13 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
   function selectFile(nextFile) {
     if (!nextFile) return
     setFile(nextFile)
-    setTitle(prev => (prev.trim() ? prev : fileTitle(nextFile)))
+    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
+    setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
+  }
+
+  function setTitleManual(value) {
+    setIsTitleManual(true)
+    setTitle(value)
   }
 
   function start() {
@@ -67,6 +74,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
     setPhase(DEMO_PHASES.UPLOAD)
     setFile(null)
     setTitle('')
+    setIsTitleManual(false)
     setTickIndex(0)
     setAutoPlay(true)
   }
@@ -127,7 +135,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
     activeLabels,
     actions: {
       selectFile,
-      setTitle,
+      setTitle: setTitleManual,
       start,
       reset,
       next,
