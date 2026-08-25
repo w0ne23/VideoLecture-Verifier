@@ -8,12 +8,18 @@ import { NODE_BY_ID, NODE_IDS, TICKS } from '../components/verifier/diagramPipel
 const DEFAULT_TICK_DELAY_MS = 1400
 const LAST_TICK_INDEX = TICKS.length - 1
 
+// 통합 멀티모달 텍스트 생성은 실제로 오래 걸리는 단계가 아니라서, 다른 단계처럼
+// 오래 머무르지 않고 한두 번만 깜빡인 뒤 바로 다음 단계로 넘어가게 짧게 잡는다.
+const QUICK_TICK_NODE_IDS = new Set(['integrated_text'])
+const QUICK_TICK_DELAY_MS = 1500
+
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
 }
 
 function buildStatus(tickIndex, { errorAtCurrent = false } = {}) {
-  const status = Object.fromEntries(NODE_IDS.map(id => [id, 'wait']))
+  // video는 파이프라인 진입 전(업로드 시점)에 이미 끝난 단계라 항상 done으로 표시한다.
+  const status = Object.fromEntries(NODE_IDS.map(id => [id, id === 'video' ? 'done' : 'wait']))
   TICKS.forEach((ids, i) => {
     ids.forEach(id => {
       if (i < tickIndex) status[id] = 'done'
@@ -38,6 +44,9 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
   useEffect(() => {
     if (phase !== DEMO_PHASES.PIPELINE || !autoPlay) return undefined
 
+    const currentIds = TICKS[tickIndex] || []
+    const delay = currentIds.some(id => QUICK_TICK_NODE_IDS.has(id)) ? QUICK_TICK_DELAY_MS : tickDelayMs
+
     timerRef.current = setTimeout(() => {
       setTickIndex(prev => {
         if (prev >= LAST_TICK_INDEX) {
@@ -46,7 +55,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
         }
         return prev + 1
       })
-    }, tickDelayMs)
+    }, delay)
 
     return () => clearTimeout(timerRef.current)
   }, [phase, autoPlay, tickIndex, tickDelayMs])
@@ -75,6 +84,14 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
     setFile(null)
     setTitle('')
     setIsTitleManual(false)
+    setTickIndex(0)
+    setAutoPlay(true)
+  }
+
+  // 파이프라인 화면에서 "이전으로" — reset과 달리 이미 고른 파일·제목은 그대로 두고
+  // 업로드 화면으로만 돌아간다.
+  function backToUpload() {
+    setPhase(DEMO_PHASES.UPLOAD)
     setTickIndex(0)
     setAutoPlay(true)
   }
@@ -138,6 +155,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
       setTitle: setTitleManual,
       start,
       reset,
+      backToUpload,
       next,
       prev,
       toggleAutoPlay,
