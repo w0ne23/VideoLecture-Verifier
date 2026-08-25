@@ -80,14 +80,14 @@ function DemoPipelineStep({ flow, navigate }) {
 
   return (
     <div className="detail">
-      <div className="detail-head">
+      <div className="page-header-row demo-standard-width">
+        <h2 className="list-heading">{title || file?.name || '강의'}</h2>
         <button type="button" className="btn" onClick={() => navigate('/')}>← 메인으로</button>
-        <h2>{title || file?.name || '강의'}</h2>
       </div>
 
-      <div className="vf-pipe diag-breakout">
+      <div className="vf-pipe demo-standard-width">
         <div className="vf-progress-message">{stageMessage}</div>
-        <DiagramPipeline status={status} diffLine diffNode />
+        <DiagramPipeline status={status} diffLine diffNode compact />
       </div>
     </div>
   )

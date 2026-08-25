@@ -11,22 +11,22 @@ import { NODES } from './diagramPipelineConstants'
 const NODE_FONT_SIZE = 13
 
 const NODE_POS = {
-  video: { x: 55, y: 160 },
-  slide_extract: { x: 190, y: 68 },
-  slide_analyze: { x: 320, y: 68 },
-  audio_quality: { x: 190, y: 252 },
-  voice_transcribe: { x: 320, y: 252 },
-  integrated_text: { x: 450, y: 160 },
-  claim_extract: { x: 600, y: 60 },
-  issue_detect: { x: 695, y: 60 },
-  issue_classify: { x: 790, y: 60 },
-  issue_filter: { x: 885, y: 60 },
-  issue_judge: { x: 980, y: 60 },
+  video: { x: 45, y: 160 },
+  slide_extract: { x: 155, y: 68 },
+  slide_analyze: { x: 261, y: 68 },
+  audio_quality: { x: 155, y: 252 },
+  voice_transcribe: { x: 261, y: 252 },
+  integrated_text: { x: 367, y: 160 },
+  claim_extract: { x: 489, y: 60 },
+  issue_detect: { x: 566, y: 60 },
+  issue_classify: { x: 644, y: 60 },
+  issue_filter: { x: 721, y: 60 },
+  issue_judge: { x: 799, y: 60 },
   // 슬라이드 검증의 앞 두 단계를 발화 검증의 앞 두 단계(주장 추출·이슈 탐지)와 같은
   // x좌표에 맞춰서 두 레인이 세로로 나란히 정렬되게 한다.
-  slide_inspect: { x: 600, y: 260 },
-  syntax_verify: { x: 695, y: 260 },
-  error_output: { x: 980, y: 260 },
+  slide_inspect: { x: 489, y: 260 },
+  syntax_verify: { x: 566, y: 260 },
+  error_output: { x: 799, y: 260 },
 }
 
 // 레인마다 노드 사이 간격이 달라서(발화검증 5개는 빽빽, 슬라이드검증 2개는 넉넉) 한 줄로
@@ -44,21 +44,21 @@ const ICON_COLOR = 'var(--info)'
 // 켰을 때 이 lane 값으로 팔레트에서 어느 색을 쓸지 정한다. 전처리 쪽 연결선은 실험 대상이
 // 아니라 lane이 없다.
 const CONNECTORS = [
-  { target: 'slide_extract', d: 'M97 138 C 135 100, 160 78, 179 70' },
-  { target: 'audio_quality', d: 'M97 182 C 135 220, 155 245, 179 250' },
-  { target: 'slide_analyze', d: 'M201 68 L309 68' },
-  { target: 'voice_transcribe', d: 'M201 252 L309 252' },
-  { target: 'integrated_text', d: 'M331 68 C 365 85, 385 110, 402 138' },
-  { target: 'integrated_text', d: 'M331 252 C 365 230, 385 205, 402 182' },
-  { target: 'claim_extract', d: 'M498 138 C 530 100, 560 75, 589 64', lane: 'utterance' },
-  { target: 'slide_inspect', d: 'M498 182 C 520 210, 555 245, 588 258', lane: 'slide' },
-  { target: 'issue_detect', d: 'M611 60 L684 60', lane: 'utterance' },
-  { target: 'issue_classify', d: 'M706 60 L779 60', lane: 'utterance' },
-  { target: 'issue_filter', d: 'M801 60 L874 60', lane: 'utterance' },
-  { target: 'issue_judge', d: 'M896 60 L969 60', lane: 'utterance' },
-  { target: 'syntax_verify', d: 'M612 260 L683 260', lane: 'slide' },
-  { target: 'error_output', d: 'M980 72 L980 231', lane: 'utterance' },
-  { target: 'error_output', d: 'M707 260 L939 260', lane: 'slide' },
+  { target: 'slide_extract', d: 'M79 138 C 110 100, 130 78, 146 70' },
+  { target: 'audio_quality', d: 'M79 182 C 110 220, 126 245, 146 250' },
+  { target: 'slide_analyze', d: 'M164 68 L252 68' },
+  { target: 'voice_transcribe', d: 'M164 252 L252 252' },
+  { target: 'integrated_text', d: 'M270 68 C 297 85, 314 110, 328 138' },
+  { target: 'integrated_text', d: 'M270 252 C 297 230, 314 205, 328 182' },
+  { target: 'claim_extract', d: 'M406 138 C 432 100, 456 75, 480 64', lane: 'utterance' },
+  { target: 'slide_inspect', d: 'M406 182 C 424 210, 452 245, 479 258', lane: 'slide' },
+  { target: 'issue_detect', d: 'M498 60 L557 60', lane: 'utterance' },
+  { target: 'issue_classify', d: 'M575 60 L635 60', lane: 'utterance' },
+  { target: 'issue_filter', d: 'M653 60 L712 60', lane: 'utterance' },
+  { target: 'issue_judge', d: 'M730 60 L790 60', lane: 'utterance' },
+  { target: 'syntax_verify', d: 'M499 260 L557 260', lane: 'slide' },
+  { target: 'error_output', d: 'M799 72 L799 231', lane: 'utterance' },
+  { target: 'error_output', d: 'M576 260 L765 260', lane: 'slide' },
 ]
 
 function connectorStyle(status, lane, diffLine) {
@@ -195,13 +195,17 @@ function LaneLabel({ x1, x2, labelY, underlineY, label, variant }) {
   )
 }
 
-export default function DiagramPipeline({ status, diffLine = false, diffNode = false }) {
+export default function DiagramPipeline({ status, diffLine = false, diffNode = false, compact = false }) {
   return (
-    <svg viewBox="0 0 1080 400" className="diag-svg" aria-hidden="true">
-      <LaneLabel x1={170} x2={340} labelY={26} underlineY={38} label="영상 분석" variant="pre" />
-      <LaneLabel x1={170} x2={340} labelY={210} underlineY={222} label="오디오 분석" variant="pre" />
-      <LaneLabel x1={580} x2={1000} labelY={22} underlineY={34} label="발화 검증" variant="verify" />
-      <LaneLabel x1={580} x2={715} labelY={210} underlineY={222} label="슬라이드 검증" variant="verify" />
+    <svg
+      viewBox="0 0 880 400"
+      className={compact ? 'diag-svg diag-svg--compact' : 'diag-svg'}
+      aria-hidden="true"
+    >
+      <LaneLabel x1={139} x2={277} labelY={26} underlineY={38} label="영상 분석" variant="pre" />
+      <LaneLabel x1={139} x2={277} labelY={210} underlineY={222} label="오디오 분석" variant="pre" />
+      <LaneLabel x1={473} x2={815} labelY={22} underlineY={34} label="발화 검증" variant="verify" />
+      <LaneLabel x1={473} x2={583} labelY={210} underlineY={222} label="슬라이드 검증" variant="verify" />
 
       {CONNECTORS.map((c, i) => {
         const { className, style } = connectorStyle(status[c.target], c.lane, diffLine)
@@ -225,8 +229,8 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
         )
       })}
 
-      <GroupBracket x1={140} x2={505} y={345} captionX={322} caption="① 전처리" variant="pre" />
-      <GroupBracket x1={545} x2={1035} y={345} captionX={790} caption="② 검증" variant="verify" />
+      <GroupBracket x1={114} x2={411} y={345} captionX={262} caption="① 전처리" variant="pre" />
+      <GroupBracket x1={444} x2={843} y={345} captionX={644} caption="② 검증" variant="verify" />
     </svg>
   )
 }
