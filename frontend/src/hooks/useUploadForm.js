@@ -15,6 +15,7 @@ function fileTitle(file) {
 export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
+  const [isTitleManual, setIsTitleManual] = useState(false)
   const [localError, setLocalError] = useState('')
 
   const mutation = useMutation({
@@ -22,6 +23,7 @@ export function useUploadForm({ onUploaded } = {}) {
     onSuccess: created => {
       setFile(null)
       setTitle('')
+      setIsTitleManual(false)
       setLocalError('')
       onUploaded?.(created.id)
     },
@@ -31,7 +33,14 @@ export function useUploadForm({ onUploaded } = {}) {
     if (!nextFile) return
     setFile(nextFile)
     setLocalError('')
-    setTitle(prev => (prev.trim() ? prev : fileTitle(nextFile)))
+    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
+    // (그냥 비어있는지만 보면, 이전 파일에서 자동 채워진 제목이 새 파일을 골라도 그대로 남는다.)
+    setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
+  }
+
+  function setTitleManual(value) {
+    setIsTitleManual(true)
+    setTitle(value)
   }
 
   function submit() {
@@ -47,6 +56,7 @@ export function useUploadForm({ onUploaded } = {}) {
   function reset() {
     setFile(null)
     setTitle('')
+    setIsTitleManual(false)
     setLocalError('')
     mutation.reset()
   }
@@ -58,6 +68,6 @@ export function useUploadForm({ onUploaded } = {}) {
     title,
     errorMessage: localError || mutationError,
     isSubmitting: mutation.isPending,
-    actions: { selectFile, setTitle, submit, reset },
+    actions: { selectFile, setTitle: setTitleManual, submit, reset },
   }
 }
