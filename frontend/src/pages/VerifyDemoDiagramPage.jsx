@@ -59,17 +59,17 @@ function DemoUploadStep({ flow }) {
           onChange={event => actions.selectFile(event.target.files?.[0])}
         />
       </div>
-      <label className="field">
-        <span>강의 제목</span>
-        <input
-          type="text"
-          value={title}
-          placeholder="미입력 시 파일명 사용"
-          onChange={event => actions.setTitle(event.target.value)}
-        />
-      </label>
-      <div className="button-row">
-        <button type="button" className="btn btn--primary" disabled={!file} onClick={actions.start}>
+      <div className="upload-title-row">
+        <label className="field upload-title-field">
+          <span>강의 제목</span>
+          <input
+            type="text"
+            value={title}
+            placeholder="미입력 시 파일명 사용"
+            onChange={event => actions.setTitle(event.target.value)}
+          />
+        </label>
+        <button type="button" className="btn btn--primary upload-title-submit" disabled={!file} onClick={actions.start}>
           검증 시작 (데모)
         </button>
       </div>
