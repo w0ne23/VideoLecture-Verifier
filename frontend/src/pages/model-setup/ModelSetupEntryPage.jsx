@@ -1,15 +1,17 @@
 import { useNavigate } from 'react-router-dom'
-import brainIcon from '../../assets/brain-icon-gold.png'
-import llmSetsIcon from '../../assets/group1-icon-gold.png'
+import brainIcon from '../../assets/brain-icon-teal.png'
+import llmSetsIcon from '../../assets/group1-icon-teal.png'
 
 const ENTRIES = [
   {
+    key: 'models',
     path: '/model-setup/models',
     title: 'LLM 모델 등록',
     desc: '등록된 LLM을 확인하고, API 키로 새 모델을 등록합니다.',
     icon: brainIcon,
   },
   {
+    key: 'sets',
     path: '/model-setup/sets',
     title: 'Multi LLM 셋 만들기',
     desc: '만들어 둔 셋을 확인·적용하고, 새 셋을 구성합니다.',
@@ -36,7 +38,7 @@ export default function ModelSetupEntryPage() {
             key={entry.path}
             onClick={() => navigate(entry.path)}
           >
-            <span className="ms-hero-entry-band">
+            <span className={`ms-hero-entry-band ms-hero-entry-band--${entry.key}`}>
               <img src={entry.icon} alt="" />
             </span>
             <span className="ms-hero-entry-body">

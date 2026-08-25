@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
-import uploadIcon from '../assets/upload-icon-gold.png'
-import listIcon from '../assets/list-icon-gold.png'
+import uploadIcon from '../assets/upload-icon-teal.png'
+import listIcon from '../assets/list-icon-teal.png'
 
 const ENTRIES = [
   {

@@ -41,9 +41,9 @@ export default function MainPage() {
       <div className="hero">
         <svg className="hero-deco" viewBox="0 0 980 420" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
           <g fill="none" strokeLinecap="round">
-            <path d="M-40 340 C 160 280, 280 380, 480 300 S 820 260, 1040 320" stroke="#e2a91a" strokeWidth="1.4" opacity="0.35" />
-            <path d="M-40 300 C 180 240, 300 340, 500 260 S 840 220, 1040 280" stroke="#0d9488" strokeWidth="1.4" opacity="0.3" />
-            <path d="M-40 260 C 200 210, 320 300, 520 230 S 860 190, 1040 240" stroke="#7c3aed" strokeWidth="1.4" opacity="0.22" />
+            <path d="M-400 340 L-40 340 C 160 280, 280 380, 480 300 S 820 260, 1040 320 L1400 320" stroke="#e2a91a" strokeWidth="1.4" opacity="0.35" />
+            <path d="M-400 300 L-40 300 C 180 240, 300 340, 500 260 S 840 220, 1040 280 L1400 280" stroke="#0d9488" strokeWidth="1.4" opacity="0.3" />
+            <path d="M-400 260 L-40 260 C 200 210, 320 300, 520 230 S 860 190, 1040 240 L1400 240" stroke="#7c3aed" strokeWidth="1.4" opacity="0.22" />
             <circle cx="120" cy="80" r="2" fill="#e2a91a" opacity="0.6" />
             <circle cx="220" cy="120" r="1.6" fill="#e2a91a" opacity="0.45" />
             <circle cx="860" cy="70" r="2" fill="#0d9488" opacity="0.5" />
@@ -51,14 +51,13 @@ export default function MainPage() {
           </g>
         </svg>
         <div className="hero-inner">
-          <p className="eyebrow">Multi-LLM 강의 검증</p>
           <h1>
-            강의 영상의 지식 오류를,
+            강의 영상을 <em>멀티모달</em>로 분석하고,
             <br />
-            여러 LLM이 <em>교차 검증</em>합니다.
+            <em>여러 LLM</em>이 강의 속 지식 오류를 탐지한다.
           </h1>
           <p className="lede">
-            모델을 등록하고 검증 셋을 구성한 뒤, 업로드한 강의를 자동으로 분석해 사실 오류와 슬라이드 이슈를 찾아냅니다.
+            사용자가 설정한 Multi-LLM으로 강의 영상 속 지식 오류를 찾고 피드백을 제공합니다.
           </p>
         </div>
       </div>
@@ -158,7 +157,7 @@ export default function MainPage() {
 
       <footer className="home-footer">
         <div className="home-footer-inner">
-          <span>LID</span>
+          <span>VeriLec</span>
           <span>Multi-LLM 기반 강의 자료 오류 검증</span>
         </div>
       </footer>
