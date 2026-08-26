@@ -1,12 +1,13 @@
 import { NODES } from './diagramPipelineConstants'
 
-// /dev/verify-demo-diagram 전용 큰 다이어그램. 전처리(영상 분석/오디오 분석 두 갈래 →
-// 통합 텍스트)와 검증(발화 검증/슬라이드 검증 두 갈래 → 오류) 두 구간을 한 장의 SVG로
-// 그린다. video/integrated_text/error_output 3개만 그림 아이콘이고 나머지 11개는
-// 기존 데모 파이프라인과 같은 원형 노드+연결선 스타일이다. 구간 구분은 사각 박스가
-// 아니라 아래쪽 꺾은선(대괄호 모양 브래킷)으로 표시하고, 레인(영상/오디오/발화/슬라이드)
-// 라벨도 밑줄로 자기 줄의 노드 범위를 가리키게 해서 "뭘 가리키는지 모르겠다"는 문제를
-// 없앤다. 라벨은 폭이 허용하면 한 줄로, 안 되면 첫 공백 기준 두 줄로 접는다.
+// /dev/verify-demo-diagram, VerifyDemoLivePage 공용 큰 다이어그램. 전처리(영상 분석/
+// 오디오 분석 두 갈래 → 통합 텍스트)와 검증(발화 검증/슬라이드 검증 두 갈래 → 오류) 두
+// 구간을 한 장의 SVG로 그린다. video/integrated_text/error_output 3개만 그림 아이콘이고
+// 나머지 11개는 기존 데모 파이프라인과 같은 원형 노드+연결선 스타일이다. "① 멀티모달
+// 강의 영상 분석 / ② 지식 오류 탐지" 구간 브래킷은 파이프라인 진행 텍스트·진행 바가
+// 같은 정보를 이미 보여주므로 제거했다. 레인(영상/오디오/발화/슬라이드) 라벨은 알약
+// 배경(LaneCapsule)이 자기 줄의 노드 범위를 가리킨다. 라벨은 폭이 허용하면 한 줄로,
+// 안 되면 첫 공백 기준 두 줄로 접는다.
 
 const NODE_FONT_SIZE = 13
 
@@ -117,9 +118,6 @@ function PlainNode({ id, label, lane, status, diffNode }) {
   }
   return (
     <g>
-      {status === 'run' && (
-        <circle cx={x} cy={y} r="12" className="diag-node-halo" style={style && { stroke: style.stroke }} />
-      )}
       <circle cx={x} cy={y} r="12" className={`diag-node diag-node--${status}`} style={style} />
       <DiagLabel
         label={label}
@@ -233,18 +231,6 @@ function StackIcon({ status }) {
 
 const ICON_COMPONENTS = { video: VideoIcon, integrated_text: TextIcon, error_output: StackIcon }
 
-function GroupBracket({ x1, x2, y, captionX, caption, variant }) {
-  return (
-    <g>
-      <path
-        d={`M${x1} ${y - 10} L${x1} ${y} L${x2} ${y} L${x2} ${y - 10}`}
-        className={`diag-group-bracket diag-group-bracket--${variant}`}
-      />
-      <text x={captionX} y={y + 24} textAnchor="middle" className="diag-group-caption">{caption}</text>
-    </g>
-  )
-}
-
 function LaneLabel({ x, y, label }) {
   return <text x={x} y={y} textAnchor="start" className="diag-lane-label">{label}</text>
 }
@@ -279,7 +265,7 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
 
   return (
     <svg
-      viewBox="0 0 880 400"
+      viewBox="0 0 880 360"
       className={compact ? 'diag-svg diag-svg--compact' : 'diag-svg'}
       aria-hidden="true"
     >
@@ -317,9 +303,6 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
           />
         )
       })}
-
-      <GroupBracket x1={2} x2={360} y={345} captionX={181} caption="① 멀티모달 강의 영상 분석" variant="pre" />
-      <GroupBracket x1={374} x2={836} y={345} captionX={605} caption="② 지식 오류 탐지" variant="verify" />
     </svg>
   )
 }
