@@ -19,7 +19,7 @@ export default function MainPage() {
           </g>
         </svg>
         <div className="hero-inner">
-          <h1><em>Mul</em>Detect</h1>
+          <h1>Video Lecture <em>Verifier</em></h1>
           <p className="lede">
             강의 영상을 멀티모달로 분석하고, 여러 LLM이 강의 속 지식 오류를 탐지한다.
           </p>
