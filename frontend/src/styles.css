@@ -413,6 +413,29 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .vf-pipe { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
 .vf-progress-message { font-weight: 600; margin-bottom: 18px; }
 .vf-progress-message--divided { margin-top: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+/* 큰 분류·현재 단계를 한 줄로 합친 텍스트 + 스톱워치. 아래쪽 border가 곧 구분선이다. */
+.vf-progress-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  margin-top: 6px; padding-bottom: 14px; border-bottom: 1px solid var(--border);
+}
+.vf-progress-row .vf-progress-message { margin-bottom: 0; font-size: 1.05rem; }
+.vf-progress-message strong { color: var(--primary); font-weight: 700; }
+.vf-stopwatch {
+  flex-shrink: 0; font-variant-numeric: tabular-nums; font-weight: 700;
+  color: var(--text); font-size: 0.95rem; white-space: nowrap;
+}
+
+/* 구분선 아래로 활성 노드 수만큼(보통 1~2개, 한 단계만 진행 중이면 1개) 쌓이는 진행 바.
+   라벨 열의 너비가 가장 긴 라벨에 맞춰 고정되므로("슬라이드 추출"보다 "오디오 품질
+   분석"이 길어도) 바들은 항상 같은 x에서 나란히 시작한다. */
+.vf-stage-bars { display: grid; grid-template-columns: max-content 1fr; align-items: center; column-gap: 12px; row-gap: 10px; margin-top: 14px; }
+.vf-stage-bar-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.vf-stage-bar-track { width: 100%; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.vf-stage-bar-fill { height: 100%; width: 0%; border-radius: 2px; transition-property: width; transition-timing-function: linear; }
+.vf-stage-bar-fill--pre { background: var(--primary); }
+.vf-stage-bar-fill--utterance { background: var(--rose); }
+.vf-stage-bar-fill--slide { background: var(--amber); }
+.vf-stage-bar-fill--done { background: var(--primary); }
 .vf-flow { display: flex; }
 .vf-flow-item { flex: 1; position: relative; text-align: center; padding-top: 4px; }
 .vf-flow-node {
@@ -459,7 +482,10 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
   fill: none; stroke: var(--primary); stroke-width: 2; stroke-dasharray: 6 6;
   animation: demo-dash 1s linear infinite;
 }
-@keyframes demo-dash { to { stroke-dashoffset: -24; } }
+/* stroke-dasharray가 7 7(패턴 길이 14)이므로 오프셋도 14의 배수여야 루프 지점에서
+   패턴이 끊기지 않고 매끄럽게 반복된다(24는 14의 배수가 아니라 매 루프마다 4px씩
+   어긋나며 끊기는 느낌이 났다). */
+@keyframes demo-dash { to { stroke-dashoffset: -28; } }
 
 .demo-anim-text-line {
   fill: var(--primary); transform-box: fill-box; transform-origin: left center;
@@ -678,10 +704,6 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .diag-colorlab-label { font-weight: 600; color: var(--muted); white-space: nowrap; }
 .diag-colorlab label.field { white-space: nowrap; }
 
-.diag-group-bracket { fill: none; stroke-width: 2; }
-.diag-group-bracket--pre { stroke: var(--orange); }
-.diag-group-bracket--verify { stroke: var(--violet); }
-.diag-group-caption { font-size: 17px; font-weight: 700; fill: var(--muted); }
 .diag-lane-label { font-size: 13px; font-weight: 600; fill: var(--muted); letter-spacing: 0.2px; }
 .diag-lane-capsule { stroke-width: 1.5; transition: opacity 0.25s ease; }
 .diag-lane-capsule--dim { opacity: 0.32; }
@@ -696,15 +718,6 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .diag-node--run { fill: var(--primary); stroke: var(--primary); }
 .diag-node--done { fill: var(--primary); stroke: var(--primary); opacity: 0.85; }
 .diag-node--error { fill: var(--red); stroke: var(--red); }
-.diag-node-halo {
-  fill: none; stroke: var(--primary); stroke-width: 2.5; opacity: 0.6;
-  animation: diag-pulse 1.2s ease-out infinite;
-}
-@keyframes diag-pulse {
-  0% { r: 12; opacity: 0.6; }
-  100% { r: 26; opacity: 0; }
-}
-
 .diag-connector { fill: none; stroke-width: 2.5; }
 .diag-connector--wait { stroke: var(--border); stroke-dasharray: 6 6; }
 .diag-connector--done { stroke: var(--primary); opacity: 0.55; }
@@ -718,19 +731,14 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
    블루 계열을 쓴다 — "다 노란색이라 구분 안 된다"는 피드백 반영. */
 .diag-icon-box { fill: var(--card); stroke-width: 2.5; }
 .diag-icon-box--wait { stroke: var(--border); opacity: 0.7; }
-.diag-icon-box--run { stroke: var(--charcoal); animation: diag-icon-glow 1.2s ease-in-out infinite; }
+.diag-icon-box--run { stroke: var(--charcoal); }
 .diag-icon-box--done { stroke: var(--charcoal); }
 .diag-icon-box--error { stroke: var(--red); }
-/* 미니 아이콘(그림 등) 테두리 — diag-icon-box와 색은 같지만 두꺼워지는 강조 애니메이션은
-   문서 본체에만 주고 싶어서 애니메이션 없는 버전을 따로 둔다. */
+/* 미니 아이콘(그림 등) 테두리 — diag-icon-box와 색만 맞춘다. */
 .diag-icon-frame { fill: var(--card); stroke-width: 2; }
 .diag-icon-frame--wait { stroke: var(--border); opacity: 0.7; }
 .diag-icon-frame--run, .diag-icon-frame--done { stroke: var(--info); }
 .diag-icon-frame--error { stroke: var(--red); }
-@keyframes diag-icon-glow {
-  0%, 100% { stroke-width: 2.5; }
-  50% { stroke-width: 5; }
-}
 /* 아이콘 안의 재생 삼각형/텍스트 줄은 해당 단계가 아직 대기 중이면 회색, 진행/완료되면
    블루, 실패하면 빨강으로 — 단계 상태와 무관하게 항상 노란색으로 보이던 것을 고쳤다. */
 .diag-icon-play--wait, .diag-icon-docline--wait { fill: var(--border); }
