@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import LectureList from '../components/LectureList'
 import { LECTURE_SOURCE_TAGS } from '../constants/lectureTags'
+import { listLectures } from '../api/pipeline'
 
 const SORT_OPTIONS = [
   { value: 'date-desc', label: '최신순' },
@@ -20,10 +22,19 @@ export default function LecturesPage() {
 
   const filters = useMemo(() => ({ query, sort, sourceFilter }), [query, sort, sourceFilter])
 
+  // LectureList도 같은 쿼리 키로 조회하므로 react-query 캐시를 공유해 요청이 중복되지 않는다.
+  const { data: lectures = [] } = useQuery({
+    queryKey: ['lectures'],
+    queryFn: () => listLectures(),
+  })
+
   return (
     <section className="lectures-page">
       <div className="page-header-row">
-        <h2 className="list-heading">강의 목록</h2>
+        <h2 className="list-heading">
+          강의 목록
+          <span className="list-heading-count">총 {lectures.length}개</span>
+        </h2>
         <button className="ms-back-btn" type="button" onClick={() => navigate('/verify')} aria-label="강의 검증으로">
           ←
         </button>

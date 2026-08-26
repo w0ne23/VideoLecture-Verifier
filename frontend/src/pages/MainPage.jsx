@@ -1,40 +1,8 @@
-import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
 import ActiveLlmSetBanner from '../components/model-setup/ActiveLlmSetBanner'
-import { listLectures } from '../api/pipeline'
-
-const STATUS_META = {
-  done: { label: '완료', tone: 'done', width: 100 },
-  running: { label: '분석 중', tone: 'review', width: 55 },
-  pending: { label: '대기 중', tone: 'review', width: 15 },
-  error: { label: '오류', tone: 'error', width: 100 },
-}
-
-function formatDate(value) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })
-}
 
 export default function MainPage() {
   const navigate = useNavigate()
-  const { data: lectures = [] } = useQuery({
-    queryKey: ['lectures'],
-    queryFn: () => listLectures(),
-  })
-
-  const recent = useMemo(
-    () =>
-      lectures
-        .slice()
-        .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
-        .slice(0, 3),
-    [lectures],
-  )
-
-  const openLecture = lecture => navigate(lecture.status === 'done' ? `/result/${lecture.id}` : `/verify/${lecture.id}`)
 
   return (
     <div className="home-page">
@@ -117,44 +85,6 @@ export default function MainPage() {
           </span>
         </button>
       </div>
-
-      <div className="activity">
-        <div className="activity-head">
-          <h2>최근 검증한 강의</h2>
-          <button type="button" className="activity-head-link" onClick={() => navigate('/lectures')}>전체 보기</button>
-        </div>
-
-        {recent.length === 0 ? (
-          <p className="activity-empty">아직 검증한 강의가 없습니다.</p>
-        ) : (
-          <div className="activity-grid">
-            {recent.map(lecture => {
-              const meta = STATUS_META[lecture.status] || { label: lecture.status, tone: 'review', width: 30 }
-              return (
-                <button
-                  key={lecture.id}
-                  type="button"
-                  className="activity-item"
-                  onClick={() => openLecture(lecture)}
-                >
-                  <div className="row1">
-                    <span className="name">{lecture.title}</span>
-                    <span className={`pill pill--${meta.tone}`}>{meta.label}</span>
-                  </div>
-                  <div className="meta">
-                    {lecture.status === 'error' ? lecture.error_message : lecture.current_stage}
-                    {lecture.created_at ? ` · ${formatDate(lecture.created_at)}` : ''}
-                  </div>
-                  <div className="bar-track">
-                    <div className={`bar-fill bar-fill--${meta.tone}`} style={{ width: `${meta.width}%` }} />
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </div>
-
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listLectures } from '../api/pipeline'
 import { lectureTagLabel } from '../constants/lectureTags'
@@ -10,16 +10,16 @@ const STATUS_LABELS = {
   error: '오류',
 }
 
+const PAGE_SIZE = 6
+
 function formatDate(value) {
   if (!value) return ''
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleString('ko-KR', {
+  return date.toLocaleDateString('ko-KR', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
   })
 }
 
@@ -39,12 +39,25 @@ function compareBySort(a, b, sort) {
   return String(b.created_at || '').localeCompare(String(a.created_at || ''))
 }
 
+// 목록 API가 아직 썸네일을 안 내려줘서, 실제 프레임 대신 자리표시용 영상 아이콘을 둔다.
+function ThumbnailPlaceholder() {
+  return (
+    <span className="lecture-card-thumb-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24">
+        <rect x="2.5" y="5" width="14" height="14" rx="2.5" />
+        <path d="M16.5 9.5 21 7v10l-4.5-2.5" />
+      </svg>
+    </span>
+  )
+}
+
 export default function LectureList({ onSelect, filters = {} }) {
   const { query = '', sort = 'date-desc', sourceFilter = 'all' } = filters
   const { data: lectures = [], isLoading, error } = useQuery({
     queryKey: ['lectures'],
     queryFn: () => listLectures(),
   })
+  const [page, setPage] = useState(0)
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -58,35 +71,67 @@ export default function LectureList({ onSelect, filters = {} }) {
       .sort((a, b) => compareBySort(a, b, sort))
   }, [lectures, query, sort, sourceFilter])
 
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
+
+  // 검색어·정렬·필터가 바뀌면 다시 첫 페이지부터 보여준다.
+  useEffect(() => {
+    setPage(0)
+  }, [query, sort, sourceFilter])
+
+  // 필터링 결과가 줄어들어 현재 페이지가 범위를 벗어나면 마지막 페이지로 당겨온다.
+  useEffect(() => {
+    setPage(current => Math.min(current, pageCount - 1))
+  }, [pageCount])
+
   if (isLoading) return <p className="list-note">목록을 불러오는 중...</p>
   if (error) return <p className="error-text">목록 조회 실패: {String(error?.message || error)}</p>
   if (lectures.length === 0) return <p className="list-note">업로드된 강의가 없습니다.</p>
   if (visible.length === 0) return <p className="list-note">검색 결과가 없습니다.</p>
 
+  const paged = visible.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
+
   return (
-    <ul className="lecture-list">
-      {visible.map((lecture, index) => (
-        <li key={lecture.id}>
-          <button type="button" className="lecture-row" onClick={() => onSelect(lecture.id)}>
-            <span className="lecture-title">
-              <span className="lecture-title-index">{index + 1}</span>
-              {lecture.title}
-              {lecture.created_at && <span className="lecture-title-date">{formatDate(lecture.created_at)}</span>}
-            </span>
-            <span className="lecture-row-meta">
-              {lecture.source_tag && (
-                <span className="tag-chip">{lectureTagLabel(lecture.source_tag)}</span>
-              )}
-              <span className={`status-chip status-chip--${lecture.status}`}>
-                {STATUS_LABELS[lecture.status] || lecture.status}
+    <>
+      <ul className="lecture-grid">
+        {paged.map(lecture => (
+          <li key={lecture.id}>
+            <button type="button" className="lecture-card" onClick={() => onSelect(lecture.id)}>
+              <span className="lecture-card-thumb">
+                <ThumbnailPlaceholder />
               </span>
-            </span>
-            <span className="lecture-stage">
-              {lecture.status === 'error' ? lecture.error_message : (lecture.status === 'done' ? '' : lecture.current_stage)}
-            </span>
+              <span className="lecture-card-body">
+                <span className="lecture-card-title">{lecture.title}</span>
+                <span className="lecture-card-meta">
+                  {lecture.source_tag && (
+                    <span className="tag-chip">{lectureTagLabel(lecture.source_tag)}</span>
+                  )}
+                  <span className={`status-chip status-chip--${lecture.status}`}>
+                    {STATUS_LABELS[lecture.status] || lecture.status}
+                  </span>
+                </span>
+                {lecture.created_at && <span className="lecture-card-date">{formatDate(lecture.created_at)}</span>}
+                {lecture.status !== 'done' && (
+                  <span className="lecture-card-stage">
+                    {lecture.status === 'error' ? lecture.error_message : lecture.current_stage}
+                  </span>
+                )}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      {pageCount > 1 && (
+        <div className="lecture-pagination">
+          <button type="button" className="btn" onClick={() => setPage(p => p - 1)} disabled={page <= 0}>
+            ← 이전
           </button>
-        </li>
-      ))}
-    </ul>
+          <span className="lecture-pagination-status">{page + 1} / {pageCount}</span>
+          <button type="button" className="btn" onClick={() => setPage(p => p + 1)} disabled={page >= pageCount - 1}>
+            다음 →
+          </button>
+        </div>
+      )}
+    </>
   )
 }

@@ -201,18 +201,11 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 }
 .tag-chip {
   font-size: 0.8rem;
-  padding: 4px 10px;
+  padding: 2px 10px;
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--info);
 }
-.lecture-row-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  justify-self: end;
-}
-
 .button-row { display: flex; gap: 8px; margin-top: 16px; }
 .button-row--center { justify-content: center; }
 .upload-title-row { display: flex; align-items: flex-end; gap: 10px; margin-top: 14px; }
@@ -234,6 +227,7 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .error-text { color: var(--red); font-size: 0.88rem; margin: 10px 0 0; }
 .list-note { color: var(--muted); }
 .list-heading { font-size: 1.35rem; font-weight: 800; margin: 0; }
+.list-heading-count { margin-left: 10px; font-size: 0.85rem; font-weight: 600; color: var(--muted); }
 
 .page-header-row {
   display: flex;
@@ -281,26 +275,50 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 }
 
 /* ── 강의 목록 ── */
-.lecture-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.lecture-row {
-  width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
-  text-align: left; background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 18px; cursor: pointer; font-size: 0.92rem; color: var(--text);
+.lecture-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px;
+}
+.lecture-card {
+  display: flex; flex-direction: column; width: 100%;
+  text-align: left; font: inherit; color: var(--text); cursor: pointer;
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
   box-shadow: 0 1px 4px rgba(30, 40, 90, 0.04);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.lecture-row:hover { border-color: var(--primary); box-shadow: 0 4px 12px rgba(30, 40, 90, 0.08); }
-.lecture-title { display: inline-flex; align-items: center; font-weight: 600; font-size: 1.08rem; }
-.lecture-title-index {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 28px; height: 28px; margin-right: 8px; padding: 0 7px;
-  border-radius: 8px; background: var(--accent-soft); color: var(--primary);
-  font-size: 0.92rem; font-weight: 800; vertical-align: middle;
+.lecture-card:hover { border-color: var(--primary); box-shadow: 0 4px 12px rgba(30, 40, 90, 0.08); }
+.lecture-card-thumb {
+  width: 100%; flex-shrink: 0; box-sizing: border-box;
+  padding: 10px 10px 0;
+  background: var(--card);
 }
-.lecture-title-date { margin-left: 8px; font-weight: 400; font-size: 0.8rem; color: var(--muted); }
-.lecture-row-meta { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.lecture-stage { grid-column: 1 / -1; color: var(--muted); font-size: 0.82rem; }
-.status-chip { font-size: 0.85rem; padding: 4px 12px; border-radius: 999px; background: var(--surface-2); color: var(--slate); }
+.lecture-card-thumb-icon {
+  width: 100%; aspect-ratio: 16 / 9; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); color: var(--muted);
+}
+.lecture-card-thumb-icon svg {
+  width: 34px; height: 34px; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+.lecture-card-body { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px 14px; min-width: 0; }
+.lecture-card-title {
+  font-weight: 600; font-size: 1rem; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lecture-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lecture-card-date { font-size: 0.78rem; color: var(--muted); }
+.lecture-card-stage {
+  color: var(--muted); font-size: 0.8rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.status-chip { font-size: 0.85rem; padding: 2px 12px; border-radius: 999px; background: var(--surface-2); color: var(--slate); }
+
+.lecture-pagination {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 6px;
+}
+.lecture-pagination-status { font-size: 0.85rem; color: var(--muted); }
 .status-chip--running { background: var(--info-soft); color: var(--info); }
 .status-chip--done { background: var(--green-soft); color: var(--green); }
 .status-chip--error { background: var(--red-soft); color: var(--red); }
@@ -2396,7 +2414,7 @@ button.ms-stage-box { cursor: pointer; }
 /* ---------- action cards ---------- */
 .home-page .actions {
   position: relative; z-index: 1;
-  max-width: 980px; margin: -60px auto 0; padding: 0 28px 60px;
+  max-width: 980px; margin: -40px auto 0; padding: 0 28px 60px;
   display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); grid-auto-rows: auto; gap: 10px 18px;
 }
 .home-page .action-cell-slot {
@@ -2443,40 +2461,6 @@ button.ms-stage-box { cursor: pointer; }
 .home-page .card--verify { --accent: var(--pink); }
 .home-page .card--stats { --accent: var(--violet); }
 
-/* ---------- activity strip ---------- */
-.home-page .activity {
-  max-width: 980px; margin: 0 auto; padding: 0 28px 90px;
-}
-.home-page .activity-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
-.home-page .activity-head h2 { margin: 0; font-size: 1rem; font-weight: 700; color: var(--paper); }
-.home-page .activity-head-link {
-  border: none; background: none; padding: 0; font-size: 0.78rem; color: var(--paper-dim); cursor: pointer;
-}
-.home-page .activity-head-link:hover { color: var(--paper); }
-.home-page .activity-empty { color: var(--paper-dim); font-size: 0.86rem; }
-.home-page .activity-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
-.home-page .activity-item {
-  display: block; width: 100%; font: inherit; text-align: left; color: inherit; cursor: pointer;
-  background: var(--navy-2); border: 1px solid var(--border-dark); border-radius: 14px; padding: 16px 18px;
-  box-shadow: 0 2px 8px rgba(30,40,90,0.04);
-  transition: border-color 0.18s ease;
-}
-.home-page .activity-item:hover { border-color: var(--border-dark); background: var(--navy-3); }
-.home-page .activity-item .row1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
-.home-page .activity-item .name { font-size: 0.88rem; font-weight: 600; color: var(--paper); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
-.home-page .pill { flex-shrink: 0; font-size: 0.68rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
-.home-page .pill--done { background: rgba(13,148,136,0.10); color: var(--teal); }
-.home-page .pill--review { background: rgba(226,169,26,0.12); color: var(--gold-dim); }
-.home-page .pill--error { background: rgba(220,38,38,0.09); color: #dc2626; }
-.home-page .activity-item .meta {
-  font-size: 0.76rem; color: var(--paper-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.home-page .bar-track { margin-top: 12px; height: 4px; border-radius: 2px; background: var(--navy-3); overflow: hidden; }
-.home-page .bar-fill { height: 100%; border-radius: 2px; }
-.home-page .bar-fill--done { background: var(--teal); }
-.home-page .bar-fill--review { background: var(--gold); }
-.home-page .bar-fill--error { background: #dc2626; }
-
 .site-footer {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
   background: var(--card); border-top: 1px solid var(--border);
@@ -2489,7 +2473,8 @@ button.ms-stage-box { cursor: pointer; }
 }
 
 @media (max-width: 760px) {
-  .home-page .actions, .home-page .activity-grid { grid-template-columns: 1fr; }
+  .lecture-grid { grid-template-columns: 1fr; }
+  .home-page .actions { grid-template-columns: 1fr; }
   .home-page .action-cell-slot:nth-child(1),
   .home-page .action-cell-slot:nth-child(3) { display: none; }
   .home-page .action-cell-slot:nth-child(2) { order: 2; margin-bottom: 4px; }
