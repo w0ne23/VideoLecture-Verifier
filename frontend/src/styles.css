@@ -244,10 +244,10 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 
 .lectures-page {
   display: flex; flex-direction: column; gap: 12px;
-  width: min(100vw - 40px, 920px); margin-inline: auto;
+  width: 100%; max-width: 920px; margin-inline: auto;
 }
 .upload-page {
-  width: min(100vw - 40px, 920px); margin-inline: auto;
+  width: 100%; max-width: 920px; margin-inline: auto;
 }
 .lectures-toolbar {
   display: flex;
@@ -665,7 +665,7 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
    음수 마진으로 좌우로 확장 — 1280px 안팎의 데스크톱 화면을 기준으로 한 개발용 데모라
    아주 좁은 화면에서의 반응형은 신경 쓰지 않는다. */
 .diag-breakout { margin-left: -95px; margin-right: -95px; }
-.demo-standard-width { width: min(100vw - 40px, 920px); margin-inline: auto; }
+.demo-standard-width { width: 100%; max-width: 920px; margin-inline: auto; }
 .diag-svg { width: 100%; max-width: 1080px; height: auto; display: block; margin: 0 auto; }
 .diag-svg--compact { max-width: 880px; }
 
@@ -970,7 +970,8 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 }
 
 .model-setup {
-  width: min(100vw - 40px, 920px);
+  width: 100%;
+  max-width: 920px;
   margin-inline: auto;
 }
 .ms-header-row {
@@ -1968,7 +1969,7 @@ button.ms-stage-box { cursor: pointer; }
 /* ── 통계 ── */
 .stats-page {
   display: flex; flex-direction: column; gap: 14px;
-  width: min(100vw - 40px, 920px); margin-inline: auto;
+  width: 100%; max-width: 920px; margin-inline: auto;
 }
 .stats-page-head h2 { margin: 0; font-size: 1.35rem; font-weight: 800; }
 .stats-page-head p { margin: 4px 0 0; color: var(--muted); font-size: 0.88rem; }
