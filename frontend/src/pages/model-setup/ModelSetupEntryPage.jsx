@@ -13,8 +13,8 @@ const ENTRIES = [
   {
     key: 'sets',
     path: '/model-setup/sets',
-    title: 'Multi LLM 셋 만들기',
-    desc: '만들어 둔 셋을 확인·적용하고, 새 셋을 구성합니다.',
+    title: 'Multi-LLM 구성하기',
+    desc: '만들어 둔 조합을 확인·적용하고, 새로운 조합을 구성합니다.',
     icon: llmSetsIcon,
   },
 ]

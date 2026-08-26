@@ -1119,8 +1119,8 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .ms-entry-page--verify .ms-hero-entry-band { padding: 90px 0 66px; }
 .ms-entry-page--verify .ms-hero-entry-band img { height: 140px; }
 
-.ms-entry-page--model-setup .ms-hero-entry-band { padding: 74px 0 52px; }
-.ms-entry-page--model-setup .ms-hero-entry-band img { height: 170px; }
+.ms-entry-page--model-setup .ms-hero-entry-band { padding: 84px 0 62px; }
+.ms-entry-page--model-setup .ms-hero-entry-band img { height: 150px; }
 .ms-entry-page--model-setup .ms-hero-entry-band--sets { padding: 60px 0 36px; }
 .ms-entry-page--model-setup .ms-hero-entry-band--sets img { height: 200px; }
 .ms-hero-entry-body { width: 100%; padding: 0 24px 44px; }

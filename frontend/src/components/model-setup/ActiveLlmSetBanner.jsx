@@ -41,7 +41,7 @@ export default function ActiveLlmSetBanner() {
         className="main-llm-set-banner"
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
-        aria-label={`현재 적용 LLM 셋: ${label}`}
+        aria-label={`현재 적용 LLM 조합: ${label}`}
       >
         <span className="main-llm-set-banner-text">
           <strong>{label}</strong>
@@ -74,7 +74,7 @@ export default function ActiveLlmSetBanner() {
             <div className="ms-preset-detail-head">
               <div>
                 <div className="ms-preset-title-row">
-                  <h3 id="main-llm-set-title">{activeProfile?.name || '적용된 LLM 셋 없음'}</h3>
+                  <h3 id="main-llm-set-title">{activeProfile?.name || '적용된 LLM 조합 없음'}</h3>
                   {activeProfile && <span className="ms-preset-badge">적용 중</span>}
                 </div>
                 <p>
