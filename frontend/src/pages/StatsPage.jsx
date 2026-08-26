@@ -1,20 +1,22 @@
 import { useMemo, useState } from 'react'
-import BeforeAfterCompare from '../components/stats/BeforeAfterCompare'
 import DomainBubblePies from '../components/stats/DomainBubblePies'
 import GroupedBarChart from '../components/stats/GroupedBarChart'
 import IssueTypeLegend from '../components/stats/IssueTypeLegend'
 import StackedBarChart from '../components/stats/StackedBarChart'
 import StatsInsight from '../components/stats/StatsInsight'
 import {
-  MOCK_BEFORE_AFTER_PAIRS,
   MOCK_BY_DOMAIN,
   MOCK_BY_DURATION,
   MOCK_BY_TAG,
-  buildCompareInsight,
+  buildDomainInsight,
   buildInsight,
 } from '../data/mockStats'
 
 const VIEWS = [
+  {
+    id: 'domain',
+    label: '도메인별',
+  },
   {
     id: 'tag',
     label: '출처별',
@@ -22,14 +24,6 @@ const VIEWS = [
   {
     id: 'duration',
     label: '강의 길이별',
-  },
-  {
-    id: 'domain',
-    label: '도메인별',
-  },
-  {
-    id: 'compare',
-    label: '수정 전후',
   },
 ]
 
@@ -40,27 +34,19 @@ function rowsFor(view) {
 }
 
 export default function StatsPage() {
-  const [view, setView] = useState('tag')
+  const [view, setView] = useState('domain')
   const [animKey, setAnimKey] = useState(0)
-  const [pairId, setPairId] = useState(MOCK_BEFORE_AFTER_PAIRS[0]?.id)
+  const [domainIndex, setDomainIndex] = useState(0)
   const rows = useMemo(() => rowsFor(view), [view])
-  const pair = useMemo(
-    () => MOCK_BEFORE_AFTER_PAIRS.find(item => item.id === pairId) || MOCK_BEFORE_AFTER_PAIRS[0],
-    [pairId],
-  )
   const insight = useMemo(
-    () => (view === 'compare' ? buildCompareInsight(pair) : buildInsight(view, rows)),
-    [view, rows, pair],
+    () => (view === 'domain' ? buildDomainInsight(rows[domainIndex]) : buildInsight(view, rows)),
+    [view, rows, domainIndex],
   )
 
   function selectView(next) {
     setView(next)
     setAnimKey(key => key + 1)
-  }
-
-  function changePair(nextId) {
-    setPairId(nextId)
-    setAnimKey(key => key + 1)
+    setDomainIndex(0)
   }
 
   return (
@@ -89,18 +75,12 @@ export default function StatsPage() {
       <p className="stats-note">{VIEWS.find(item => item.id === view)?.blurb}</p>
 
       <div className="stats-layout">
-        <section className={`stats-chart-panel${view === 'compare' ? ' stats-chart-panel--compare' : ''}`}>
-          {view !== 'compare' && <IssueTypeLegend />}
+        <section className="stats-chart-panel">
+          <IssueTypeLegend />
           {view === 'tag' && <GroupedBarChart rows={rows} animKey={animKey} />}
           {view === 'duration' && <StackedBarChart rows={rows} animKey={animKey} />}
-          {view === 'domain' && <DomainBubblePies rows={rows} animKey={animKey} />}
-          {view === 'compare' && (
-            <BeforeAfterCompare
-              pairs={MOCK_BEFORE_AFTER_PAIRS}
-              pairId={pair?.id}
-              onPairChange={changePair}
-              animKey={animKey}
-            />
+          {view === 'domain' && (
+            <DomainBubblePies rows={rows} animKey={animKey} onIndexChange={setDomainIndex} />
           )}
         </section>
         <StatsInsight title={insight.title} bullets={insight.bullets} />
