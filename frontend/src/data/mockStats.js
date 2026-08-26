@@ -142,6 +142,23 @@ export function buildInsight(view, rows) {
   }
 }
 
+// 도메인별 뷰는 캐러셀로 도메인을 하나씩 넘겨보는 구조라, 전체 도메인 중 제일 오류가 많은
+// 곳(예: 공학) 설명을 고정으로 보여주면 실제 화면에 보이는 도메인과 설명이 어긋난다.
+// 그래서 현재 캐러셀에 표시 중인 도메인 하나만 받아 그 도메인 기준으로 설명을 만든다.
+export function buildDomainInsight(row) {
+  if (!row) return { title: '도메인별 오류 유형 분포', bullets: ['표시할 도메인이 없습니다.'] }
+  const ranked = rankTypes(row.typeDist)
+  return {
+    title: `${row.label} 도메인 오류 유형 분포`,
+    bullets: [
+      `**${row.label}** 도메인에서 오류가 총 **${row.total}건** 탐지되었습니다.`,
+      ranked[0]
+        ? `가장 많은 유형은 **${ranked[0].label}**이고, 이어서 **${ranked[1]?.label || '—'}** 순입니다.`
+        : '이 도메인에서는 아직 집계된 오류가 없습니다.',
+    ],
+  }
+}
+
 function sideTotal(side) {
   return Object.values(side.typeDist).reduce((sum, n) => sum + n, 0)
 }

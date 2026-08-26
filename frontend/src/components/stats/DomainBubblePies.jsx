@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ISSUE_TYPES } from '../../data/mockStats'
 
 function polar(cx, cy, r, angle) {
@@ -79,13 +79,19 @@ function DomainPie({ row, radius, showLabels }) {
   )
 }
 
-export default function DomainBubblePies({ rows, animKey }) {
+export default function DomainBubblePies({ rows, animKey, onIndexChange }) {
   const [index, setIndex] = useState(0)
   const count = rows.length
   const safeIndex = ((index % count) + count) % count
 
   const goPrev = () => setIndex(current => current - 1)
   const goNext = () => setIndex(current => current + 1)
+
+  // 캐러셀이 넘어갈 때마다 지금 중앙에 있는 도메인을 부모(설명 패널)에도 알려서,
+  // 그래프와 아래 설명이 항상 같은 도메인을 가리키게 한다.
+  useEffect(() => {
+    onIndexChange?.(safeIndex)
+  }, [safeIndex, onIndexChange])
 
   const currentRow = rows[safeIndex]
   const prevRow = count > 1 ? rows[(safeIndex - 1 + count) % count] : null
