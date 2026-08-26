@@ -22,7 +22,7 @@ export default function SiteHeader() {
               <circle cx="12" cy="12" r="9" />
             </svg>
           </span>
-          <span className="site-header-brand-word">MulDetect</span>
+          <span className="site-header-brand-word">Video Lecture Verifier</span>
         </button>
         <div className="site-header-links">
           <button type="button" onClick={() => navigate('/model-setup/sets')}>Multi-LLM 설정</button>
