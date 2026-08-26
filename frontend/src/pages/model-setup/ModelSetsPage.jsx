@@ -456,7 +456,7 @@ export default function ModelSetsPage() {
 
   const buildPayloadOrAlert = () => {
     if (!(name || '').trim()) {
-      window.alert('셋 이름을 입력해주세요.')
+      window.alert('LLM 조합 이름을 입력해주세요.')
       return null
     }
     if (!selectedLlms.length) {
@@ -501,7 +501,7 @@ export default function ModelSetsPage() {
   return (
     <section className="model-setup">
       <div className="ms-header-row">
-        <h2 className="ms-app-title">LLM 셋</h2>
+        <h2 className="ms-app-title">Multi-LLM 구성하기</h2>
         <button className="ms-back-btn" type="button" onClick={() => navigate('/model-setup')} aria-label="선택 화면으로">
           ←
         </button>
@@ -510,17 +510,17 @@ export default function ModelSetsPage() {
       <div className="ms-stack">
         <div className="ms-stack-section" ref={builderRef}>
           <h3 className="ms-split-title">
-            {editingProfileId ? `"${editingProfile?.name || ''}" 수정` : '새 셋 만들기'}
+            {editingProfileId ? `"${editingProfile?.name || ''}" 수정` : '새 조합 만들기'}
           </h3>
 
           <div className="ms-card">
             <div className="ms-set-field">
-              <p className="ms-label">셋 이름</p>
+              <p className="ms-label">LLM 조합 이름</p>
               <input
                 className="ms-name-input"
                 type="text"
                 value={name}
-                placeholder="예: 기본 검증 셋"
+                placeholder="예: 오픈소스 개발자대회 시연용"
                 onChange={event => setName(event.target.value)}
               />
             </div>

@@ -19,13 +19,9 @@ export default function MainPage() {
           </g>
         </svg>
         <div className="hero-inner">
-          <h1>
-            강의 영상을 <em>멀티모달</em>로 분석하고,
-            <br />
-            <em>여러 LLM</em>이 강의 속 지식 오류를 탐지한다.
-          </h1>
+          <h1><em>Mul</em>Detect</h1>
           <p className="lede">
-            사용자가 설정한 Multi-LLM으로 강의 영상 속 지식 오류를 찾고 피드백을 제공합니다.
+            강의 영상을 멀티모달로 분석하고, 여러 LLM이 강의 속 지식 오류를 탐지한다.
           </p>
         </div>
       </div>
@@ -45,7 +41,7 @@ export default function MainPage() {
             </svg>
           </span>
           <span className="action-title">Multi-LLM 사용자 설정</span>
-          <span className="action-desc">LLM을 등록하고, 검증에 쓸 Multi-LLM 셋을 구성합니다.</span>
+          <span className="action-desc">LLM을 등록하고, 검증에 쓸 Multi-LLM 조합을 구성합니다.</span>
           <span className="action-go">
             바로가기
             <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" /></svg>

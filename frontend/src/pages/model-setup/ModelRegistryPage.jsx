@@ -221,7 +221,7 @@ export default function ModelRegistryPage() {
           <h3 className="ms-split-title">새 모델 등록</h3>
           <div className="ms-card">
             <p className="ms-hint" style={{ marginBottom: 12 }}>
-              API 키(또는 로컬 모델명)를 등록하면 여기서 등록한 모델만 LLM 셋 만들기에서 선택할 수 있어요.
+              API 키(또는 로컬 모델명)를 등록하면 여기서 등록한 모델만 LLM 조합 만들기에서 선택할 수 있어요.
             </p>
             <div className="ms-add-row ms-add-row--wrap">
               <select value={providerSelect} onChange={event => {
