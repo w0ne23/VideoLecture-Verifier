@@ -50,19 +50,25 @@ export const MOCK_BY_TAG = [
   }, null, 3),
 ]
 
+// 강의 길이별 뷰는 오류 유형이 아니라 파이프라인 소요 시간(전처리/검증)을 보여준다.
+// 전처리(영상·오디오 분석)는 강의 길이에 거의 비례해서 늘어나는 반면, 검증(LLM 판단)은
+// 강의가 길어져도 거의 늘지 않는다 — 그래서 구간이 길어질수록 전처리가 차지하는 비중이
+// 점점 커진다. lectureMin은 각 구간을 대표하는 강의 길이(분)로, 1분당 평균 처리 시간
+// 계산에 쓰인다.
+export const PROCESS_STAGES = [
+  { key: 'preprocess', label: '전처리 시간', color: '#0d9488' },
+  { key: 'verify', label: '검증 시간', color: '#e11d48' },
+]
+
+function durationRow(key, label, lectureMin, preprocessMin, verifyMin) {
+  return { key, label, lectureMin, preprocessMin, verifyMin, total: preprocessMin + verifyMin }
+}
+
 export const MOCK_BY_DURATION = [
-  series('0_15', '0–15분', {
-    factual_error: 4, temporal_error: 2, scope_overclaim: 2, confusing_explanation: 2, composite_issue: 1,
-  }, 24),
-  series('15_30', '15–30분', {
-    factual_error: 9, temporal_error: 4, scope_overclaim: 5, confusing_explanation: 4, composite_issue: 1,
-  }, 36),
-  series('30_45', '30–45분', {
-    factual_error: 11, temporal_error: 5, scope_overclaim: 6, confusing_explanation: 3, composite_issue: 2,
-  }, 48),
-  series('45_60', '45분–1시간', {
-    factual_error: 10, temporal_error: 6, scope_overclaim: 4, confusing_explanation: 4, composite_issue: 2,
-  }, 62),
+  durationRow('0_15', '0–15분', 8, 1, 2),
+  durationRow('15_30', '15–30분', 23, 4, 2),
+  durationRow('30_45', '30–45분', 38, 7, 3),
+  durationRow('45_60', '45분–1시간', 53, 10, 3),
 ]
 
 export const MOCK_BY_DOMAIN = [
@@ -120,13 +126,20 @@ export function buildInsight(view, rows) {
   }
 
   if (view === 'duration') {
-    const longest = [...rows].sort((a, b) => b.total - a.total)[0]
-    const shortest = [...rows].sort((a, b) => a.total - b.total)[0]
+    const totalPreprocess = rows.reduce((sum, r) => sum + r.preprocessMin, 0)
+    const totalVerify = rows.reduce((sum, r) => sum + r.verifyMin, 0)
+    const totalAll = totalPreprocess + totalVerify
+    const totalLectureMin = rows.reduce((sum, r) => sum + r.lectureMin, 0)
+    const secPerMin = totalLectureMin > 0 ? (totalAll / totalLectureMin) * 60 : 0
+    const preprocessValues = rows.map(r => r.preprocessMin)
+    const verifyValues = rows.map(r => r.verifyMin)
+    const preprocessGap = Math.max(...preprocessValues) - Math.min(...preprocessValues)
+    const verifyGap = Math.max(...verifyValues) - Math.min(...verifyValues)
     return {
-      title: '강의 길이별 오류 탐지 소요 시간 경향',
+      title: '강의 길이별 파이프라인 소요 시간 경향',
       bullets: [
-        `**${longest.label}** 구간에서 오류가 가장 많이 추출되었습니다 (**${longest.total}건**).`,
-        `**${shortest.label}**은(는) 상대적으로 오류가 적습니다 (**${shortest.total}건**).`,
+        `강의 길이가 길어질수록 총 소요 시간도 함께 늘어나며, 평균적으로 강의 1분당 **${secPerMin.toFixed(1)}초**가 소요되었습니다.`,
+        `검증 시간은 구간별로 **${verifyGap}분** 안팎 차이에 그쳐 큰 변화가 없었지만, 전처리 시간은 영상 길이에 따라 **${preprocessGap}분**까지 크게 벌어졌습니다.`,
       ],
     }
   }

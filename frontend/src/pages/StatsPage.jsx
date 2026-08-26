@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import DomainBubblePies from '../components/stats/DomainBubblePies'
 import GroupedBarChart from '../components/stats/GroupedBarChart'
 import IssueTypeLegend from '../components/stats/IssueTypeLegend'
+import ProcessStageLegend from '../components/stats/ProcessStageLegend'
 import StackedBarChart from '../components/stats/StackedBarChart'
 import StatsInsight from '../components/stats/StatsInsight'
 import {
@@ -76,7 +77,7 @@ export default function StatsPage() {
 
       <div className="stats-layout">
         <section className="stats-chart-panel">
-          <IssueTypeLegend />
+          {view === 'duration' ? <ProcessStageLegend /> : <IssueTypeLegend />}
           {view === 'tag' && <GroupedBarChart rows={rows} animKey={animKey} />}
           {view === 'duration' && <StackedBarChart rows={rows} animKey={animKey} />}
           {view === 'domain' && (
