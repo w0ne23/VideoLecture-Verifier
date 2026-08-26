@@ -4,7 +4,8 @@ import listIcon from '../assets/list-icon-teal.png'
 
 const ENTRIES = [
   {
-    path: '/upload',
+    // 실제 파이프라인이 아직 붙어 있지 않아, 완성된 흐름을 보여주는 데모로 대신 보낸다.
+    path: '/dev/verify-demo',
     title: '검증할 강의 업로드',
     desc: '강의 영상을 업로드하고 검증을 시작합니다.',
     icon: uploadIcon,

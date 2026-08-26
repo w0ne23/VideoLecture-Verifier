@@ -301,6 +301,10 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
   width: 34px; height: 34px; fill: none; stroke: currentColor;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
 }
+.lecture-card-thumb-img {
+  width: 100%; aspect-ratio: 16 / 9; border-radius: 8px;
+  object-fit: cover; background: var(--surface-2);
+}
 .lecture-card-body { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px 14px; min-width: 0; }
 .lecture-card-title {
   font-weight: 600; font-size: 1rem; min-width: 0;
