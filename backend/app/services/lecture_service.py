@@ -88,6 +88,21 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
     }
 
 
+def _lecture_thumbnail_url(lecture: Lecture) -> str:
+    """전처리 단계에서 이미 추출해둔 슬라이드 프레임 중 첫 장을 썸네일로 재사용한다.
+    별도로 영상에서 프레임을 다시 뽑을 필요가 없다 - 아직 전처리 전이면 빈 문자열."""
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if not output_dir:
+        return ''
+    slides_dir = output_dir / 'slides'
+    if not slides_dir.is_dir():
+        return ''
+    candidates = sorted(slides_dir.glob('scene_*_base.jpg'))
+    if not candidates:
+        return ''
+    return make_file_url(candidates[0])
+
+
 async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> list[dict[str, Any]]:
     result = await db.execute(
         select(Lecture)
@@ -104,6 +119,7 @@ async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> l
             'title': lecture.title or str(lecture.id),
             'description': lecture.description or '',
             'source_tag': lecture.source_tag,
+            'thumbnail_url': _lecture_thumbnail_url(lecture),
             'status': job.status if job else 'unknown',
             'job_id': str(job.id) if job else None,
             'job_type': job.job_type if job else None,

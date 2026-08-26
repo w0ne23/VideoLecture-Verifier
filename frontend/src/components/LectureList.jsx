@@ -39,7 +39,7 @@ function compareBySort(a, b, sort) {
   return String(b.created_at || '').localeCompare(String(a.created_at || ''))
 }
 
-// 목록 API가 아직 썸네일을 안 내려줘서, 실제 프레임 대신 자리표시용 영상 아이콘을 둔다.
+// 전처리가 아직 안 끝나 슬라이드 프레임이 없는 강의는 자리표시용 영상 아이콘을 둔다.
 function ThumbnailPlaceholder() {
   return (
     <span className="lecture-card-thumb-icon" aria-hidden="true">
@@ -97,7 +97,9 @@ export default function LectureList({ onSelect, filters = {} }) {
           <li key={lecture.id}>
             <button type="button" className="lecture-card" onClick={() => onSelect(lecture.id)}>
               <span className="lecture-card-thumb">
-                <ThumbnailPlaceholder />
+                {lecture.thumbnail_url
+                  ? <img className="lecture-card-thumb-img" src={lecture.thumbnail_url} alt="" />
+                  : <ThumbnailPlaceholder />}
               </span>
               <span className="lecture-card-body">
                 <span className="lecture-card-title">{lecture.title}</span>
