@@ -31,7 +31,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -983,51 +983,45 @@ def _check_single_slide(
     if errors is None:
         return [], True, api_calls, token_usage
 
-    mech_errors, mech_calls, mech_usage = _check_code_syntax_mechanical(
+    return errors, False, api_calls, token_usage
+
+
+def _check_single_slide_syntax(
+    *,
+    model: str,
+    slide: dict[str, Any],
+    img_dir: str | None,
+    max_tokens: int,
+) -> tuple[list[dict[str, Any]], bool, int, dict[str, Any]]:
+    """_check_single_slide(슬라이드 검사)의 문법/코드 오류 점검 짝. 두 검사는 서로
+    결과를 참조하지 않는 완전히 독립된 검사라 별도 라운드로 돌 수 있다 — 다이어그램의
+    slide_inspect/syntax_verify 두 노드에 각각 대응한다."""
+    errors, api_calls, token_usage = _check_code_syntax_mechanical(
         model=model,
         slide=slide,
         img_dir=img_dir,
         max_tokens=max_tokens,
     )
-    errors.extend(mech_errors)
-    api_calls += mech_calls
-    token_usage = cc._merge_token_usage(token_usage, mech_usage)
     return errors, False, api_calls, token_usage
 
 
-def detect_classified_slide_errors(
+def _run_check_pass(
     *,
-    merged_clean_path: str | Path,
-    slide_textualized_path: str | Path | None,
-    slide_classified_path: str | Path | None,
-    models: list[str] | None = None,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    max_workers: int = 20,
-    max_tokens: int = 4096,
-    current_date: str | None = None,
-    min_score: float | None = None,
-) -> dict[str, Any]:
+    slides: list[dict[str, Any]],
+    models: list[str],
+    img_dir: str | None,
+    max_tokens: int,
+    max_workers: int,
+    check_fn: Callable[..., tuple[list[dict[str, Any]], bool, int, dict[str, Any]]],
+    log_label: str,
+) -> dict[str, dict[str, Any]]:
+    """슬라이드 검사/문법 검사 두 라운드가 공유하는 모델별 병렬 처리 로직. check_fn만
+    바꿔서 두 검사에 재사용한다."""
     from . import claim_common as cc
 
-    _load_env()
-    current_date = current_date or datetime.now().date().isoformat()
-    model = str(cc._resolve_stage_model("slide_error") or "").strip()
-    models = [model] if model else (models or _default_models())
-    min_score = DEFAULT_MIN_SCORE if min_score is None else max(0.0, min(1.0, min_score))
-
-    merged_payload = _load_json(merged_clean_path)
-    textualized_payload = _load_json(slide_textualized_path)
-    classified_payload = _load_json(slide_classified_path)
-    slides = _slides_for_check(
-        merged_payload=merged_payload,
-        textualized_payload=textualized_payload,
-        classified_payload=classified_payload,
-    )
-    img_dir = _resolve_img_dir(merged_payload, merged_clean_path)
-
     model_results: dict[str, dict[str, Any]] = {
-        item: {
-            "model": item,
+        model: {
+            "model": model,
             "status": "ok",
             "slide_errors": [],
             "batch_errors": [],
@@ -1035,23 +1029,17 @@ def detect_classified_slide_errors(
             "token_usage": cc._empty_token_usage(),
         }
         for model in models
-        for item in [model]
     }
-    work_items_by_model: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-    for model in models:
-        work_items_by_model[model] = []
-        for slide in slides:
-            work_items_by_model[model].append((model, slide))
+    work_items_by_model: dict[str, list[tuple[str, dict[str, Any]]]] = {
+        model: [(model, slide) for slide in slides] for model in models
+    }
 
     def worker(args: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         model, slide = args
         slide_number = _slide_number(slide) or "?"
-        print(f"    슬라이드 오타 검사 [{slide_number}]", flush=True)
-        errors, parse_failed, api_calls, usage = _check_single_slide(
-            model=model,
-            slide=slide,
-            img_dir=img_dir,
-            max_tokens=max_tokens,
+        print(f"    {log_label} [{slide_number}]", flush=True)
+        errors, parse_failed, api_calls, usage = check_fn(
+            model=model, slide=slide, img_dir=img_dir, max_tokens=max_tokens
         )
         return {
             "model": model,
@@ -1101,6 +1089,104 @@ def detect_classified_slide_errors(
                 model_results[model]["batch_errors"].append(
                     {"slide_number": _slide_number(args[1]), "error": str(exc)}
                 )
+
+    return model_results
+
+
+def _merge_model_results(
+    base: dict[str, dict[str, Any]], other: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """슬라이드 검사/문법 검사 두 라운드의 model_results를 모델별로 합친다."""
+    from . import claim_common as cc
+
+    merged: dict[str, dict[str, Any]] = {}
+    for model in dict.fromkeys([*base.keys(), *other.keys()]):
+        b = base.get(model, {})
+        o = other.get(model, {})
+        merged[model] = {
+            "model": model,
+            "status": "partial_failed" if "partial_failed" in (b.get("status"), o.get("status")) else "ok",
+            "slide_errors": [*(b.get("slide_errors") or []), *(o.get("slide_errors") or [])],
+            "batch_errors": [*(b.get("batch_errors") or []), *(o.get("batch_errors") or [])],
+            "api_calls": int(b.get("api_calls", 0) or 0) + int(o.get("api_calls", 0) or 0),
+            "token_usage": cc._merge_token_usage(b.get("token_usage"), o.get("token_usage")),
+        }
+    return merged
+
+
+def detect_classified_slide_errors(
+    *,
+    merged_clean_path: str | Path,
+    slide_textualized_path: str | Path | None,
+    slide_classified_path: str | Path | None,
+    models: list[str] | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_workers: int = 20,
+    max_tokens: int = 4096,
+    current_date: str | None = None,
+    min_score: float | None = None,
+    stage_notify: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    from . import claim_common as cc
+
+    def notify(stage: str, status: str) -> None:
+        if stage_notify:
+            stage_notify(stage, status)
+
+    _load_env()
+    current_date = current_date or datetime.now().date().isoformat()
+    model = str(cc._resolve_stage_model("slide_error") or "").strip()
+    models = [model] if model else (models or _default_models())
+    min_score = DEFAULT_MIN_SCORE if min_score is None else max(0.0, min(1.0, min_score))
+
+    merged_payload = _load_json(merged_clean_path)
+    textualized_payload = _load_json(slide_textualized_path)
+    classified_payload = _load_json(slide_classified_path)
+    slides = _slides_for_check(
+        merged_payload=merged_payload,
+        textualized_payload=textualized_payload,
+        classified_payload=classified_payload,
+    )
+    img_dir = _resolve_img_dir(merged_payload, merged_clean_path)
+
+    # 슬라이드 검사(일반 오류)와 문법/코드 오류 점검(결정론적 괄호 검사)은 서로 결과를
+    # 참조하지 않는 완전히 독립된 검사다 — 원래도 같은 슬라이드 스레드 안에서 이 둘을
+    # 순서대로만 호출했을 뿐 서로 기다리지 않았으므로, 두 라운드로 나눠도 총 작업량/
+    # 동시성은 그대로다. 다이어그램의 slide_inspect/syntax_verify 두 노드에 맞춰
+    # 각각 자기 진행 상태를 따로 보고한다.
+    notify("verify_slide_inspect", "run")
+    try:
+        inspect_results = _run_check_pass(
+            slides=slides,
+            models=models,
+            img_dir=img_dir,
+            max_tokens=max_tokens,
+            max_workers=max_workers,
+            check_fn=_check_single_slide,
+            log_label="슬라이드 검사",
+        )
+    except Exception:
+        notify("verify_slide_inspect", "error")
+        raise
+    notify("verify_slide_inspect", "done")
+
+    notify("verify_slide_syntax", "run")
+    try:
+        syntax_results = _run_check_pass(
+            slides=slides,
+            models=models,
+            img_dir=img_dir,
+            max_tokens=max_tokens,
+            max_workers=max_workers,
+            check_fn=_check_single_slide_syntax,
+            log_label="문법/코드 오류 점검",
+        )
+    except Exception:
+        notify("verify_slide_syntax", "error")
+        raise
+    notify("verify_slide_syntax", "done")
+
+    model_results = _merge_model_results(inspect_results, syntax_results)
 
     all_errors: list[dict[str, Any]] = []
     token_usage = Counter()

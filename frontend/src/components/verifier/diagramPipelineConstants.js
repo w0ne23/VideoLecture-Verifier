@@ -119,3 +119,41 @@ const LANE_TONE = { video: 'pre', audio: 'pre', utterance: 'utterance', slide: '
 export function laneToneFor(id) {
   return LANE_TONE[NODE_BY_ID[id]?.lane] || 'pre'
 }
+
+// 실제 검증 진행 화면(VerifyProgressPage)이 SSE로 받는 pipelineStages([{stage, status}],
+// verifierConstants.js의 PIPELINE_NODES와 동일한 stageKey 집합)를 이 다이어그램의 노드별
+// status 맵으로 바꾼다. 백엔드가 이제 각 stage를 다이어그램 노드 하나에 정확히 대응하도록
+// 나눠 보고하므로(preprocess.py/classified_slide_error_checker.py), "여러 노드가 상태를
+// 공유"하는 임시방편 없이 그대로 1:1로 옮기면 된다. error_output만 예외로, 발화 체인
+// (issue_judge = verifier_final_verification)과 슬라이드 체인(syntax_verify =
+// verify_slide_syntax)이 둘 다 done이어야 done으로 본다 — 백엔드에 그 자체를 위한 stage가
+// 따로 없다.
+const STAGE_KEY_TO_NODE_ID = {
+  preprocess_slide_extract: 'slide_extract',
+  preprocess_audio_quality: 'audio_quality',
+  preprocess_slide_analyze: 'slide_analyze',
+  preprocess_audio_transcribe: 'voice_transcribe',
+  verifier_build_analyzer_input: 'integrated_text',
+  verifier_claim_extraction: 'claim_extract',
+  verifier_issue_judge: 'issue_detect',
+  verifier_issue_classification: 'issue_classify',
+  verifier_web_grounding: 'issue_filter',
+  verifier_final_verification: 'issue_judge',
+  verify_slide_inspect: 'slide_inspect',
+  verify_slide_syntax: 'syntax_verify',
+}
+
+export function statusMapFromPipelineStages(pipelineStages = []) {
+  const status = Object.fromEntries(NODE_IDS.map(id => [id, 'wait']))
+  // video는 화면 진입 전(업로드 시점)에 이미 끝난 단계라 항상 done으로 고정한다.
+  status.video = 'done'
+
+  for (const item of pipelineStages) {
+    const nodeId = STAGE_KEY_TO_NODE_ID[item?.stage]
+    if (nodeId) status[nodeId] = item.status
+  }
+
+  status.error_output = status.issue_judge === 'done' && status.syntax_verify === 'done' ? 'done' : 'wait'
+
+  return status
+}

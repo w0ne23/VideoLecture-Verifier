@@ -430,12 +430,21 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
    분석"이 길어도) 바들은 항상 같은 x에서 나란히 시작한다. */
 .vf-stage-bars { display: grid; grid-template-columns: max-content 1fr; align-items: center; column-gap: 12px; row-gap: 10px; margin-top: 14px; }
 .vf-stage-bar-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); white-space: nowrap; }
-.vf-stage-bar-track { width: 100%; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.vf-stage-bar-track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .vf-stage-bar-fill { height: 100%; width: 0%; border-radius: 2px; transition-property: width; transition-timing-function: linear; }
 .vf-stage-bar-fill--pre { background: var(--primary); }
 .vf-stage-bar-fill--utterance { background: var(--rose); }
 .vf-stage-bar-fill--slide { background: var(--amber); }
 .vf-stage-bar-fill--done { background: var(--primary); }
+/* 실제 진행 화면은 각 단계가 얼마나 걸릴지 미리 알 수 없어서(데모처럼 고정 시간을
+   기다렸다 0→100%로 채우는 연출이 불가능하다), 진행 중인 단계는 처음부터 가득 찬
+   상태로 두고 밝기만 깜빡여 "지금 진행 중"임을 보여준다 — 아주 짧게 끝나는 단계도
+   중간에 끊긴 것처럼 보이지 않는다. */
+.vf-stage-bar-fill--indeterminate { width: 100%; animation: vf-stage-bar-pulse 1.3s ease-in-out infinite; }
+@keyframes vf-stage-bar-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
 .vf-flow { display: flex; }
 .vf-flow-item { flex: 1; position: relative; text-align: center; padding-top: 4px; }
 .vf-flow-node {
