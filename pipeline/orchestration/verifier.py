@@ -11,7 +11,8 @@ _VERIFIER_STAGE_TIMING_LABELS = {
     "verifier_issue_classification": "V2C issue_classification — 이슈 유형 분류",
     "verifier_web_grounding": "V2D web_grounding — 웹 근거 검증",
     "verifier_final_verification": "V2E final_verification — 멀티 LLM 검증",
-    "verify_slide_errors": "V2F slide_errors — 슬라이드 오류 검사",
+    "verify_slide_inspect": "V2F1 slide_inspect — 슬라이드 검사",
+    "verify_slide_syntax": "V2F2 slide_syntax — 문법/코드 오류 점검",
 }
 
 

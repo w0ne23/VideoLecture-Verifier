@@ -1,8 +1,17 @@
-import { useEffect } from 'react'
+import { Fragment, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { PHASES } from '../components/verifier/verifierConstants'
-import PipelineProgress from '../components/verifier/PipelineProgress'
+import DiagramPipeline from '../components/verifier/DiagramPipeline'
+import {
+  NODE_BY_ID,
+  NODE_IDS,
+  bigPhaseFor,
+  formatDuration,
+  laneToneFor,
+  statusMapFromPipelineStages,
+} from '../components/verifier/diagramPipelineConstants'
 import { useJobStream } from '../hooks/useJobStream'
+import { useElapsedStopwatch } from '../hooks/useElapsedStopwatch'
 
 export default function VerifyProgressPage() {
   const { lectureId } = useParams()
@@ -19,6 +28,8 @@ export default function VerifyProgressPage() {
     isMutating,
     actions,
   } = useJobStream(lectureId, { onExit: goToList })
+
+  const elapsedMs = useElapsedStopwatch(!isLoading && phase === PHASES.PIPELINE)
 
   // 파이프라인이 완료되면 결과 화면으로 이동한다. 이미 완료된 강의로 바로 진입한 경우도
   // 여기서 즉시 리다이렉트되므로, 목록에서는 상태와 무관하게 항상 이 라우트로 보내면 된다.
@@ -37,9 +48,33 @@ export default function VerifyProgressPage() {
         <h2>{lecture.title || lectureId}</h2>
       </div>
 
-      {phase === PHASES.PIPELINE && (
-        <PipelineProgress stages={pipelineStages} statusMessage={currentStage} />
-      )}
+      {phase === PHASES.PIPELINE && (() => {
+        const diagramStatus = statusMapFromPipelineStages(pipelineStages)
+        const activeIds = NODE_IDS.filter(id => diagramStatus[id] === 'run')
+        const bigPhase = bigPhaseFor(activeIds[0] || 'error_output')
+        const stageMessage = String(currentStage || '').trim() || '분석 준비 중...'
+        return (
+          <div className="vf-pipe">
+            <div className="vf-progress-row">
+              <div className="vf-progress-message"><strong>{bigPhase}</strong>: {stageMessage}</div>
+              <span className="vf-stopwatch">{formatDuration(elapsedMs)}</span>
+            </div>
+            {activeIds.length > 0 && (
+              <div className="vf-stage-bars">
+                {activeIds.map(id => (
+                  <Fragment key={id}>
+                    <span className="vf-stage-bar-label">{NODE_BY_ID[id]?.label}</span>
+                    <div className="vf-stage-bar-track">
+                      <div className={`vf-stage-bar-fill vf-stage-bar-fill--indeterminate vf-stage-bar-fill--${laneToneFor(id)}`} />
+                    </div>
+                  </Fragment>
+                ))}
+              </div>
+            )}
+            <DiagramPipeline status={diagramStatus} diffLine diffNode />
+          </div>
+        )
+      })()}
 
       {phase === PHASES.ERROR && (
         <div className="error-box">

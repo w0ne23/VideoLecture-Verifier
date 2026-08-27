@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 import sys
+import threading
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -20,29 +21,35 @@ from app.services.model_settings_service import STAGE_MODEL_ENV_KEYS, fetch_stag
 logger = logging.getLogger(__name__)
 
 PIPELINE_STAGE_KEYS = [
-    'preprocess_extract_media',
-    'preprocess_textualize_transcribe',
-    'preprocess_enrich_audio_annotation',
+    'preprocess_slide_extract',
+    'preprocess_audio_quality',
+    'preprocess_slide_analyze',
+    'preprocess_audio_transcribe',
     'verifier_build_analyzer_input',
     'verifier_claim_extraction',
     'verifier_issue_judge',
     'verifier_issue_classification',
     'verifier_final_verification',
     'verifier_web_grounding',
-    'verify_slide_errors',
+    'verify_slide_inspect',
+    'verify_slide_syntax',
 ]
 
 PIPELINE_STAGE_LABELS = {
-    'preprocess_extract_media': '슬라이드 추출 및 오디오 품질 분석',
-    'preprocess_textualize_transcribe': '슬라이드 텍스트화 및 전체 전사',
-    'preprocess_enrich_audio_annotation': '오디오 맥락 후처리',
+    'preprocess_slide_extract': '슬라이드 추출',
+    'preprocess_audio_quality': '오디오 품질 분석',
+    'preprocess_slide_analyze': '슬라이드 분석',
+    # transcribe_audio(P2B)에 이어 P3 process_audio(오디오 맥락 후처리)까지 끝나야
+    # done으로 보고된다 — 다이어그램의 "음성 전사" 노드에 맞춰 P3를 이 단계에 묶었다.
+    'preprocess_audio_transcribe': '음성 전사',
     'verifier_build_analyzer_input': '검증 입력 데이터 구성',
     'verifier_claim_extraction': '주장 후보 추출',
     'verifier_issue_judge': '이슈 후보 판단',
     'verifier_issue_classification': '이슈 유형 분류',
     'verifier_final_verification': '멀티 LLM 검증',
     'verifier_web_grounding': '웹 근거 검증',
-    'verify_slide_errors': '슬라이드 오류 검사',
+    'verify_slide_inspect': '슬라이드 검사',
+    'verify_slide_syntax': '문법/코드 오류 점검',
 }
 
 
@@ -94,17 +101,30 @@ def pipeline_process(
         stages_state = {key: 'wait' for key in PIPELINE_STAGE_KEYS}
         if job_type == JOB_TYPE_VERIFY_ONLY:
             # verify_only는 이전 실행이 남긴 전처리 산출물을 그대로 재사용하는 것이
-            # 전제라, 전처리 3단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로
+            # 전제라, 전처리 단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로
             # 영원히 남겨두면 프론트에 전처리가 안 끝난 것처럼 보이므로 시작 시점에
             # 바로 완료 처리한다.
-            for key in ('preprocess_extract_media', 'preprocess_textualize_transcribe', 'preprocess_enrich_audio_annotation'):
+            for key in (
+                'preprocess_slide_extract',
+                'preprocess_audio_quality',
+                'preprocess_slide_analyze',
+                'preprocess_audio_transcribe',
+            ):
                 stages_state[key] = 'done'
 
+        # 슬라이드 오류 검사(verify_slide_inspect/verify_slide_syntax) 단계가
+        # verifier_claim_extraction 체인과 별도 스레드에서 동시에 진행되므로
+        # (pipeline/verifier/run_all.py), 두 스레드가 동시에 이 콜백을 호출할 수 있다.
+        # 락 없이 두면 스냅샷을 만들어 DB에 쓰는 순서가 뒤집혀 먼저 만든(더 오래된)
+        # 스냅샷이 나중 것을 덮어쓸 수 있으므로 락으로 직렬화한다.
+        on_progress_lock = threading.Lock()
+
         def on_progress(stage_key: str, status: str):
-            if stage_key in stages_state:
-                stages_state[stage_key] = status
-            stages_array = [{'stage': key, 'status': value} for key, value in stages_state.items()]
-            update_job_stage_sync(job_id, stages_array, _stage_text(stage_key, status))
+            with on_progress_lock:
+                if stage_key in stages_state:
+                    stages_state[stage_key] = status
+                stages_array = [{'stage': key, 'status': value} for key, value in stages_state.items()]
+                update_job_stage_sync(job_id, stages_array, _stage_text(stage_key, status))
             logger.info('[%s] Progress: %s -> %s', job_id, stage_key, status)
 
         with pipeline_log_context(output_dir):

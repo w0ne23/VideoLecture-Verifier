@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -1299,6 +1300,8 @@ def run_classified_issue_pipeline(
     # Keep verifier output visible in both pipeline.log and Docker logs.
     _enable_docker_log_tee()
 
+    from .classified_slide_error_checker import detect_classified_slide_errors
+
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
         raise FileNotFoundError(f"merged_clean 파일 없음: {merged_file}")
@@ -1354,22 +1357,103 @@ def run_classified_issue_pipeline(
 
     # 서브스테이지별 소요시간. notify()가 이미 모든 스테이지 경계(run/done/error)를
     # 호출하고 있어서 그 지점을 그대로 재사용한다 — 별도로 새 계측 지점을 만들지
-    # 않는다. 이 함수는 각 스테이지의 작업을 동기 호출하는 메인 스레드에서만
-    # 실행되므로(스테이지 내부의 ThreadPoolExecutor 동시성과는 무관), 락 없이
-    # dict에 써도 경쟁 조건이 없다.
+    # 않는다. 슬라이드 오류 검사(verify_slide_inspect/verify_slide_syntax)는 아래에서
+    # 별도 스레드로 claim_extraction과 동시에 진행되므로, 두 스레드가 동시에 notify()를
+    # 호출해도 stage_timings/_stage_started_at 갱신과 stage_notify 호출이 서로 뒤섞이지
+    # 않도록 락으로 감싼다.
     stage_timings: dict[str, float] = {}
     _stage_started_at: dict[str, float] = {}
+    _notify_lock = threading.Lock()
 
     def notify(stage: str, status: str) -> None:
-        if status == "run":
-            _stage_started_at[stage] = time.time()
-        elif status in ("done", "error"):
-            started_at = _stage_started_at.pop(stage, None)
-            if started_at is not None:
-                stage_timings[stage] = time.time() - started_at
-        if not stage_notify:
+        with _notify_lock:
+            if status == "run":
+                _stage_started_at[stage] = time.time()
+            elif status in ("done", "error"):
+                started_at = _stage_started_at.pop(stage, None)
+                if started_at is not None:
+                    stage_timings[stage] = time.time() - started_at
+            if not stage_notify:
+                return
+            stage_notify(stage, status)
+
+    # 슬라이드 오류 검사가 읽는 입력(merged_clean/slide_textualized/slide_classified)은
+    # 모두 전처리 산출물이라 claim_extraction ~ final_verification 체인의 결과물을
+    # 전혀 참조하지 않는다. 그래서 그 체인과 완전히 동시에 돌려도 안전하며, 슬라이드
+    # 오류 검사가 보통 더 짧게 끝나므로(다이어그램의 슬라이드 검증 레인과 대응) 여기서
+    # 바로 백그라운드 스레드로 띄운다. 결과/예외는 슬라이드 레인이 필요해지는 지점
+    # (content_view 조립 직전)에서 join()해 회수한다.
+    slide_error_state: dict[str, object] = {}
+
+    def _run_slide_error_stage() -> None:
+        # 슬라이드 검사/문법 검사 각각의 run/done은 detect_classified_slide_errors가
+        # stage_notify로 직접 보고한다(다이어그램의 slide_inspect/syntax_verify 두
+        # 노드에 대응하는 verify_slide_inspect/verify_slide_syntax). 캐시 스킵
+        # 분기에서는 그 함수가 아예 호출되지 않으므로 여기서 두 단계를 바로 done
+        # 처리한다. L6 로그도 여기서 직접 남긴다 — claim_extraction(L1)과 동시에
+        # 돌기 때문에 L1~L5 로그 사이에 섞여 찍힐 수 있지만, join 시점에 찍는 것보다
+        # 실제 실행 시점을 그대로 보여주는 쪽이 정확하다.
+        slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
+        slide_error_cached = _json_file_exists(slide_error_output_path)
+        stage_started = _llm_stage_start(
+            "L6",
+            "check_slide_errors — 슬라이드 오류 검사",
+            [
+                ("입력 슬라이드", f"{slide_count}개"),
+                ("병렬 수", slide_error_max_workers),
+            ],
+        )
+        try:
+            if slide_error_cached:
+                print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
+                print(f"     {slide_error_output_path}")
+                result = _load_json_file(slide_error_output_path)
+                result["output_path"] = str(slide_error_output_path)
+                notify("verify_slide_inspect", "done")
+                notify("verify_slide_syntax", "done")
+            else:
+                result = detect_classified_slide_errors(
+                    merged_clean_path=merged_file,
+                    slide_textualized_path=_related_pipeline_path(merged_file, "_slide_textualized.json"),
+                    slide_classified_path=_related_pipeline_path(merged_file, "_slide_classified.json"),
+                    batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
+                    max_workers=slide_error_max_workers,
+                    max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
+                    current_date=current_date or datetime.now().date().isoformat(),
+                    stage_notify=notify,
+                )
+                result["output_path"] = str(slide_error_output_path)
+                slide_error_output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - 메인 스레드에서 다시 던지기 위해 캡처
+            _llm_stage_failed("L6", "check_slide_errors — 슬라이드 오류 검사", stage_started, exc)
+            slide_error_state["error"] = exc
             return
-        stage_notify(stage, status)
+        result_errors = result.get("slide_errors", []) or []
+        result_summary = result.get("summary", {}) or {}
+        result_failures = sum(
+            len((row.get("batch_errors") or []))
+            for row in (result.get("model_results", {}) or {}).values()
+            if isinstance(row, dict)
+        )
+        stage_timings["L6 슬라이드 오류 검사"] = _llm_stage_done(
+            "L6",
+            "check_slide_errors — 슬라이드 오류 검사",
+            stage_started,
+            rows=[
+                ("검사 슬라이드", f"{result_summary.get('total_slide_count', slide_count)}개"),
+                ("탐지 오류", f"{len(result_errors)}개"),
+                ("배치 실패", f"{result_failures}건"),
+                ("실행 방식", "기존 결과 재사용" if slide_error_cached else "새로 검사"),
+            ],
+            files=[slide_error_output_path],
+        )
+        slide_error_state["result"] = result
+        slide_error_state["output_path"] = slide_error_output_path
+
+    slide_error_thread = threading.Thread(
+        target=_run_slide_error_stage, name="verify-slide-errors", daemon=True
+    )
+    slide_error_thread.start()
 
     claim_stage_started = _llm_stage_start(
         "L1",
@@ -1478,9 +1562,6 @@ def run_classified_issue_pipeline(
         _default_models as _verifier_default_models,
     )
     from .classified_issue_grounder import collect_pre_verifier_evidence_batched
-    from .classified_slide_error_checker import (
-        detect_classified_slide_errors,
-    )
 
     issue_judge_merged_path = Path(issue_judge_result["issue_judge_merged"]).resolve()
     issue_judge_payload = json.loads(issue_judge_merged_path.read_text(encoding="utf-8"))
@@ -1678,61 +1759,21 @@ def run_classified_issue_pipeline(
         files=[verifier_output_path],
     )
 
-    slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
-    slide_classified_path = _related_pipeline_path(merged_file, "_slide_classified.json")
-    slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
-    slide_error_cached = _json_file_exists(slide_error_output_path)
-    slide_error_stage_started = _llm_stage_start(
-        "L6",
-        "check_slide_errors — 슬라이드 오류 검사",
-        [
-            ("입력 슬라이드", f"{slide_count}개"),
-            ("병렬 수", slide_error_max_workers),
-        ],
-    )
-    notify("verify_slide_errors", "run")
-    try:
-        if slide_error_cached:
-            print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
-            print(f"     {slide_error_output_path}")
-            slide_error_result = _load_json_file(slide_error_output_path)
-            slide_error_result["output_path"] = str(slide_error_output_path)
-        else:
-            slide_error_result = detect_classified_slide_errors(
-                merged_clean_path=merged_file,
-                slide_textualized_path=slide_textualized_path,
-                slide_classified_path=slide_classified_path,
-                batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
-                max_workers=slide_error_max_workers,
-                max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
-                current_date=current_date or datetime.now().date().isoformat(),
-            )
-            slide_error_result["output_path"] = str(slide_error_output_path)
-            slide_error_output_path.write_text(json.dumps(slide_error_result, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        _llm_stage_failed("L6", "check_slide_errors — 슬라이드 오류 검사", slide_error_stage_started, exc)
-        notify("verify_slide_errors", "error")
-        raise
-    notify("verify_slide_errors", "done")
+    # claim_extraction(L1) 시작과 동시에 띄워둔 슬라이드 오류 검사 스레드를 여기서
+    # 합류시킨다. 보통 발화 검증 체인(L1~L5)보다 먼저 끝나 있어 join()이 곧바로
+    # 반환되지만, 혹시 아직 끝나지 않았다면 여기서 기다린다. L6 로그는 스레드
+    # 안에서 이미 남겼다.
+    slide_error_thread.join()
+    if "error" in slide_error_state:
+        raise slide_error_state["error"]
+    slide_error_result = slide_error_state["result"]
+    slide_error_output_path = slide_error_state["output_path"]
 
     slide_errors = slide_error_result.get("slide_errors", []) or []
-    slide_error_summary = slide_error_result.get("summary", {}) or {}
     slide_error_failures = sum(
         len((row.get("batch_errors") or []))
         for row in (slide_error_result.get("model_results", {}) or {}).values()
         if isinstance(row, dict)
-    )
-    stage_timings["L6 슬라이드 오류 검사"] = _llm_stage_done(
-        "L6",
-        "check_slide_errors — 슬라이드 오류 검사",
-        slide_error_stage_started,
-        rows=[
-            ("검사 슬라이드", f"{slide_error_summary.get('total_slide_count', slide_count)}개"),
-            ("탐지 오류", f"{len(slide_errors)}개"),
-            ("배치 실패", f"{slide_error_failures}건"),
-            ("실행 방식", "기존 결과 재사용" if slide_error_cached else "새로 검사"),
-        ],
-        files=[slide_error_output_path],
     )
 
     content_view["slide_errors"] = slide_errors
