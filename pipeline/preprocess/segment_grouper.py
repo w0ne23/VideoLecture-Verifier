@@ -19,13 +19,69 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.genai import types
 
 from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
+from .text_processor import _is_ollama_model, _resolve_ollama_model
 from .utils import api_call_with_retry
 
+
+# 기존: 아래 세 LLM 호출(decide_semantic_merges/decide_context_breaks/decide_merge_pair)은
+# GEMINI_GENERATIVE_MODEL(gemini-2.5-flash)로 하드코딩되어 있었음. 비워두면 그 기본값으로 동작.
+CONTEXT_GROUP_MODEL = os.getenv("GRAPHLEC_CONTEXT_GROUP_MODEL", GEMINI_GENERATIVE_MODEL).strip()
 
 CONTEXT_PARALLEL_REQUESTS = max(
     1,
     int(os.getenv("VERILEC_CONTEXT_PARALLEL_REQUESTS", "12")),
 )
+# Ollama로 라우팅되면 서버 동시 처리 한도에 맞춰 상한을 낮춘다 (text_processor._effective_parallel_requests와 동일 패턴).
+CONTEXT_OLLAMA_PARALLEL_REQUESTS = max(
+    1,
+    int(os.getenv("MERGE_CORRECTION_OLLAMA_PARALLEL_REQUESTS", "4")),
+)
+
+
+def _effective_context_parallel_requests() -> int:
+    if _is_ollama_model(CONTEXT_GROUP_MODEL):
+        return min(CONTEXT_PARALLEL_REQUESTS, CONTEXT_OLLAMA_PARALLEL_REQUESTS)
+    return CONTEXT_PARALLEL_REQUESTS
+
+
+def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = True) -> str:
+    """CONTEXT_GROUP_MODEL에 따라 Ollama 또는 Gemini로 호출하고 응답 텍스트를 반환한다."""
+    if _is_ollama_model(CONTEXT_GROUP_MODEL):
+        from .config import get_ollama_client
+
+        client = get_ollama_client()
+        if client is None:
+            raise RuntimeError("Ollama 클라이언트를 만들 수 없습니다 (openai 패키지 확인 필요).")
+        resolved_model, think_override = _resolve_ollama_model(CONTEXT_GROUP_MODEL)
+
+        def call_api():
+            kwargs = {
+                "model": resolved_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_completion_tokens": max_output_tokens,
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            if think_override is not None:
+                kwargs["extra_body"] = {"think": think_override}
+            return client.chat.completions.create(**kwargs)
+
+        response = api_call_with_retry(call_api)
+        return (response.choices[0].message.content or "").strip()
+
+    def call_api():
+        return gemini_client_2.models.generate_content(
+            model=GEMINI_GENERATIVE_MODEL,
+            contents=[types.Part.from_text(text=prompt)],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+
+    response = api_call_with_retry(call_api)
+    return (response.text or "").strip()
 
 
 # 문장 종결로 볼 문장부호 (한국어·영어·공백 제거 후 끝)
@@ -91,19 +147,8 @@ def decide_semantic_merges(groups: list[dict]) -> set[int]:
 설명은 쓰지 말고 JSON만 출력하세요.
 """
 
-    def call_api():
-        return gemini_client_2.models.generate_content(
-            model=GEMINI_GENERATIVE_MODEL,
-            contents=[types.Part.from_text(text=prompt)],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=2048,
-            ),
-        )
-
     try:
-        response = api_call_with_retry(call_api)
-        text = response.text.strip()
+        text = _call_context_llm(prompt, max_output_tokens=2048)
 
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -160,19 +205,8 @@ break_after의 각 숫자 i는 "segment i까지 현재 context로 묶고, segmen
 끊을 지점이 없으면 빈 배열을 반환하세요. 설명은 쓰지 말고 JSON만 출력하세요.
 """
 
-    def call_api():
-        return gemini_client_2.models.generate_content(
-            model=GEMINI_GENERATIVE_MODEL,
-            contents=[types.Part.from_text(text=prompt)],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=2048,
-            ),
-        )
-
     try:
-        response = api_call_with_retry(call_api)
-        text = response.text.strip()
+        text = _call_context_llm(prompt, max_output_tokens=2048)
 
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -267,19 +301,8 @@ def decide_merge_pair(current_text: str, next_text: str, max_chars: int = 400) -
 
 추가 설명이나 다른 문장은 쓰지 말고, "MERGE" 또는 "SPLIT" 중 하나만 출력하세요."""
 
-    def call_api():
-        return gemini_client_2.models.generate_content(
-            model=GEMINI_GENERATIVE_MODEL,
-            contents=[types.Part.from_text(text=prompt)],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=256,
-            ),
-        )
-
     try:
-        response = api_call_with_retry(call_api)
-        text = (response.text or "").strip().upper()
+        text = _call_context_llm(prompt, max_output_tokens=256, json_mode=False).upper()
         if "MERGE" in text and "SPLIT" not in text:
             return True
         if "SPLIT" in text and "MERGE" not in text:
@@ -612,7 +635,7 @@ def group_segments_by_scene_and_context(
         if use_llm_merge and len(entry["initial_groups"]) > 1
     ]
     if llm_jobs:
-        worker_count = min(CONTEXT_PARALLEL_REQUESTS, len(llm_jobs))
+        worker_count = min(_effective_context_parallel_requests(), len(llm_jobs))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_map = {
                 executor.submit(decide_context_breaks, groups): entry_index
