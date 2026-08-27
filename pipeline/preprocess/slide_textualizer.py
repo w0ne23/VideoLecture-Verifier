@@ -79,7 +79,7 @@ class Config:
     model: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini")
     max_retries: int = 3
     retry_delay: float = 5.0
-    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "12"))
+    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "20"))
     ocr_provider: str = os.getenv("GRAPHLEC_SLIDE_OCR_PROVIDER", "none")
     ocr_model_dir: str = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "")
     ocr_lang: str = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual")

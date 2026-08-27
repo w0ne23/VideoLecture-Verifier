@@ -20,7 +20,7 @@ json-repair
 google-genai>=0.8.0
 groq
 openai>=1.0.0
-anthropic>=0.49.0
+anthropic>=0.125.0
 
 # ── Vision (사람 마스킹: YOLO) ────────────────────────────────
 ultralytics>=8.4.90

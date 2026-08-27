@@ -1019,7 +1019,6 @@ def judge_issues(args, merged_clean_path: str, output_dir: Path, claims_jsonl: s
         merged_clean_path,
         output_dir=str(analyzer_dir),
         claims_jsonl=claims_jsonl,
-        issue_judge_min_confidence=getattr(args, "issue_judge_min_confidence", None),
     )
     elapsed = time.time() - t0
     _done("1차 issue judge", elapsed)
@@ -1141,7 +1140,6 @@ def run_verifier(
     result = run_classified_issue_pipeline(
         merged_clean_path,
         output_dir=str(analyzer_dir),
-        issue_judge_min_confidence=getattr(args, "issue_judge_min_confidence", None),
         stage_notify=notify_stage,
     )
     elapsed = time.time() - t0
@@ -1295,12 +1293,6 @@ def get_parser():
         "--stop-after-issue-judge",
         action="store_true",
         help="P3 process_audio context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
-    )
-    parser.add_argument(
-        "--issue-judge-min-confidence",
-        type=float,
-        default=None,
-        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 환경변수 또는 0.8",
     )
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--lecture-id", dest="lecture_id", default=None,

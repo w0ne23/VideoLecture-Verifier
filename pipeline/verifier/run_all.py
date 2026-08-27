@@ -29,6 +29,126 @@ STATUS_CONFIRMED = "confirmed"
 STATUS_PROFESSOR_CHECK = "professor_check"
 STATUS_REJECTED = "rejected"
 _DOCKER_LOG_TEE_ENABLED = False
+_LLM_LOG_RULE = "═" * 72
+_LLM_LOG_SUBRULE = "─" * 72
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(0.0, float(seconds or 0.0))
+    if seconds < 60:
+        return f"{seconds:.1f}초"
+    minutes = int(seconds // 60)
+    remainder = seconds - (minutes * 60)
+    return f"{minutes}분 {remainder:.1f}초"
+
+
+def _format_breakdown(values: dict | None) -> str:
+    if not isinstance(values, dict) or not values:
+        return "없음"
+    return ", ".join(f"{key} {value}건" for key, value in values.items())
+
+
+def _print_log_rows(rows: list[tuple[str, object]] | None) -> None:
+    for label, value in rows or []:
+        print(f"    • {label}: {value}", flush=True)
+
+
+def _llm_pipeline_banner(
+    *,
+    merged_file: Path,
+    output_dir: Path,
+    duration: object,
+    slide_count: int,
+    context_count: int,
+) -> None:
+    print(f"\n{_LLM_LOG_RULE}", flush=True)
+    print("  🤖 LLM 검증 파이프라인 시작", flush=True)
+    print(_LLM_LOG_RULE, flush=True)
+    _print_log_rows([
+        ("입력", merged_file),
+        ("출력 폴더", output_dir),
+        ("강의 길이", duration or "알 수 없음"),
+        ("슬라이드", f"{slide_count}개"),
+        ("Context", f"{context_count}개"),
+    ])
+
+
+def _llm_stage_start(
+    stage_code: str,
+    title: str,
+    rows: list[tuple[str, object]] | None = None,
+) -> float:
+    print(f"\n{_LLM_LOG_RULE}", flush=True)
+    print(f"  {stage_code} {title}", flush=True)
+    print(_LLM_LOG_RULE, flush=True)
+    _print_log_rows(rows)
+    return time.perf_counter()
+
+
+def _llm_stage_done(
+    stage_code: str,
+    title: str,
+    started_at: float,
+    *,
+    rows: list[tuple[str, object]] | None = None,
+    files: list[Path | str] | None = None,
+) -> float:
+    elapsed = time.perf_counter() - started_at
+    print(f"\n  ✅ {stage_code} {title} 완료", flush=True)
+    if rows:
+        print("  📊 결과", flush=True)
+        _print_log_rows(rows)
+    valid_files = [str(path) for path in (files or []) if path]
+    if valid_files:
+        print("  📁 생성 파일", flush=True)
+        for path in valid_files:
+            print(f"    • {path}", flush=True)
+    print(f"  ⏱ 처리 시간: {_format_elapsed(elapsed)}", flush=True)
+    print(_LLM_LOG_SUBRULE, flush=True)
+    return elapsed
+
+
+def _llm_stage_failed(stage_code: str, title: str, started_at: float, exc: Exception) -> None:
+    elapsed = time.perf_counter() - started_at
+    print(f"\n  ❌ {stage_code} {title} 실패", flush=True)
+    _print_log_rows([
+        ("오류", f"{type(exc).__name__}: {exc}"),
+        ("실패까지 경과", _format_elapsed(elapsed)),
+    ])
+    print(_LLM_LOG_SUBRULE, flush=True)
+
+
+def _llm_stage_skipped(stage_code: str, title: str, reason: str) -> None:
+    print(f"\n{_LLM_LOG_RULE}", flush=True)
+    print(f"  {stage_code} {title}", flush=True)
+    print(_LLM_LOG_RULE, flush=True)
+    print(f"  ⏭ 건너뜀: {reason}", flush=True)
+    print(_LLM_LOG_SUBRULE, flush=True)
+
+
+def _llm_pipeline_done(
+    *,
+    started_at: float,
+    timings: dict[str, float],
+    rows: list[tuple[str, object]],
+    files: list[Path | str],
+) -> float:
+    elapsed = time.perf_counter() - started_at
+    print(f"\n{_LLM_LOG_RULE}", flush=True)
+    print("  ✅ LLM 검증 파이프라인 완료", flush=True)
+    print(_LLM_LOG_RULE, flush=True)
+    print("  📊 최종 결과", flush=True)
+    _print_log_rows(rows)
+    print("  ⏱ 단계별 처리 시간", flush=True)
+    for label, seconds in timings.items():
+        print(f"    ✓ {label}: {_format_elapsed(seconds)}", flush=True)
+    print(f"    ✓ 전체: {_format_elapsed(elapsed)}", flush=True)
+    print("  📁 생성 파일", flush=True)
+    for path in files:
+        if path:
+            print(f"    • {path}", flush=True)
+    print(_LLM_LOG_RULE, flush=True)
+    return elapsed
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -65,7 +185,7 @@ def _load_json_file(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 12)
+DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 20)
 CLAIM_EXTRACT_BATCH_SIZE = _env_int(
     "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
     _env_int("VERIFIER_BATCH_SIZE", 4),
@@ -161,7 +281,7 @@ def _default_issue_judge_models() -> list[str]:
         _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
         or _split_model_specs(os.getenv("VERIFIER_ISSUE_JUDGE_MODELS"))
     )
-    return configured or ["gpt-5.4", "claude-sonnet-4.5"]
+    return configured or ["gpt-5.4", "claude-sonnet-5", "grok-4.5"]
 
 
 def _is_openai_model(model: str) -> bool:
@@ -181,7 +301,9 @@ def _is_anthropic_model(model: str) -> bool:
     return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
 
 
-def _issue_judge_min_confidence_for_model(model: str) -> float:
+def _issue_judge_min_confidence_for_model(
+    model: str,
+) -> float:
     """Return the first-pass issue detector threshold for a judge model."""
     def _bounded(value: float) -> float:
         return max(0.0, min(1.0, value))
@@ -207,10 +329,7 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
         )
         default = 0.8
     else:
-        try:
-            default = float(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", "0.8") or 0.8)
-        except ValueError:
-            default = 0.8
+        default = 0.8
 
     for key in env_candidates:
         raw = os.getenv(key)
@@ -223,12 +342,8 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
     return _bounded(default)
 
 
-def _issue_judge_disagreement_reject_delta() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_REJECT_DELTA", 0.40)
-
-
-def _issue_judge_disagreement_keep_confidence() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_KEEP_CONFIDENCE", 0.90)
+def _issue_judge_single_model_keep_confidence() -> float:
+    return _env_float("VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE", 0.85)
 
 
 def _issue_judge_score_lookup(
@@ -251,45 +366,54 @@ def _issue_judge_score_lookup(
     return scores_by_claim
 
 
-def _issue_judge_family_scores(claim_scores: dict[str, float]) -> dict[str, float]:
-    family_scores: dict[str, float] = {}
-    for model, score in claim_scores.items():
-        if _is_openai_model(model):
-            family_scores["gpt"] = score
-        elif _is_anthropic_model(model):
-            family_scores["claude"] = score
-    return family_scores
-
-
-def _issue_judge_disagreement_rejection(
+def _issue_judge_consensus_decision(
     claim_id: str,
-    scores_by_claim: dict[str, dict[str, float]],
     *,
-    threshold: float | None = None,
-    keep_confidence: float | None = None,
-) -> dict | None:
-    threshold = _issue_judge_disagreement_reject_delta() if threshold is None else threshold
-    keep_confidence = (
-        _issue_judge_disagreement_keep_confidence()
-        if keep_confidence is None
-        else keep_confidence
+    issue_models: list[str],
+    evaluated_models: list[str],
+    scores_by_claim: dict[str, dict[str, float]],
+    single_keep_confidence: float | None = None,
+) -> dict:
+    """Resolve detector votes before downstream verification.
+
+    Two or more positive model votes always pass. A single-model candidate
+    passes only when that model reaches the strong-keep threshold.
+    """
+    single_keep_confidence = (
+        _issue_judge_single_model_keep_confidence()
+        if single_keep_confidence is None
+        else single_keep_confidence
     )
-    family_scores = _issue_judge_family_scores(scores_by_claim.get(claim_id, {}) or {})
-    if "gpt" not in family_scores or "claude" not in family_scores:
-        return None
-    max_score = max(float(family_scores["gpt"]), float(family_scores["claude"]))
-    if max_score >= keep_confidence:
-        return None
-    delta = abs(float(family_scores["gpt"]) - float(family_scores["claude"]))
-    if delta < threshold:
-        return None
+    claim_scores = scores_by_claim.get(claim_id, {}) or {}
+    issue_model_count = len(issue_models)
+    evaluated_count = len(evaluated_models)
+    if evaluated_count == 0:
+        return {"keep": False, "status": "all_models_failed"}
+    if issue_model_count == 0:
+        return {"keep": False, "status": "no_issue"}
+    if issue_model_count >= 2:
+        status = "all_models_agreed" if issue_model_count == evaluated_count else "partial_agreement"
+        return {"keep": True, "status": status}
+
+    positive_model = issue_models[0]
+    positive_confidence = _clamp01(claim_scores.get(positive_model, 0.0))
+    if positive_confidence >= single_keep_confidence:
+        return {
+            "keep": True,
+            "status": "single_model_strong",
+            "positive_model": positive_model,
+            "positive_confidence": round(positive_confidence, 6),
+        }
     return {
-        "claim_id": claim_id,
-        "gpt_confidence": round(float(family_scores["gpt"]), 6),
-        "claude_confidence": round(float(family_scores["claude"]), 6),
-        "confidence_delta": round(delta, 6),
-        "reject_delta": round(threshold, 6),
-        "strong_keep_confidence": round(keep_confidence, 6),
+        "keep": False,
+        "status": "rejected_single_model_low_confidence",
+        "rejection": {
+            "claim_id": claim_id,
+            "reason": "single_model_below_strong_keep_confidence",
+            "positive_model": positive_model,
+            "positive_confidence": round(positive_confidence, 6),
+            "strong_keep_confidence": round(single_keep_confidence, 6),
+        },
     }
 
 
@@ -334,11 +458,18 @@ def _rebuild_classified_claim_batches(claims: list[dict], contexts: list[dict], 
 
 def _classified_issue_judge_worker(args_tuple):
     """Worker used by the classified issue pipeline's first issue judge."""
+    started_at = time.perf_counter()
     try:
-        merged_path, model, claims_serialized, current_date, root, env_vars = args_tuple
+        (
+            merged_path,
+            model,
+            claims_serialized,
+            current_date,
+            root,
+            env_vars,
+        ) = args_tuple
         _setup_worker(root, env_vars, model)
         min_confidence = _issue_judge_min_confidence_for_model(model)
-        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(min_confidence)
         from pipeline.verifier.claim_pipeline import prepare_verification as _prepare_verification
         from pipeline.verifier.issue_detector import judge_issue_candidates_only
 
@@ -351,6 +482,7 @@ def _classified_issue_judge_worker(args_tuple):
             ctx["current_date"],
             ctx["hint"],
             ctx["slide_ctx"],
+            min_confidence=min_confidence,
             log_prefix=model,
         )
 
@@ -362,6 +494,7 @@ def _classified_issue_judge_worker(args_tuple):
             "claim_scores": claim_scores,
             "api_calls": api_calls,
             "token_usage": token_usage,
+            "elapsed_sec": round(time.perf_counter() - started_at, 6),
         }
     except Exception as e:
         import traceback
@@ -452,6 +585,7 @@ def _issue_judge_payload(
         "scored_claim_count": len(claim_scores),
         "issue_count": len(issues),
         "api_calls": int(result.get("api_calls", 0) or 0),
+        "elapsed_sec": round(float(result.get("elapsed_sec", 0.0) or 0.0), 6),
         "status": "ok" if ok else "failed",
     }
     if not ok and result.get("error"):
@@ -515,7 +649,6 @@ def _build_issue_judge_comparison(
     issue_counts = {model: len(judge_results.get(model, {}).get("issues", []) or []) for model in models}
     issues_by_model_claim: dict[str, dict[str, list[dict]]] = {}
     scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
 
     for model in models:
         grouped: dict[str, list[dict]] = {}
@@ -529,7 +662,7 @@ def _build_issue_judge_comparison(
     single_model_only_count = 0
     no_issue_claim_count = 0
     disagreement_count = 0
-    rejected_by_disagreement_count = 0
+    rejected_single_model_count = 0
     union_issue_claim_ids = set()
 
     for claim in claims:
@@ -565,32 +698,30 @@ def _build_issue_judge_comparison(
                 model_rows[model] = {"status": "ok", "has_issue": False}
 
         evaluated_count = len(evaluated_models)
-        disagreement_rejection = _issue_judge_disagreement_rejection(
+        decision = _issue_judge_consensus_decision(
             claim_id,
-            scores_by_claim,
-            threshold=disagreement_reject_delta,
+            issue_models=issue_models,
+            evaluated_models=evaluated_models,
+            scores_by_claim=scores_by_claim,
         )
-        if evaluated_count == 0:
-            status = "all_models_failed"
-        elif issue_models and disagreement_rejection:
-            status = "rejected_model_disagreement"
-            rejected_by_disagreement_count += 1
-        elif not issue_models:
-            status = "no_issue"
+        status = str(decision["status"])
+        consensus_rejection = decision.get("rejection")
+        if status == "all_models_failed":
+            pass
+        elif status == "no_issue":
             no_issue_claim_count += 1
-        elif len(issue_models) == evaluated_count:
-            status = "all_models_agreed"
+        elif status == "all_models_agreed":
             all_model_agreed_count += 1
             union_issue_claim_ids.add(claim_id)
-        elif len(issue_models) == 1:
-            status = "single_model_only"
+        elif status == "single_model_strong":
             single_model_only_count += 1
             union_issue_claim_ids.add(claim_id)
             exclusive_by_model[issue_models[0]].append(claim_id)
-        else:
-            status = "partial_agreement"
+        elif status == "partial_agreement":
             disagreement_count += 1
             union_issue_claim_ids.add(claim_id)
+        else:
+            rejected_single_model_count += 1
 
         by_claim.append({
             "claim_id": claim_id,
@@ -603,7 +734,7 @@ def _build_issue_judge_comparison(
                 "status": status,
                 "issue_model_count": len(issue_models),
                 "issue_models": issue_models,
-                "model_disagreement_rejection": disagreement_rejection or {},
+                "single_model_rejection": consensus_rejection or {},
             },
         })
 
@@ -622,8 +753,8 @@ def _build_issue_judge_comparison(
             "all_models_agreed_count": all_model_agreed_count,
             "partial_agreement_count": disagreement_count,
             "single_model_only_count": single_model_only_count,
-            "rejected_by_model_disagreement_count": rejected_by_disagreement_count,
-            "model_disagreement_reject_delta": disagreement_reject_delta,
+            "rejected_single_model_low_confidence_count": rejected_single_model_count,
+            "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
             "no_issue_claim_count": no_issue_claim_count,
         },
         "exclusive_by_model": exclusive_by_model,
@@ -645,8 +776,29 @@ def _write_issue_judge_merged_output(
     duplicate_claim_ids: list[str] = []
     skipped_without_claim_id = 0
     scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
-    rejected_by_disagreement: dict[str, dict] = {}
+    rejected_single_model: dict[str, dict] = {}
+    failed_models = [
+        model for model in models
+        if (judge_results.get(model, {}) or {}).get("ok") is False
+    ]
+    evaluated_models = [model for model in models if model not in failed_models]
+    issue_models_by_claim: dict[str, list[str]] = {}
+    for model in evaluated_models:
+        for issue in (judge_results.get(model, {}) or {}).get("issues", []) or []:
+            if not isinstance(issue, dict):
+                continue
+            claim_id = str(issue.get("claim_id", "") or "").strip()
+            if claim_id and model not in issue_models_by_claim.setdefault(claim_id, []):
+                issue_models_by_claim[claim_id].append(model)
+    decisions_by_claim = {
+        claim_id: _issue_judge_consensus_decision(
+            claim_id,
+            issue_models=issue_models,
+            evaluated_models=evaluated_models,
+            scores_by_claim=scores_by_claim,
+        )
+        for claim_id, issue_models in issue_models_by_claim.items()
+    }
 
     for model in models:
         result = judge_results.get(model, {}) or {}
@@ -659,13 +811,13 @@ def _write_issue_judge_merged_output(
             if not claim_id:
                 skipped_without_claim_id += 1
                 continue
-            disagreement_rejection = _issue_judge_disagreement_rejection(
-                claim_id,
-                scores_by_claim,
-                threshold=disagreement_reject_delta,
-            )
-            if disagreement_rejection:
-                rejected_by_disagreement.setdefault(claim_id, disagreement_rejection)
+            decision = decisions_by_claim.get(claim_id, {})
+            if not decision.get("keep", False):
+                rejection = decision.get("rejection") or {
+                    "claim_id": claim_id,
+                    "reason": str(decision.get("status", "rejected")),
+                }
+                rejected_single_model.setdefault(claim_id, rejection)
                 continue
 
             source_summary = {
@@ -697,6 +849,7 @@ def _write_issue_judge_merged_output(
             row["detected_by_models"] = [model]
             row["representative_model"] = model
             row["source_model_issues"] = [source_summary]
+            row["detector_consensus"] = decision
             seen_by_claim[claim_id] = row
             merged_issues.append(row)
 
@@ -707,10 +860,6 @@ def _write_issue_judge_merged_output(
         model: len((judge_results.get(model, {}) or {}).get("issues", []) or [])
         for model in models
     }
-    failed_models = [
-        model for model in models
-        if (judge_results.get(model, {}) or {}).get("ok") is False
-    ]
     summary = {
         "input_model_count": len(models),
         "failed_models": failed_models,
@@ -719,8 +868,8 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "duplicate_claim_count": len(set(duplicate_claim_ids)),
         "skipped_without_claim_id": skipped_without_claim_id,
-        "rejected_by_model_disagreement_count": len(rejected_by_disagreement),
-        "model_disagreement_reject_delta": disagreement_reject_delta,
+        "rejected_single_model_low_confidence_count": len(rejected_single_model),
+        "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
     }
     payload = {
         "schema_version": "issue_judge_merged.v1",
@@ -731,7 +880,7 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "summary": summary,
         "issues": merged_issues,
-        "rejected_by_model_disagreement": list(rejected_by_disagreement.values()),
+        "rejected_single_model_low_confidence": list(rejected_single_model.values()),
     }
     path = output_dir / f"{base_stem}_issue_judge.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -754,7 +903,6 @@ def run_issue_judge_only(
     issue_judge_models: list[str] | None = None,
     issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     current_date: str | None = None,
-    issue_judge_min_confidence: float | None = None,
     issue_judge_max_workers: int = DEFAULT_ISSUE_JUDGE_MAX_WORKERS,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
@@ -813,9 +961,6 @@ def run_issue_judge_only(
     ]
     if missing_judge_keys:
         raise RuntimeError(f"issue judge 모델 키가 필요합니다: {', '.join(missing_judge_keys)}")
-    if issue_judge_min_confidence is not None:
-        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(issue_judge_min_confidence)
-
     ctx = prepare_verification(str(merged_file), current_date=current_date)
     claims = _load_claims_jsonl(claims_path)
 
@@ -834,7 +979,14 @@ def run_issue_judge_only(
         futures = {
             executor.submit(
                 _classified_issue_judge_worker,
-                (str(merged_file), model, claims_serialized, current_date, root, env_vars),
+                (
+                    str(merged_file),
+                    model,
+                    claims_serialized,
+                    current_date,
+                    root,
+                    env_vars,
+                ),
             ): model
             for model in models
         }
@@ -896,6 +1048,10 @@ def run_issue_judge_only(
         "summary": comparison.get("summary", {}),
         "merged_summary": merged_issue_judge.get("summary", {}),
         "token_usage_per_model": token_usage_per_model,
+        "elapsed_sec_per_model": {
+            model: round(float(result.get("elapsed_sec", 0.0) or 0.0), 6)
+            for model, result in judge_results.items()
+        },
         "token_usage": total_token_usage,
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1119,7 +1275,6 @@ def run_classified_issue_pipeline(
     claims_jsonl: str | None = None,
     reuse_claims: bool = False,
     current_date: str | None = None,
-    issue_judge_min_confidence: float | None = None,
     issue_judge_models: list[str] | None = None,
     issue_type_models: list[str] | None = None,
     verifier_models: list[str] | None = None,
@@ -1151,10 +1306,32 @@ def run_classified_issue_pipeline(
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    pipeline_started_at = time.perf_counter()
+    stage_timings: dict[str, float] = {}
+    merged_payload = _load_json_file(merged_file)
+    slide_count = int(
+        merged_payload.get("total_slides", 0)
+        or len(merged_payload.get("slides", []) or [])
+    )
+    context_count = int(merged_payload.get("total_contexts", 0) or 0)
+    if context_count <= 0:
+        context_count = sum(
+            len((slide.get("contexts") or []))
+            for slide in (merged_payload.get("slides") or [])
+            if isinstance(slide, dict)
+        )
+    _llm_pipeline_banner(
+        merged_file=merged_file,
+        output_dir=out_dir,
+        duration=merged_payload.get("total_duration_formatted", ""),
+        slide_count=slide_count,
+        context_count=context_count,
+    )
+
     # The full video pipeline does not pass worker counts explicitly. Resolve
     # them here so it uses the same per-model concurrency as the standalone
     # verifier commands instead of silently falling back to one worker.
-    shared_max_workers = _env_int("VERIFIER_STAGE_MAX_WORKERS", max_workers or 12)
+    shared_max_workers = _env_int("VERIFIER_STAGE_MAX_WORKERS", max_workers or 20)
     issue_type_max_workers = _env_int("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", shared_max_workers)
     final_verifier_max_workers = _env_int(
         "CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", shared_max_workers
@@ -1194,6 +1371,14 @@ def run_classified_issue_pipeline(
             return
         stage_notify(stage, status)
 
+    claim_stage_started = _llm_stage_start(
+        "L1",
+        "extract_claims — Claim 추출",
+        [
+            ("입력 Context", f"{context_count}개"),
+            ("배치 크기", claim_batch_size),
+        ],
+    )
     notify("verifier_claim_extraction", "run")
     try:
         claims_result = _extract_or_reuse_claims_for_classified_pipeline(
@@ -1204,27 +1389,80 @@ def run_classified_issue_pipeline(
             current_date=current_date,
             claim_batch_size=claim_batch_size,
         )
-    except Exception:
+    except Exception as exc:
+        _llm_stage_failed("L1", "extract_claims — Claim 추출", claim_stage_started, exc)
         notify("verifier_claim_extraction", "error")
         raise
     notify("verifier_claim_extraction", "done")
+    stage_timings["L1 Claim 추출"] = _llm_stage_done(
+        "L1",
+        "extract_claims — Claim 추출",
+        claim_stage_started,
+        rows=[
+            ("추출 Claim", f"{claims_result.get('claim_count', 0)}개"),
+            ("API 호출", f"{claims_result.get('api_calls', 0)}회"),
+            ("실행 방식", "기존 결과 재사용" if claims_result.get("reused") else "새로 추출"),
+        ],
+        files=[claims_result.get("claims_jsonl", ""), claims_result.get("claims_json", "")],
+    )
 
+    resolved_issue_judge_models = issue_judge_models or _default_issue_judge_models()
+    issue_judge_stage_started = _llm_stage_start(
+        "L2",
+        "detect_issues — Detector 앙상블",
+        [
+            ("입력 Claim", f"{claims_result.get('claim_count', 0)}개"),
+            ("모델", ", ".join(resolved_issue_judge_models)),
+            ("모델 병렬 수", shared_max_workers),
+            ("Context 배치 크기", issue_judge_batch_size),
+        ],
+    )
     notify("verifier_issue_judge", "run")
     try:
         issue_judge_result = run_issue_judge_only(
             str(merged_file),
             output_dir=str(out_dir),
             claims_jsonl=claims_result["claims_jsonl"],
-            issue_judge_models=issue_judge_models,
+            issue_judge_models=resolved_issue_judge_models,
             current_date=current_date,
-            issue_judge_min_confidence=issue_judge_min_confidence,
             issue_judge_batch_size=issue_judge_batch_size,
             issue_judge_max_workers=shared_max_workers,
         )
-    except Exception:
+    except Exception as exc:
+        _llm_stage_failed("L2", "detect_issues — Detector 앙상블", issue_judge_stage_started, exc)
         notify("verifier_issue_judge", "error")
         raise
     notify("verifier_issue_judge", "done")
+
+    issue_judge_summary_payload = _load_json_file(Path(issue_judge_result["issue_judge_summary"]))
+    issue_judge_summary = issue_judge_summary_payload.get("summary", {}) or {}
+    issue_counts_by_model = issue_judge_summary.get("issue_counts_by_model", {}) or {}
+    elapsed_by_model = issue_judge_summary_payload.get("elapsed_sec_per_model", {}) or {}
+    detector_rows: list[tuple[str, object]] = []
+    for model in resolved_issue_judge_models:
+        model_count = int(issue_counts_by_model.get(model, 0) or 0)
+        model_elapsed = float(elapsed_by_model.get(model, 0.0) or 0.0)
+        elapsed_suffix = f", {_format_elapsed(model_elapsed)}" if model_elapsed > 0 else ""
+        detector_rows.append((model, f"후보 {model_count}개{elapsed_suffix}"))
+    detector_rows.extend([
+        ("통합 후보", f"{issue_judge_result.get('issue_judge_count', 0)}개"),
+        (
+            "단일 모델 기준 미달 기각",
+            f"{issue_judge_summary.get('rejected_single_model_low_confidence_count', 0)}개",
+        ),
+        ("모델 실패", ", ".join(issue_judge_summary.get("failed_models", []) or []) or "없음"),
+    ])
+    stage_timings["L2 Detector 앙상블"] = _llm_stage_done(
+        "L2",
+        "detect_issues — Detector 앙상블",
+        issue_judge_stage_started,
+        rows=detector_rows,
+        files=[
+            issue_judge_result.get("issue_judge_comparison", ""),
+            issue_judge_result.get("issue_judge_merged", ""),
+            issue_judge_result.get("issue_judge_summary", ""),
+        ],
+    )
 
     from .issue_type_classifier import (
         build_next_stage_input,
@@ -1248,21 +1486,32 @@ def run_classified_issue_pipeline(
     issue_judge_payload = json.loads(issue_judge_merged_path.read_text(encoding="utf-8"))
     issue_type_output_path = _issue_type_default_output_path(issue_judge_merged_path)
     classified_input_path = _issue_type_default_next_input_path(issue_type_output_path)
+    resolved_issue_type_models = issue_type_models or _issue_type_default_models()
+    classifier_cached = _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path)
+    classifier_stage_started = _llm_stage_start(
+        "L3",
+        "classify_issue_types — 오류 유형 분류",
+        [
+            ("입력 후보", f"{issue_judge_result.get('issue_judge_count', 0)}개"),
+            ("모델", ", ".join(resolved_issue_type_models)),
+            ("배치 크기", issue_type_batch_size),
+            ("모델별 병렬 수", issue_type_max_workers),
+        ],
+    )
     notify("verifier_issue_classification", "run")
     try:
-        if _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path):
+        if classifier_cached:
             print(f"  ⏭  issue type classifier — 출력 파일 존재, 스킵")
             print(f"     {issue_type_output_path}")
             issue_type_result = _load_json_file(issue_type_output_path)
             classified_input = _load_json_file(classified_input_path)
         else:
-            issue_type_models = issue_type_models or _issue_type_default_models()
-            print(f"  issue type classifier 모델: {', '.join(issue_type_models)}")
+            print(f"  issue type classifier 모델: {', '.join(resolved_issue_type_models)}")
             issue_type_result = classify_issues(
                 issue_judge_payload,
                 input_path=issue_judge_merged_path,
                 merged_clean_path=merged_file,
-                models=issue_type_models,
+                models=resolved_issue_type_models,
                 list_keys=["issues"],
                 batch_size=max(1, issue_type_batch_size),
                 current_date=current_date or datetime.now().date().isoformat(),
@@ -1273,10 +1522,32 @@ def run_classified_issue_pipeline(
             issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
             classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
             classified_input_path.write_text(json.dumps(classified_input, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
+    except Exception as exc:
+        _llm_stage_failed("L3", "classify_issue_types — 오류 유형 분류", classifier_stage_started, exc)
         notify("verifier_issue_classification", "error")
         raise
     notify("verifier_issue_classification", "done")
+
+    classifier_summary = issue_type_result.get("summary", {}) or {}
+    classifier_model_summary = classifier_summary.get("model_breakdown_by_type", {}) or {}
+    classifier_parse_failures = sum(
+        int((row or {}).get("parse_failed_count", 0) or 0)
+        for row in classifier_model_summary.values()
+        if isinstance(row, dict)
+    )
+    stage_timings["L3 오류 유형 분류"] = _llm_stage_done(
+        "L3",
+        "classify_issue_types — 오류 유형 분류",
+        classifier_stage_started,
+        rows=[
+            ("분류 완료", f"{classifier_summary.get('input_issue_count', 0)}개"),
+            ("유형별", _format_breakdown(classifier_summary.get("breakdown_by_type"))),
+            ("복합 오류 라우팅", f"{classifier_summary.get('composite_count', 0)}개"),
+            ("파싱 실패", f"{classifier_parse_failures}건"),
+            ("실행 방식", "기존 결과 재사용" if classifier_cached else "새로 분류"),
+        ],
+        files=[issue_type_output_path, classified_input_path],
+    )
 
     evidence_enabled = os.getenv("CLASSIFIED_ISSUE_EVIDENCE_ENABLED", "1").strip().lower() not in {
         "0",
@@ -1287,9 +1558,18 @@ def run_classified_issue_pipeline(
     evidence_output_path = out_dir / f"{base_stem}_classified_issue_evidence.json"
     evidence_result: dict = {}
     if evidence_enabled:
+        evidence_cached = _json_file_exists(evidence_output_path)
+        evidence_stage_started = _llm_stage_start(
+            "L4",
+            "ground_evidence — 웹 근거 수집",
+            [
+                ("입력 후보", f"{classifier_summary.get('input_issue_count', 0)}개"),
+                ("병렬 수", evidence_max_workers),
+            ],
+        )
         notify("verifier_web_grounding", "run")
         try:
-            if _json_file_exists(evidence_output_path):
+            if evidence_cached:
                 print(f"  ⏭  pre-verifier web evidence — 출력 파일 존재, 스킵")
                 print(f"     {evidence_output_path}")
                 evidence_result = _load_json_file(evidence_output_path)
@@ -1306,29 +1586,57 @@ def run_classified_issue_pipeline(
                     json.dumps(evidence_result, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-        except Exception:
+        except Exception as exc:
+            _llm_stage_failed("L4", "ground_evidence — 웹 근거 수집", evidence_stage_started, exc)
             notify("verifier_web_grounding", "error")
             raise
         notify("verifier_web_grounding", "done")
+        evidence_summary = evidence_result.get("summary", {}) or {}
+        stage_timings["L4 웹 근거 수집"] = _llm_stage_done(
+            "L4",
+            "ground_evidence — 웹 근거 수집",
+            evidence_stage_started,
+            rows=[
+                ("근거 검색 대상", f"{evidence_summary.get('target_count', 0)}개"),
+                ("고유 검색", f"{evidence_summary.get('unique_retrieval_count', 0)}회"),
+                ("근거 확인", f"{evidence_summary.get('verified_count', 0)}개"),
+                ("근거 불충분", f"{evidence_summary.get('insufficient_evidence_count', 0)}개"),
+                ("실행 방식", "기존 결과 재사용" if evidence_cached else "새로 검색"),
+            ],
+            files=[evidence_output_path],
+        )
+    else:
+        _llm_stage_skipped("L4", "ground_evidence — 웹 근거 수집", "설정에서 비활성화됨")
 
     verifier_output_path = _verifier_default_output_path(classified_input_path)
+    resolved_verifier_models = verifier_models or _verifier_default_models()
+    verifier_cached = _json_file_exists(verifier_output_path)
+    verifier_stage_started = _llm_stage_start(
+        "L5",
+        "verify_issues — 최종 다중 모델 검증",
+        [
+            ("입력 후보", f"{classifier_summary.get('input_issue_count', 0)}개"),
+            ("모델", ", ".join(resolved_verifier_models)),
+            ("후보 배치 크기", verifier_batch_size),
+            ("모델별 병렬 수", final_verifier_max_workers),
+        ],
+    )
     notify("verifier_final_verification", "run")
     try:
-        if _json_file_exists(verifier_output_path):
+        if verifier_cached:
             print(f"  ⏭  classified issue verifier — 출력 파일 존재, 스킵")
             print(f"     {verifier_output_path}")
             verifier_result = _load_json_file(verifier_output_path)
             verifier_result["output_path"] = str(verifier_output_path)
         else:
-            verifier_models = verifier_models or _verifier_default_models()
-            print(f"  classified issue verifier 모델: {', '.join(verifier_models)}")
+            print(f"  classified issue verifier 모델: {', '.join(resolved_verifier_models)}")
             verifier_result = judge_classified_issues(
                 classified_input,
                 input_path=classified_input_path,
                 merged_clean_path=merged_file,
                 slide_textualized_path=_related_pipeline_path(merged_file, "_slide_textualized.json"),
                 slide_classified_path=_related_pipeline_path(merged_file, "_slide_classified.json"),
-                models=verifier_models,
+                models=resolved_verifier_models,
                 batch_size=max(1, verifier_batch_size),
                 current_date=current_date or datetime.now().date().isoformat(),
                 max_tokens=max(256, max_tokens),
@@ -1340,18 +1648,51 @@ def run_classified_issue_pipeline(
             )
             verifier_result["output_path"] = str(verifier_output_path)
             verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
+    except Exception as exc:
+        _llm_stage_failed("L5", "verify_issues — 최종 다중 모델 검증", verifier_stage_started, exc)
         notify("verifier_final_verification", "error")
         raise
     notify("verifier_final_verification", "done")
 
     content_view = build_content_verification_view(verifier_result)
+    verifier_summary = content_view.get("summary", {}) or {}
+    raw_verifier_summary = verifier_result.get("summary", {}) or {}
+    verifier_model_breakdown = raw_verifier_summary.get("model_breakdown", {}) or {}
+    verifier_parse_failures = sum(
+        int((row or {}).get("parse_failed_count", 0) or 0)
+        for row in verifier_model_breakdown.values()
+        if isinstance(row, dict)
+    )
+    stage_timings["L5 최종 다중 모델 검증"] = _llm_stage_done(
+        "L5",
+        "verify_issues — 최종 다중 모델 검증",
+        verifier_stage_started,
+        rows=[
+            ("최종 후보", f"{verifier_summary.get('total_feedback_count', 0)}개"),
+            ("확정", f"{verifier_summary.get('confirmed_feedback_count', 0)}개"),
+            ("검토 필요", f"{verifier_summary.get('review_needed_feedback_count', 0)}개"),
+            ("기각", f"{verifier_summary.get('rejected_feedback_count', 0)}개"),
+            ("파싱 실패", f"{verifier_parse_failures}건"),
+            ("실행 방식", "기존 결과 재사용" if verifier_cached else "새로 검증"),
+        ],
+        files=[verifier_output_path],
+    )
+
     slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
     slide_classified_path = _related_pipeline_path(merged_file, "_slide_classified.json")
     slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
+    slide_error_cached = _json_file_exists(slide_error_output_path)
+    slide_error_stage_started = _llm_stage_start(
+        "L6",
+        "check_slide_errors — 슬라이드 오류 검사",
+        [
+            ("입력 슬라이드", f"{slide_count}개"),
+            ("병렬 수", slide_error_max_workers),
+        ],
+    )
     notify("verify_slide_errors", "run")
     try:
-        if _json_file_exists(slide_error_output_path):
+        if slide_error_cached:
             print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
             print(f"     {slide_error_output_path}")
             slide_error_result = _load_json_file(slide_error_output_path)
@@ -1368,12 +1709,32 @@ def run_classified_issue_pipeline(
             )
             slide_error_result["output_path"] = str(slide_error_output_path)
             slide_error_output_path.write_text(json.dumps(slide_error_result, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
+    except Exception as exc:
+        _llm_stage_failed("L6", "check_slide_errors — 슬라이드 오류 검사", slide_error_stage_started, exc)
         notify("verify_slide_errors", "error")
         raise
     notify("verify_slide_errors", "done")
 
     slide_errors = slide_error_result.get("slide_errors", []) or []
+    slide_error_summary = slide_error_result.get("summary", {}) or {}
+    slide_error_failures = sum(
+        len((row.get("batch_errors") or []))
+        for row in (slide_error_result.get("model_results", {}) or {}).values()
+        if isinstance(row, dict)
+    )
+    stage_timings["L6 슬라이드 오류 검사"] = _llm_stage_done(
+        "L6",
+        "check_slide_errors — 슬라이드 오류 검사",
+        slide_error_stage_started,
+        rows=[
+            ("검사 슬라이드", f"{slide_error_summary.get('total_slide_count', slide_count)}개"),
+            ("탐지 오류", f"{len(slide_errors)}개"),
+            ("배치 실패", f"{slide_error_failures}건"),
+            ("실행 방식", "기존 결과 재사용" if slide_error_cached else "새로 검사"),
+        ],
+        files=[slide_error_output_path],
+    )
+
     content_view["slide_errors"] = slide_errors
     content_view["slide_error_status"] = "ok"
     content_view["slide_error_summary"] = slide_error_result.get("summary", {})
@@ -1382,11 +1743,7 @@ def run_classified_issue_pipeline(
     content_view["slide_error_needs_review"] = []
     content_view["slide_error_consensus"] = slide_error_result.get("summary", {})
     content_view["slide_error_checker"] = "classified_slide_error_checker"
-    content_view["slide_error_failures"] = sum(
-        len((row.get("batch_errors") or []))
-        for row in (slide_error_result.get("model_results", {}) or {}).values()
-        if isinstance(row, dict)
-    )
+    content_view["slide_error_failures"] = slide_error_failures
     content_view["summary"]["slide_error_count"] = len(slide_errors)
     content_view["summary"]["slide_error_needs_review_count"] = 0
     content_view["counts"]["slide_errors"] = len(slide_errors)
@@ -1416,6 +1773,31 @@ def run_classified_issue_pipeline(
     else:
         report_path.write_text(_format_classified_issue_report(content_view), encoding="utf-8")
 
+    final_summary = content_view.get("summary", {}) or {}
+    pipeline_elapsed = _llm_pipeline_done(
+        started_at=pipeline_started_at,
+        timings=stage_timings,
+        rows=[
+            ("추출 Claim", f"{claims_result.get('claim_count', 0)}개"),
+            ("Detector 통합 후보", f"{issue_judge_result.get('issue_judge_count', 0)}개"),
+            ("최종 판정", f"{final_summary.get('total_feedback_count', 0)}개"),
+            ("확정", f"{final_summary.get('confirmed_feedback_count', 0)}개"),
+            ("검토 필요", f"{final_summary.get('review_needed_feedback_count', 0)}개"),
+            ("기각", f"{final_summary.get('rejected_feedback_count', 0)}개"),
+            ("슬라이드 오류", f"{len(slide_errors)}개"),
+            ("전체 파싱 실패", f"{classifier_parse_failures + verifier_parse_failures}건"),
+        ],
+        files=[
+            claims_result.get("claims_json", ""),
+            issue_judge_result.get("issue_judge_summary", ""),
+            issue_type_output_path,
+            verifier_output_path,
+            slide_error_output_path,
+            result_json_path,
+            report_path,
+        ],
+    )
+
     return {
         "merged_path": str(merged_file),
         "output_dir": str(out_dir),
@@ -1428,6 +1810,8 @@ def run_classified_issue_pipeline(
         "slide_error_count": len(slide_errors),
         "slide_error_failures": content_view["slide_error_failures"],
         "stage_timings": stage_timings,
+        "llm_stage_timings_sec": stage_timings,
+        "elapsed_sec": pipeline_elapsed,
     }
 
 
@@ -1481,12 +1865,6 @@ def main():
         default=CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
         help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
     )
-    parser.add_argument(
-        "--issue-judge-min-confidence",
-        type=float,
-        default=None,
-        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 모델별로 GPT 0.8, Claude 0.60",
-    )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
 
@@ -1498,7 +1876,6 @@ def main():
             issue_judge_models=args.issue_judge_models,
             issue_judge_batch_size=args.issue_judge_batch_size,
             current_date=args.date,
-            issue_judge_min_confidence=args.issue_judge_min_confidence,
             issue_judge_max_workers=args.issue_judge_max_workers,
         )
         print("\n=== 1차 Issue Judge 완료 ===")
@@ -1515,7 +1892,6 @@ def main():
         claims_jsonl=args.claims_jsonl,
         reuse_claims=args.reuse_claims,
         current_date=args.date,
-        issue_judge_min_confidence=args.issue_judge_min_confidence,
         issue_judge_models=args.issue_judge_models,
         claim_batch_size=args.claim_batch_size,
         issue_judge_batch_size=args.issue_judge_batch_size,

@@ -39,6 +39,8 @@ DEFAULT_MODEL_WEIGHTS = {
     "anthropic": 0.4,
     "grok": 0.2,
     "xai": 0.2,
+    "qwen": 0.2,
+    "vllm": 0.2,
     "gemini": 0.2,
     "google": 0.2,
 }
@@ -356,9 +358,43 @@ def _resolve_anthropic_model(model_name: str) -> str:
     return aliases.get(str(model_name or "").strip(), str(model_name or "").strip())
 
 
+def _resolve_vllm_model(model_spec: str) -> str:
+    """Resolve an OpenAI-compatible local/remote vLLM model specification."""
+    raw = str(model_spec or "").strip()
+    lowered = raw.lower()
+    if lowered in {"vllm", "qwen", "local", "local-llm"}:
+        return _env_first(
+            "LOCAL_LLM_MODEL",
+            "VLLM_MODEL",
+            "QWEN_MODEL",
+            default="qwen3.8-27b",
+        )
+    for prefix in ("vllm:", "vllm/", "qwen:", "qwen/"):
+        if lowered.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return raw
+
+
 def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     raw = str(model_spec or "").strip()
     lowered = raw.lower()
+    if (
+        lowered in {"vllm", "qwen", "qwen3.8", "local", "local-llm"}
+        or lowered.startswith(("vllm:", "vllm/", "qwen:", "qwen/", "qwen-"))
+    ):
+        return {
+            "provider": "vllm",
+            "alias": raw,
+            "resolved_model": (
+                _env_first(
+                    "ISSUE_TYPE_CLASSIFIER_QWEN_MODEL",
+                    "VERIFIER_ISSUE_TYPE_CLASSIFIER_QWEN_MODEL",
+                    default="qwen3.8-27b",
+                )
+                if lowered == "qwen3.8"
+                else _resolve_vllm_model(raw)
+            ) or _resolve_vllm_model(raw),
+        }
     if lowered in {"gpt", "openai"}:
         return {
             "provider": "openai",
@@ -377,7 +413,7 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
                 _env_first(
                     "ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
                     "VERIFIER_ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-                    default="claude-sonnet-4.5",
+                    default="claude-sonnet-5",
                 )
             ),
         }
@@ -388,7 +424,7 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
             "resolved_model": _env_first(
                 "ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
                 "VERIFIER_ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-                default="grok-4",
+                default="grok-4.5",
             ),
         }
     if lowered in {"deepseek", "deepseek-default"}:
@@ -518,6 +554,12 @@ def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
     input_tokens = _usage_value(usage, "input_tokens")
     output_tokens = _usage_value(usage, "output_tokens")
+    content_blocks = list(getattr(resp, "content", []) or [])
+    text_length = sum(
+        len(str(getattr(block, "text", "") or ""))
+        for block in content_blocks
+        if getattr(block, "type", "") == "text"
+    )
     return {
         "provider": "anthropic",
         "model": model,
@@ -528,6 +570,17 @@ def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
         "cached_input_tokens": _usage_value(usage, "cache_read_input_tokens"),
         "cache_creation_input_tokens": _usage_value(usage, "cache_creation_input_tokens"),
         "total_tokens": input_tokens + output_tokens,
+        "response_metadata": {
+            "response_id": str(getattr(resp, "id", "") or ""),
+            "response_model": str(getattr(resp, "model", "") or model),
+            "stop_reason": str(getattr(resp, "stop_reason", "") or ""),
+            "stop_sequence": str(getattr(resp, "stop_sequence", "") or ""),
+            "content_block_types": [
+                str(getattr(block, "type", "") or "") for block in content_blocks
+            ],
+            "text_length": text_length,
+            "text_empty": text_length == 0,
+        },
     }
 
 
@@ -570,6 +623,7 @@ def _call_openai_like(
     web_search_max_calls: int = 2,
     web_search_force: bool = False,
     web_search_context_size: str | None = None,
+    structured_schema: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     try:
         from openai import OpenAI
@@ -579,6 +633,17 @@ def _call_openai_like(
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = None
+    elif provider == "vllm":
+        api_key = (
+            os.getenv("LOCAL_LLM_API_KEY")
+            or os.getenv("VLLM_API_KEY")
+            or os.getenv("Qwen_3.6")
+        )
+        base_url = (
+            os.getenv("LOCAL_LLM_BASE_URL")
+            or os.getenv("VLLM_BASE_URL")
+            or os.getenv("QWEN_BASE_URL")
+        )
     elif provider == "xai":
         api_key = os.getenv("XAI_API_KEY")
         base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
@@ -593,11 +658,14 @@ def _call_openai_like(
     if not api_key:
         env_name = {
             "openai": "OPENAI_API_KEY",
+            "vllm": "LOCAL_LLM_API_KEY (또는 VLLM_API_KEY/Qwen_3.6)",
             "xai": "XAI_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
             "ollama": "OLLAMA_API_KEY",
         }[provider]
         raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
+    if provider == "vllm" and not base_url:
+        raise RuntimeError("LOCAL_LLM_BASE_URL(또는 VLLM_BASE_URL)가 설정되지 않았습니다.")
     reasoning_effort = None
     if provider == "openai":
         model, reasoning_effort = _parse_openai_model_spec(model)
@@ -632,10 +700,20 @@ def _call_openai_like(
             kwargs["reasoning"] = {"effort": reasoning_effort}
     else:
         messages = [{"role": "user", "content": prompt}]
+        response_format = {"type": "json_object"}
+        if structured_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "strict": True,
+                    "schema": structured_schema,
+                },
+            }
         kwargs = {
             "model": model,
             "messages": messages,
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
         }
         if not reasoning_effort and model.lower() != "gpt-5.6-luna":
             kwargs["temperature"] = 0.0
@@ -653,6 +731,10 @@ def _call_openai_like(
                     "thinking": {
                         "type": os.getenv("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_THINKING", "disabled")
                     }
+                }
+            elif provider == "vllm":
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": False}
                 }
 
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_API_RETRIES", 2, min_value=0) + 1
@@ -699,28 +781,95 @@ def _call_openai_like(
     return text, _openai_like_usage(resp, provider, model)
 
 
-def _call_anthropic(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
+def _call_anthropic(
+    *, model: str, prompt: str, max_tokens: int, structured_schema: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any]]:
     try:
         from anthropic import Anthropic
     except ImportError as exc:
         raise RuntimeError("anthropic 패키지가 설치되어 있지 않습니다.") from exc
+    try:
+        from ..utils import anthropic_structured_output_request_kwargs
+    except ImportError:
+        from utils import anthropic_structured_output_request_kwargs
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
     base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     client = Anthropic(api_key=api_key, base_url=base_url)
-    resp = client.messages.create(
+    classifier_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "classifications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "id": {"type": "string"},
+                        "probabilities": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "factual_error": {"type": "number", "minimum": 0, "maximum": 1},
+                                "temporal_error": {"type": "number", "minimum": 0, "maximum": 1},
+                                "confusing_explanation": {"type": "number", "minimum": 0, "maximum": 1},
+                                "scope_overclaim": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": [
+                                "factual_error",
+                                "temporal_error",
+                                "confusing_explanation",
+                                "scope_overclaim",
+                            ],
+                        },
+                        "reason": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["id", "probabilities", "reason", "confidence"],
+                },
+            }
+        },
+        "required": ["classifications"],
+    }
+    schema = structured_schema or classifier_schema
+    try:
+        from anthropic import transform_schema
+
+        schema = transform_schema(schema)
+    except (ImportError, AttributeError, TypeError, ValueError):
+        schema = dict(schema)
+
+    request_kwargs = dict(
         model=model,
         max_tokens=max_tokens,
-        system="응답은 반드시 JSON 객체 하나만 출력하세요. 설명 문장이나 markdown fence를 붙이지 마세요.",
         messages=[{"role": "user", "content": prompt}],
+        system="분석 결과를 지정된 JSON Schema에 맞는 JSON 객체로만 반환하세요. 설명 문장이나 markdown fence는 출력하지 마세요.",
+    )
+    request_kwargs.update(
+        anthropic_structured_output_request_kwargs(
+            schema,
+            create_method=client.messages.create,
+        )
     )
     if "sonnet-5" not in model.lower():
         request_kwargs["temperature"] = 0.0
     resp = client.messages.create(**request_kwargs)
+    content_blocks = list(getattr(resp, "content", []) or [])
+    tool_blocks = [
+        block for block in content_blocks
+        if getattr(block, "type", "") == "tool_use"
+    ]
+    if tool_blocks:
+        # Backward-compatible parsing for mocked/legacy responses. Native
+        # Structured Outputs return the JSON in a text content block.
+        tool_input = getattr(tool_blocks[0], "input", None)
+        if isinstance(tool_input, dict):
+            return json.dumps(tool_input, ensure_ascii=False), _anthropic_usage(resp, model)
     text_blocks = [
         getattr(block, "text", "")
-        for block in getattr(resp, "content", []) or []
+        for block in content_blocks
         if getattr(block, "type", "") == "text"
     ]
     return "".join(text_blocks), _anthropic_usage(resp, model)
@@ -798,12 +947,18 @@ def _call_llm(
     web_search_max_calls: int = 2,
     web_search_force: bool = False,
     web_search_context_size: str | None = None,
+    structured_schema: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
     resolved = _resolve_model_spec(model_spec)
     provider = resolved["provider"]
     model = resolved["resolved_model"]
     if provider == "anthropic":
-        text, usage = _call_anthropic(model=model, prompt=prompt, max_tokens=max_tokens)
+        text, usage = _call_anthropic(
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            structured_schema=structured_schema,
+        )
     elif provider == "gemini":
         text, usage = _call_gemini(model=model, prompt=prompt, max_tokens=max_tokens)
     else:
@@ -816,6 +971,7 @@ def _call_llm(
             web_search_max_calls=web_search_max_calls,
             web_search_force=web_search_force,
             web_search_context_size=web_search_context_size,
+            structured_schema=structured_schema,
         )
     return text, usage, resolved
 
@@ -1142,6 +1298,11 @@ def _model_top_types(verdicts: list[dict[str, Any]]) -> list[str]:
 
 
 def _all_models_disagree(verdicts: list[dict[str, Any]], *, expected_model_count: int) -> bool:
+    # A single model cannot disagree with another model.  Without this guard,
+    # a one-model classifier run with one valid top type was incorrectly routed
+    # to composite_issue because ``len(set(tops)) == expected_model_count``.
+    if expected_model_count < 2:
+        return False
     tops = _model_top_types(verdicts)
     return len(tops) >= expected_model_count and len(set(tops)) == expected_model_count
 
@@ -1700,7 +1861,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_TOKENS", "8192")))
-    parser.add_argument("--max-workers", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", "12")))
+    parser.add_argument("--max-workers", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", "20")))
     parser.add_argument("--current-date", default=os.getenv("ISSUE_TYPE_CLASSIFIER_CURRENT_DATE", "2026-05-12"))
     parser.add_argument(
         "--model-weights",

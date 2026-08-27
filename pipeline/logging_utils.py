@@ -1,10 +1,53 @@
 import logging
+import os
+import sys
+import threading
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Iterator, TextIO
 
 
 PIPELINE_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+
+class _LivePipelineTee:
+    """Write immediately to the caller's console and pipeline.log."""
+
+    def __init__(self, console: TextIO, log_file: TextIO, lock: threading.RLock):
+        self.console = console
+        self.log_file = log_file
+        self.lock = lock
+        self.encoding = getattr(console, "encoding", None) or "utf-8"
+        self.errors = getattr(console, "errors", None) or "replace"
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        with self.lock:
+            console_written = self.console.write(data)
+            self.console.flush()
+            self.log_file.write(data)
+            self.log_file.flush()
+        return int(console_written) if isinstance(console_written, int) else len(data)
+
+    def flush(self) -> None:
+        with self.lock:
+            self.console.flush()
+            self.log_file.flush()
+
+    def fileno(self) -> int:
+        return self.console.fileno()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self.console, "isatty", lambda: False)())
+
+    def __getattr__(self, name: str):
+        return getattr(self.console, name)
+
+
+def _console_tee_enabled() -> bool:
+    value = os.getenv("PIPELINE_LOG_CONSOLE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def reset_root_logging_handlers() -> None:
@@ -36,17 +79,28 @@ def detach_pipeline_log_handler(handler: logging.Handler) -> None:
 @contextmanager
 def pipeline_log_context(output_dir: Path | str) -> Iterator[Path]:
     """CLI로 직접 실행할 때도 백그라운드 job과 동일하게 {output_dir}/pipeline.log를
-    남긴다. 이 파이프라인은 진행 로그 대부분을 logging이 아니라 print()로 찍으므로,
-    logging 핸들러만 붙이는 것으로는 부족해 stdout/stderr 자체를 파일로 리다이렉트한다."""
+    남긴다. 기본값은 stdout/stderr를 터미널과 파일 양쪽에 즉시 출력한다. 콘솔 출력이
+    필요 없는 백그라운드 환경에서는 PIPELINE_LOG_CONSOLE=0으로 이전의 파일 전용
+    동작을 사용할 수 있다."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     log_file_path = output_path / "pipeline.log"
 
     reset_root_logging_handlers()
     with log_file_path.open("w", encoding="utf-8", buffering=1) as log_file:
-        log_handler = attach_pipeline_log_handler(log_file)
+        if _console_tee_enabled():
+            write_lock = threading.RLock()
+            stdout_target: TextIO = _LivePipelineTee(sys.stdout, log_file, write_lock)
+            stderr_target: TextIO = _LivePipelineTee(sys.stderr, log_file, write_lock)
+            logging_target = stderr_target
+        else:
+            stdout_target = log_file
+            stderr_target = log_file
+            logging_target = log_file
+
+        log_handler = attach_pipeline_log_handler(logging_target)
         try:
-            with redirect_stdout(log_file), redirect_stderr(log_file):
+            with redirect_stdout(stdout_target), redirect_stderr(stderr_target):
                 yield log_file_path
         finally:
             detach_pipeline_log_handler(log_handler)

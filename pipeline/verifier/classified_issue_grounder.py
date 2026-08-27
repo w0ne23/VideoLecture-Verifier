@@ -176,7 +176,7 @@ def _grounding_model_specs() -> list[str]:
 def _pre_verifier_evidence_model() -> str:
     return (
         os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MODEL", "").strip()
-        or "gpt-5.6-luna-low"
+        or "gpt-5.6-luna-medium"
     )
 
 
@@ -2956,6 +2956,19 @@ resolved_claim과 claim_text가 검색의 유일한 중심입니다. 앞뒤 전�
 생략된 주체·지시어·시기·범위를 해소하는 데만 사용하고, claim에 없는 사건·인물·장소·인과관계·정답을
 새로 추가하지 마세요. 슬라이드와 전사에는 오류나 ASR 흔들림이 있을 수 있으므로 사실 근거로 쓰지 마세요.
 
+주어·지시 대상 해소 우선 규칙:
+- resolved_claim에 검증 대상의 주어가 없거나 "해당 화면", "이 작품", "그 기술"처럼 대상이 식별되지 않고,
+  claim_text에도 이를 해소할 명시적 대상명이 없다면, 해당 candidate의 transcript_context와 공유
+  slide_context를 함께 확인하여 무엇에 관한 claim인지 먼저 식별하세요.
+- 주변 전사와 슬라이드에서 하나의 대상만 명확히 연결되면 그 고유명사·장소·작품명·제품명을
+  verification_question에 반드시 명시하세요. "해당 화면" 같은 미해결 지시어를 검색 질문에 그대로
+  남기지 마세요.
+- 이때 검증의 중심은 계속 claim_text와 resolved_claim이 나타내는 동일한 술어·관계·수치·조건입니다.
+  문맥에서 대상명만 해소하고, 주변 context의 다른 주장을 검색 대상으로 바꾸거나 새 claim을 만들지 마세요.
+- 전사와 슬라이드는 검색 대상을 식별하기 위한 문맥일 뿐, claim이 참이라는 근거는 아닙니다.
+- 문맥을 모두 확인해도 대상 후보가 둘 이상이거나 특정할 수 없을 때만 web_check=false와
+  basis_code=context_unresolved를 사용하세요.
+
 web_check=true 조건:
 - factual_error 또는 temporal_error이며 외부 문서로 claim의 참·거짓을 직접 판정할 수 있다.
 - 주체와 핵심 관계를 신뢰할 수 있게 식별할 수 있다.
@@ -3137,6 +3150,20 @@ def _build_pre_verifier_search_prompt(
 
 verification_question: {question}
 
+보조 claim 정보:
+- resolved_claim: {issue.get("resolved_claim", "")}
+- claim_text: {issue.get("claim_text", "")}
+- 앞뒤 전사 문맥: {issue.get("transcript_context", "") or "(not available)"}
+- 슬라이드 문맥: {json.dumps(issue.get("slide_context") or {}, ensure_ascii=False)}
+
+verification_question에 주어가 없거나 "해당 화면", "이 작품", "그 기술"처럼 검색 대상을 식별할 수
+없는 지시어만 남아 있으면 질문을 그대로 검색하지 마세요. 보조 claim 정보의 전사 문맥과 슬라이드
+문맥을 함께 확인해 단일 선행 대상을 찾고, 그 대상의 구체적인 고유명사·장소·작품명·제품명을
+실제 검색어에 포함하세요. 문맥으로도 대상을 하나로 확정할 수 없을 때만 후보 URL을 빈 배열로
+반환하세요. 전사와 슬라이드의 내용 자체는 사실 근거로 간주하지 마세요.
+검색 대상의 술어·관계·수치·조건은 verification_question과 claim_text/resolved_claim에서 유지하고,
+문맥의 다른 주장을 새 검색 대상으로 대체하지 마세요.
+
 JSON만 반환하세요:
 {{
   "evidence_sources": ["https://source-1", "https://source-2", "https://source-3"]
@@ -3153,6 +3180,11 @@ def _build_pre_verifier_evidence_prompt(issue: dict[str, Any], current_date: str
 2. 모든 claim에서 resolved_claim, claim_text, 바로 앞뒤 한 문장, 해당 슬라이드의 제목과 텍스트를
    함께 읽으세요. 이를 통해 주체·지시 대상·고유명사·관계·범위와 해당 발화가 정의인지 예시인지
    구분한 뒤 검색 대상을 정하세요.
+   resolved_claim에 주어가 없거나 미해결 지시어만 있고 claim_text에도 대상명이 없다면,
+   transcript_context와 slide_context를 함께 확인해 단일 선행 대상을 먼저 복원하세요.
+   단일 대상이 확인되면 그 고유명사·장소·작품명·제품명을 검색어에 반드시 포함하고, "해당 화면",
+   "이 작품", "그 기술" 같은 표현만으로 검색하지 마세요.
+   대상 복원 뒤에도 검증할 술어·관계·수치·조건은 원래 claim_text와 resolved_claim의 범위를 유지하세요.
 3. 검색어의 중심은 반드시 대상 claim이어야 합니다. 전사·슬라이드 문맥은 claim에서 생략되거나
    축약된 대상을 복원하고 의미와 적용 범위를 한정하는 데 사용하되, 인접한 별도 주장이나 슬라이드의
    다른 사실을 대상 claim에 새로 합치지 마세요.
@@ -4794,7 +4826,7 @@ def collect_pre_verifier_evidence(
     input_path: str | Path,
     merged_clean_path: str | Path | None = None,
     current_date: str,
-    max_workers: int = 12,
+    max_workers: int = 20,
     max_tokens: int = 600,
 ) -> dict[str, Any]:
     """Retrieve compact native-search evidence for factual verifier candidates."""
@@ -4965,7 +4997,7 @@ def collect_pre_verifier_evidence_batched(
     input_path: str | Path,
     merged_clean_path: str | Path | None = None,
     current_date: str,
-    max_workers: int = 12,
+    max_workers: int = 20,
     max_tokens: int = 600,
     unique_claim_limit: int | None = None,
 ) -> dict[str, Any]:
@@ -5985,7 +6017,7 @@ def ground_classified_issues(
     verifier_result: dict[str, Any],
     *,
     current_date: str,
-    max_workers: int = 3,
+    max_workers: int = 20,
     max_tokens: int = 2048,
     categories: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -6112,7 +6144,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("verifier_json")
     parser.add_argument("-o", "--output")
     parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_GROUNDING_CURRENT_DATE", "2026-05-31"))
-    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", "3")))
+    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", "20")))
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")))
     parser.add_argument(
         "--models",

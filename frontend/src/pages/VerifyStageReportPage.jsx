@@ -117,7 +117,7 @@ function buildIssueJudgeColumn(judgeData, summaryData) {
     { key: 'partial', label: '일부만 일치', value: s.partial_agreement_count ?? '-' },
     { key: 'single', label: '단일 모델만 감지', value: s.single_model_only_count ?? '-' },
     { key: 'none', label: '이슈 없음', value: s.no_issue_claim_count ?? '-' },
-    { key: 'reject', label: '모델 불일치로 기각', value: s.rejected_by_model_disagreement_count ?? '-' },
+    { key: 'reject', label: '단일 모델 낮은 신뢰도로 기각', value: s.rejected_single_model_low_confidence_count ?? '-' },
     { divider: true },
     ...Object.entries(s.issue_counts_by_model || {}).map(([model, count]) => ({ key: model, label: model, value: count })),
   ]

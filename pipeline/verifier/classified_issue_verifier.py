@@ -35,6 +35,10 @@ SCHEMA_VERSION = "classified_issue_verifier.v3"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 5
+FINAL_VERIFIER_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_ATTEMPTS", "3") or "3"),
+)
 CATEGORY_MODEL_WEIGHT_OVERRIDES = {
     "scope_overclaim": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
     "confusing_explanation": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
@@ -838,6 +842,59 @@ def _response_contract() -> str:
 점수는 0.0~1.0입니다. reason과 minimal_fix는 한국어로 작성하고 enum과 key는 그대로 사용하세요."""
 
 
+def _final_verifier_schema(ids: list[str] | None = None) -> dict[str, Any]:
+    """Provider-neutral schema translated by each API adapter."""
+    allowed_ids = [str(value) for value in (ids or []) if str(value)]
+    id_schema: dict[str, Any] = {"type": "string"}
+    if allowed_ids:
+        id_schema["enum"] = allowed_ids
+    judgment_items: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": id_schema,
+            "judgment": {
+                "type": "string",
+                "enum": [
+                    "valid_issue",
+                    "partially_resolved",
+                    "not_issue",
+                    "insufficient_context",
+                ],
+            },
+            "is_valid_issue": {"type": "number", "minimum": 0, "maximum": 1},
+            "category_severity": {"type": "number", "minimum": 0, "maximum": 1},
+            "context_resolution": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string"},
+            "minimal_fix": {"type": "string"},
+        },
+        "required": [
+            "id",
+            "judgment",
+            "is_valid_issue",
+            "category_severity",
+            "context_resolution",
+            "reason",
+            "minimal_fix",
+        ],
+    }
+    judgments_schema: dict[str, Any] = {
+        "type": "array",
+        "items": judgment_items,
+    }
+    if allowed_ids:
+        judgments_schema["minItems"] = len(allowed_ids)
+        judgments_schema["maxItems"] = len(allowed_ids)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "judgments": judgments_schema,
+        },
+        "required": ["judgments"],
+    }
+
+
 def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
     description = CATEGORY_DESCRIPTIONS.get(category, "")
     score_guide = CATEGORY_SCORE_GUIDES.get(category, {})
@@ -850,6 +907,20 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 입력 후보를 다른 유형으로 재분류하지 말고 대상 분류 안에서만 판정하세요.
 - claim_text, resolved_claim, 같은 슬라이드 전사와 slide_text를 함께 읽어 학생에게 최종적으로 남는 의미를 판단하세요.
 - resolved_claim이 원문보다 강하거나 넓으면 원문 문맥을 우선하세요.
+- resolved_claim에 주어가 없거나 "해당 화면", "이 작품", "그 기술"처럼 대상이 식별되지 않고,
+  claim_text에도 지시 대상을 해소한 명시적 대상명이 없다면 resolved_claim만으로 판정하지 마세요.
+  target_context_ids에 해당하는 전사, 그 앞뒤 context, slide_text를 함께 확인하여 무엇에 관한
+  claim인지 먼저 식별한 뒤 판정하세요.
+- 판정 대상의 중심은 claim_text와 resolved_claim이 가리키는 동일한 주장입니다. 문맥은 그 주장의
+  주어·지시 대상·생략된 조건·범위를 해소하는 데 사용하고, 주변 context의 다른 주장을 새로운
+  판정 대상으로 바꾸지 마세요.
+- 주변 전사와 슬라이드에서 하나의 대상만 명확히 연결되면 그 구체적 대상명을 기준으로 claim의 각
+  관계·수치·방향·조건을 검사하세요. 대상을 복원한 뒤에도 하나의 claim에 독립적인 하위 주장이
+  여러 개 있으면 각각 확인하고, 일부가 맞다는 이유로 다른 핵심 오류를 무시하지 마세요.
+- 전사와 slide_text는 주어·지시 대상과 강의 문맥을 해소하는 자료입니다. 그 내용이 claim과
+  일치한다는 사실만으로 claim이 참이라고 간주하지 말고, 외부 근거·확립된 정의·계산으로 검증하세요.
+- 제공된 전사와 슬라이드를 모두 확인해도 대상을 하나로 특정할 수 없을 때만 insufficient_context로
+  판정하세요.
 - slide_text는 claim의 대상·관계·조건을 해석하고 발화와의 충돌을 찾는 보조 자료입니다.
   전사와 슬라이드가 일치한다는 사실만으로 claim이 참이라고 판단하지 마세요.
 
@@ -865,6 +936,10 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
    근사는 허용하되, 핵심 계산·정의·범위에 영향을 주면 검증하세요.
    특히 외래어·고유명사를 자연스러운 원어로 보정하면 설명이 맞고 다른 대상을 뜻한다는 문맥 근거가 없으면
    not_issue, is_valid_issue=0, category_severity=0으로 판정하세요.
+   전사에 나타난 영문 글자·변수·기호의 대문자/소문자 차이는 음성에서 확정할 수 없는 표기 흔들림입니다.
+   `N/n`, `X/x`처럼 전사나 resolved_claim의 case가 슬라이드와 다르거나 모델이 이를 "대문자/소문자"로
+   해석했더라도, 그 차이만 문제라면 반드시 not_issue, is_valid_issue=0, category_severity=0으로 판정하세요.
+   대·소문자와 무관한 별도의 개념·계산·범위 오류가 문맥에 실제로 남아 있을 때만 그 독립된 오류를 검증하세요.
    강의자가 사실·정의·계산·범위를 명확히 잘못 말한 경우에는 단순한 말실수라는 이유로 제외하지 마세요.
    뒤에서 올바른 내용을 설명하더라도 앞의 오류를 명시적으로 정정하지 않았다면 이슈를 유지하세요.
 3. web_evidence.status="verified"의 key_sentence와 claim_relation은 검증된 외부 근거이지만 최종 판정은 아닙니다.
@@ -960,7 +1035,13 @@ def _normalize_judgment_row(
     }
 
 
-def _parse_failed_row(ref: dict[str, Any], model: str, resolved: dict[str, str], error: str) -> dict[str, Any]:
+def _parse_failed_row(
+    ref: dict[str, Any],
+    model: str,
+    resolved: dict[str, str],
+    error: str,
+    response_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     row = {
         "id": ref["id"],
         "model": model,
@@ -977,6 +1058,7 @@ def _parse_failed_row(ref: dict[str, Any], model: str, resolved: dict[str, str],
         "minimal_fix": "",
         "status": "parse_failed",
         "parse_error": error,
+        "response_metadata": response_metadata or {},
     }
     return row
 
@@ -990,30 +1072,109 @@ def _call_model_for_batch(
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     prompt = _build_prompt(category, batch, current_date)
-    text, usage, resolved = _call_llm(
-        model_spec=model,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        web_search=False,
-    )
+    usages: list[dict[str, Any]] = []
+    last_by_id: dict[str, dict[str, Any]] = {}
+    last_error = ""
+    last_metadata: dict[str, Any] = {}
+    resolved: dict[str, Any] = _resolve_model_spec(model)
 
-    try:
-        rows = _parse_response(text)
-        by_id = {str(row.get("id") or ""): row for row in rows if isinstance(row, dict)}
-    except Exception as exc:
-        by_id = {}
-        parse_error = str(exc)
-    else:
-        parse_error = ""
+    for attempt in range(1, FINAL_VERIFIER_MAX_ATTEMPTS + 1):
+        text, usage, resolved = _call_llm(
+            model_spec=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            web_search=False,
+            structured_schema=_final_verifier_schema([ref["id"] for ref in batch]),
+        )
+        if isinstance(usage, dict):
+            usages.append(usage)
+            last_metadata = usage.get("response_metadata", {}) or {}
+
+        by_id: dict[str, dict[str, Any]] = {}
+        if not str(text or "").strip():
+            last_error = "empty_model_response"
+        else:
+            try:
+                rows = _parse_response(text)
+                by_id = {
+                    str(row.get("id") or ""): row
+                    for row in rows
+                    if isinstance(row, dict) and str(row.get("id") or "").strip()
+                }
+                missing_ids = [ref["id"] for ref in batch if ref["id"] not in by_id]
+                last_error = f"missing judgment row: {', '.join(missing_ids)}" if missing_ids else ""
+            except Exception as exc:
+                last_error = str(exc)
+
+        last_by_id = by_id
+        if not last_error:
+            normalized = [
+                _normalize_judgment_row(
+                    last_by_id[ref["id"]], ref=ref, model=model, resolved=resolved
+                )
+                for ref in batch
+            ]
+            return normalized, _aggregate_token_usage(usages)
+
+        if attempt < FINAL_VERIFIER_MAX_ATTEMPTS:
+            print(
+                f"  [{model}] {category} 파싱 실패 — 즉시 재시도 "
+                f"({attempt + 1}/{FINAL_VERIFIER_MAX_ATTEMPTS}): {last_error}",
+                flush=True,
+            )
+
+    # Some providers may return only a subset of a multi-item tool call even
+    # when the schema is valid. Recover only the missing rows with singleton
+    # requests so a provider omission never becomes a false parse failure.
+    missing_refs = [ref for ref in batch if ref["id"] not in last_by_id]
+    for ref in missing_refs:
+        single_prompt = _build_prompt(category, [ref], current_date)
+        for single_attempt in range(1, FINAL_VERIFIER_MAX_ATTEMPTS + 1):
+            single_text, single_usage, resolved = _call_llm(
+                model_spec=model,
+                prompt=single_prompt,
+                max_tokens=max_tokens,
+                web_search=False,
+                structured_schema=_final_verifier_schema([ref["id"]]),
+            )
+            if isinstance(single_usage, dict):
+                usages.append(single_usage)
+                last_metadata = single_usage.get("response_metadata", {}) or {}
+            try:
+                single_rows = _parse_response(single_text)
+                single_by_id = {
+                    str(row.get("id") or ""): row
+                    for row in single_rows
+                    if isinstance(row, dict) and str(row.get("id") or "").strip()
+                }
+            except Exception:
+                single_by_id = {}
+            if ref["id"] in single_by_id:
+                last_by_id[ref["id"]] = single_by_id[ref["id"]]
+                break
+            if single_attempt < FINAL_VERIFIER_MAX_ATTEMPTS:
+                print(
+                    f"  [{model}] {category} 단일 항목 재시도 "
+                    f"({single_attempt + 1}/{FINAL_VERIFIER_MAX_ATTEMPTS}): {ref['id']}",
+                    flush=True,
+                )
 
     normalized = []
     for ref in batch:
-        row = by_id.get(ref["id"])
+        row = last_by_id.get(ref["id"])
         if isinstance(row, dict):
             normalized.append(_normalize_judgment_row(row, ref=ref, model=model, resolved=resolved))
         else:
-            normalized.append(_parse_failed_row(ref, model, resolved, parse_error or "missing judgment row"))
-    return normalized, usage
+            normalized.append(
+                _parse_failed_row(
+                    ref,
+                    model,
+                    resolved,
+                    last_error or "missing judgment row",
+                    response_metadata=last_metadata,
+                )
+            )
+    return normalized, _aggregate_token_usage(usages)
 
 
 def _batch_worker(args: tuple) -> dict[str, Any]:
@@ -1110,6 +1271,12 @@ def _verdict_model_family(verdict: dict[str, Any]) -> str:
         return "claude"
     if model.startswith("grok") or resolved_model.startswith("grok"):
         return "xai"
+    if (
+        provider == "vllm"
+        or model.startswith(("qwen", "vllm"))
+        or resolved_model.startswith(("qwen", "vllm"))
+    ):
+        return "vllm"
     return model
 
 
@@ -1486,6 +1653,7 @@ def judge_classified_issues(
     max_workers: int,
     context_window: int,
     limit: int | None = None,
+    issue_ids: list[str] | None = None,
     dry_run: bool = False,
     model_weights_spec: str | None = None,
     web_evidence_payload: dict[str, Any] | None = None,
@@ -1493,6 +1661,10 @@ def judge_classified_issues(
 ) -> dict[str, Any]:
     _load_env()
     standard_refs, composite_refs = _flatten_issues(payload, limit=limit)
+    if issue_ids:
+        wanted = {str(issue_id).strip() for issue_id in issue_ids if str(issue_id).strip()}
+        standard_refs = [ref for ref in standard_refs if str(ref.get("id") or "") in wanted]
+        composite_refs = [ref for ref in composite_refs if str(ref.get("id") or "") in wanted]
     merged_payload = _load_json(merged_clean_path)
     slide_lookup = _build_slide_lookup(merged_payload)
     context_by_id, contexts_by_slide = _build_context_lookup(merged_payload)
@@ -1555,6 +1727,7 @@ def judge_classified_issues(
                 "judgments": [],
                 "token_usage_by_batch": [],
                 "batch_errors": [],
+                "response_metadata_by_batch": [],
             }
 
         work_items_by_model: dict[str, list[tuple]] = {}
@@ -1590,6 +1763,14 @@ def judge_classified_issues(
                 for result in completed:
                     model_results[result["model"]]["judgments"].extend(result["judgments"])
                     model_results[result["model"]]["token_usage_by_batch"].append(result["token_usage"])
+                    metadata = result["token_usage"].get("response_metadata", {})
+                    if metadata:
+                        model_results[result["model"]]["response_metadata_by_batch"].append(
+                            {
+                                "batch_index": result["batch_index"],
+                                **metadata,
+                            }
+                        )
                 for args, exc in failed:
                     model_results[model]["status"] = "partial_failed"
                     model_results[model]["batch_errors"].append({
@@ -1739,10 +1920,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "4")),
     )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_TOKENS", "8192")))
-    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "12")))
+    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "20")))
     parser.add_argument("--context-window", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))))
     parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_CURRENT_DATE", "2026-05-14"))
     parser.add_argument("--limit", type=int, default=None, help="optional issue count limit for quick tests")
+    parser.add_argument(
+        "--ids",
+        nargs="+",
+        default=None,
+        help="only verify the specified issue IDs (useful for retrying failed batches)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="validate input/output shape without calling LLMs")
     return parser
 
@@ -1784,6 +1971,7 @@ def main(argv: list[str] | None = None) -> int:
         max_workers=max(1, args.max_workers),
         context_window=max(0, args.context_window),
         limit=args.limit,
+        issue_ids=args.ids,
         dry_run=args.dry_run,
         model_weights_spec=args.model_weights,
     )

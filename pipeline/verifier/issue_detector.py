@@ -5,23 +5,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-JUDGE_MIN_CONFIDENCE = 0.6
-
-
-def issue_judge_min_confidence() -> float:
-    raw = str(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", str(JUDGE_MIN_CONFIDENCE)) or "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return JUDGE_MIN_CONFIDENCE
-    return max(0.0, min(1.0, value))
-
-
 def _issue_judge_batch_max_workers() -> int:
     raw = (
         os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS")
         or os.getenv("VERIFIER_JUDGE_BATCH_MAX_WORKERS")
-        or "12"
+        or "20"
     )
     try:
         return max(1, int(raw))
@@ -49,6 +37,33 @@ def _context_ids(claim: dict) -> list[str]:
             return ids
     cid = _context_id(claim)
     return [cid] if cid else []
+
+
+def _issue_judge_prompt_layout() -> str:
+    layout = str(os.getenv("VERIFIER_ISSUE_JUDGE_PROMPT_LAYOUT", "legacy") or "").strip().lower()
+    return "legacy" if layout in {"legacy", "shared", "flat"} else "grouped"
+
+
+def _format_claim_for_prompt(claim: dict, index: int) -> str:
+    claim_id = _claim_id(claim) or f"claim_{index}"
+    context_id = _context_id(claim)
+    claim_text = str(claim.get("claim_text") or "").strip()
+    resolved = str(claim.get("resolved_claim") or "").strip()
+    lines = [
+        f"{index}. claim_id: {claim_id}",
+        f"   context_id: {context_id}",
+        f"   claim_type: {claim.get('claim_type', '?')}",
+        f"   resolution_status: {claim.get('resolution_status', '?')}",
+        f"   resolved_claim: {resolved or claim_text}",
+        f"   claim_text: {claim_text}",
+    ]
+    if claim.get("antecedent_context_ids"):
+        lines.append(
+            f"   antecedent_context_ids: {', '.join(str(x) for x in claim.get('antecedent_context_ids') or [])}"
+        )
+    if claim.get("context_note"):
+        lines.append(f"   context_note: {claim.get('context_note')}")
+    return "\n".join(lines)
 
 
 def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
@@ -82,36 +97,92 @@ def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
     )
 
 
+def _build_context_grouped_judge_input(
+    claims: list[dict],
+    contexts: list[dict],
+    slide_ctx: dict,
+) -> str:
+    """Place each full context immediately before all claims extracted from it.
+
+    Every context in the batch remains visible, including contexts with no target
+    claim, so preceding/following discourse can still resolve references and
+    explicit self-corrections without duplicating the context per claim.
+    """
+    from . import claim_common as cv
+
+    claims_by_context: dict[str, list[tuple[int, dict]]] = {}
+    for index, claim in enumerate(claims, start=1):
+        claims_by_context.setdefault(_context_id(claim), []).append((index, claim))
+
+    slide_numbers = []
+    seen_slides = set()
+    for context in contexts:
+        slide_number = int(context.get("slide_number", 0) or 0)
+        if slide_number and slide_number not in seen_slides:
+            seen_slides.add(slide_number)
+            slide_numbers.append(slide_number)
+    slide_lines = []
+    for slide_number in slide_numbers:
+        slide = slide_ctx.get(slide_number, {})
+        title = slide.get("title", f"슬라이드 {slide_number}")
+        time_range = slide.get("time_range", "")
+        slide_lines.append(f"- 슬라이드 {slide_number}: {title} ({time_range})")
+
+    blocks = []
+    seen_context_ids = set()
+    for context in contexts:
+        context_id = str(context.get("context_id", "") or "").strip()
+        seen_context_ids.add(context_id)
+        target_claims = claims_by_context.get(context_id, [])
+        role = "판정 claim 포함" if target_claims else "인접 참고 문맥"
+        lines = [
+            f"[context {context_id} | {role}]",
+            cv._format_context_for_prompt(context),
+        ]
+        if target_claims:
+            lines.append("[이 context에서 각각 판정할 claim]")
+            lines.extend(_format_claim_for_prompt(claim, index) for index, claim in target_claims)
+        blocks.append("\n".join(lines))
+
+    unmatched = [
+        (index, claim)
+        for index, claim in enumerate(claims, start=1)
+        if _context_id(claim) not in seen_context_ids
+    ]
+    if unmatched:
+        blocks.append(
+            "[context를 찾지 못한 판정 claim]\n"
+            + "\n".join(_format_claim_for_prompt(claim, index) for index, claim in unmatched)
+        )
+
+    return (
+        "[배치 공통 슬라이드]\n"
+        + ("\n".join(slide_lines) if slide_lines else "(슬라이드 정보 없음)")
+        + "\n\n[context별 전사와 판정 claim]\n"
+        + ("\n\n".join(blocks) if blocks else "(context 없음)")
+    )
+
+
 def _build_issue_candidate_prompt(
     claims: list[dict],
     contexts: list[dict],
     current_date: str,
     hint: dict,
     slide_ctx: dict,
+    min_confidence: float,
 ) -> str:
-    shared_context = _build_shared_judge_context(contexts, slide_ctx)
-    min_confidence = issue_judge_min_confidence()
-    claim_lines = []
-    for i, c in enumerate(claims, 1):
-        claim_id = _claim_id(c) or f"claim_{i}"
-        context_id = _context_id(c)
-        claim_text = str(c.get("claim_text") or "").strip()
-        resolved = str(c.get("resolved_claim") or "").strip()
-        lines = [
-            f"{i}. claim_id: {claim_id}",
-            f"   context_id: {context_id}",
-            f"   claim_type: {c.get('claim_type', '?')}",
-            f"   resolution_status: {c.get('resolution_status', '?')}",
-            f"   resolved_claim: {resolved or claim_text}",
-            f"   claim_text: {claim_text}",
-        ]
-        if c.get("antecedent_context_ids"):
-            lines.append(
-                f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
-            )
-        if c.get("context_note"):
-            lines.append(f"   context_note: {c.get('context_note')}")
-        claim_lines.append("\n".join(lines))
+    prompt_layout = _issue_judge_prompt_layout()
+    shared_context = (
+        _build_context_grouped_judge_input(claims, contexts, slide_ctx)
+        if prompt_layout == "grouped"
+        else _build_shared_judge_context(contexts, slide_ctx)
+    )
+    claim_lines = [_format_claim_for_prompt(claim, index) for index, claim in enumerate(claims, 1)]
+    claim_section = (
+        ""
+        if prompt_layout == "grouped"
+        else f"\n\n판정 대상 claim 목록:\n{chr(10).join(claim_lines)}"
+    )
 
     return f"""당신은 강의 claim 목록에서 1차 issue 후보만 선별하는 판정자입니다.
 업로드/검증 기준일: {current_date}
@@ -122,9 +193,7 @@ def _build_issue_candidate_prompt(
 
 배치 공통 문맥:
 {shared_context}
-
-판정 대상 claim 목록:
-{chr(10).join(claim_lines)}
+{claim_section}
 
 ### 판정 기준
 
@@ -134,7 +203,10 @@ def _build_issue_candidate_prompt(
 
 입력 claim은 아래 순서로 해석하세요.
 
-1. 기본 판정 대상은 `resolved_claim`입니다.
+1. 기본 판정 대상은 해당 `resolved_claim`이 있는 context의 전사문입니다.
+   context의 전사문이 최종 판단의 근거이고, `resolved_claim`은 해당 발화의 주장 단위를 정리한 보조 표현입니다.
+   `resolved_claim`에만 있는 강화·보충·해석은 오류로 판단하지 말고, 전사문에서 실제로 전달된 명제를 판단하세요.
+   context와 `resolved_claim`이 다르면 전사문과 `claim_text`에 나타난 조건·범위·확실성을 기준으로 판단하세요.
 2. 먼저 `resolved_claim`이 `claim_text`, 배치 공통 문맥에서 실제로 전달된 의미를 충실히 보존했는지 확인하세요.
 3. `resolved_claim`이 원문 context보다 주체, 대상, 분류명, 조건, 범위, 인과, 일반성을 과도하게 바꾸거나 넓혔다면 그 강해진 문장을 그대로 믿지 마세요.
 4. 이 경우 `claim_text`와 배치 문맥에서 실제 전달된 더 좁은 명제를 기준으로 판단하세요.
@@ -143,9 +215,10 @@ def _build_issue_candidate_prompt(
 각 claim의 confidence는 반드시 그 claim이 속한 `context_id`의 target context를 1차 판단 근거로 산정하세요.
 배치에 함께 제공된 다른 context는 캐시/효율을 위해 같이 제공된 참고 자료이며,
 해당 claim과 직접 이어지지 않는 다른 설명은 오류 가능성을 낮추거나 높이는 주된 근거로 사용하지 마세요.
-다른 context는 claim_text/resolved_claim의 지시어, 생략된 주체, 조건, 대상이 target context만으로 불명확하거나,
-바로 앞뒤 context가 같은 문장을 이어 설명하거나 자기수정하여 target context의 최종 의미를 직접 완성하는 경우에만 보조 근거로 사용하세요.
-직접 이어지는 설명이 앞 표현을 명확히 정정하거나 정상적인 의미로 완성하면 그 최종 의미를 기준으로 confidence를 낮추세요.
+다른 context는 claim_text/resolved_claim의 지시어, 생략된 주체, 조건, 대상과 문장 전체 의미를 복원하는 데 필요할 때 보조 근거로 사용하세요.
+인접 context가 앞 표현을 단순히 이어 설명하거나 뒤에서 올바른 공식·정의를 별도로 제시하는 것만으로는 앞선 오류를 취소하지 마세요.
+앞선 발화를 명시적으로 부정·정정하는 경우에만 자기정정으로 보고 앞선 오류의 confidence를 낮추세요.
+명시적인 자기정정이 없으면, 문맥상 완성된 앞선 명제가 잘못되었거나 학생에게 오개념을 남길 가능성이 있는 경우 그 오류를 후보로 유지하세요.
 
 다음 중 하나라도 구체적으로 남으면 issue 후보로 출력하세요.
 
@@ -161,20 +234,33 @@ def _build_issue_candidate_prompt(
 - 현재성, 최신성, 지원 여부, 사용 여부, 버전, 정책, 통계, 시장 상황처럼 업로드/검증 기준일({current_date}) 기준 확인이 필요한 가능성
 - "현재", "요즘", "최근", "최신", "지원된다", "더 이상 사용하지 않는다" 같은 표현이 시점 의존 사실처럼 전달되는 경우
 - 개념, 주체, 과정, 권한, 대상이 잘못 대응되어 학생에게 구체적인 오개념이 남을 가능성이 있는 경우
+- claim이 질문형·추정형·불확실 표현으로 되어 있어도, 특정 사실관계·정의·수치·원인·관계를 제시하고 강의자가 이를 즉시 부정하거나 정정하지 않은 경우. 질문형이라는 이유만으로 자동으로 정상 처리하지 마세요.
+
+scope overclaim은 특정 표현의 출현 여부가 아니라 명제의 적용 범위와 확실성의 변화로 판단하세요.
+문맥이 지지하는 가장 좁고 정확한 명제를 먼저 복원한 뒤, claim이 대상·조건·예외·확실성의 범위를 부당하게 넓혔는지 비교하세요.
+핵심 방향이 대체로 참이어도, 확장된 명제를 깨는 일반적인 반례가 존재하면 scope_condition 후보로 유지하세요.
+다만 단순 강조나 관용적 표현이고 학생이 일반 규칙으로 배울 가능성이 없으면 제외하세요.
+판정의 핵심은 "이 말이 대체로 맞는가"가 아니라 "원래 참인 내용을 반례가 가능한 범위까지 확장했는가"입니다.
 
 다음 경우는 issue 후보로 출력하지 마세요.
 
-- 제공된 배치 문맥이 같은 대상, 같은 관계, 같은 조건을 명확히 정정하거나 충분히 보완한 경우
-- 바로 뒤 문장이 앞 표현을 같은 의미로 정확히 풀어 최종 의미가 올바르게 좁혀진 경우
-- 말더듬, 탐색적 수치 나열, 즉시 자기수정, 재표현, 불완전한 문장 조각이 문맥에서 정상적인 최종 의미로 정리되는 경우
+- 제공된 배치 문맥에 앞선 발화를 명시적으로 부정·정정하여 올바른 의미로 대체하는 표현이 있는 경우
+- 사실관계가 없는 순수한 수사 질문이거나, 질문·추정 직후 강의자가 명시적으로 틀렸다고 정정한 경우
+- 말더듬, 탐색적 수치 나열, 단순 재표현처럼 애초에 독립된 명제가 아니고, 명시적인 자기정정 없이도 최종 전달 의미가 처음부터 올바르게 유지되는 경우
+- 불완전한 문장 조각이라는 이유만으로는 제외하지 마세요. 조각을 target context와 인접 context로 완성했을 때 하나의 명확한 명제가 되고, 그 명제가 사실 오류·조건 누락·범위 과장·잘못된 절차를 포함하면 issue 후보로 출력하세요.
 - 예시, 가정, 비유 안의 주장을 해당 범위 밖의 일반 명제로 확대해야만 문제가 생기는 경우
 - 외부 확인이 가능하다는 사실, 출처 부재, 슬라이드 본문에 같은 내용이 없다는 사실만으로 의심되는 경우
 - 애매한 지시어를 특정 대상으로 강제 해석해야만 문제가 생기는 경우
 - 단순 표현 취향, 더 좋은 설명 가능성, 강의 수준 밖의 매우 엄밀한 예외만 남는 경우
 - 단정을 하였지만, 일반적으로 통용하는 표현이거나, LLM 자신의 일반 도메인 지식으로 보았을 때 충분히 맞는 말로 보이는 경우
 - 약/대략/정도/조금 같은 근사 표현이 있고, 수치가 보조 예시나 감각적 환산으로 쓰였으며 일반적으로 통용되는 근사이면 출력하지 마세요.
+- 전사에 나타난 영문 글자·변수·기호의 대문자/소문자 차이만으로는 출력하지 마세요. 음성 전사는 문자 case를
+  안정적으로 전달하지 않으며, 전사 또는 resolved_claim에 `N/n`, `X/x`처럼 어느 표기가 들어왔는지는
+  강의자가 대문자와 소문자를 구별해 잘못 설명했다는 근거가 아닙니다. 슬라이드 표기와 case가 다르거나 모델이
+  해당 글자를 "대문자" 또는 "소문자"로 읽었더라도, 대·소문자 차이와 무관한 독립적인 개념·계산·범위 오류가
+  없다면 issue 후보로 출력하지 마세요.
 
-confidence는 정보의 중요성이나 추가 확인 가치가 아니라, 위 지침과 제공 문맥을 반영한 최종 전달 의미에 학생이 잘못 배울 수 있는 구체적인 오류가 실제로 남아 있을 가능성을 0.0~1.0으로 표현한 값입니다.
+confidence는 정보의 중요성이나 추가 확인 가치가 아니라, 위 지침과 제공 문맥을 반영할 때 해당 claim이 객관적으로 잘못되었거나 학생에게 잘못된 지식을 남길 확률을 0.0~1.0으로 추정한 값입니다. 단순히 후속 검토가 필요해 보이는 정도, 외부 확인의 가치, 모델 간 불확실성만을 점수로 표현하지 마세요.
 모델별 출력 threshold는 아래 응답 지침에 제시된 값을 따르세요.
 
 ### 응답 (JSON만)
@@ -214,7 +300,7 @@ confidence는 정보의 중요성이나 추가 확인 가치가 아니라, 위 �
 5. type, issue_type, context_id는 출력하지 마세요.
 6. 같은 claim에서 같은 문제는 한 건만 출력하세요.
 7. 문제가 없으면 {{"claim_scores": [...], "issues": []}}만 출력하세요.
-8. basis_code는 위 다섯 코드 중 하나만 출력하세요.
+8. basis_code는 위 여섯 코드 중 하나만 출력하세요.
 9. issue, reason, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
 10. issues에는 claim_id, basis_code, confidence만 출력하세요. claim_text/resolved_claim은 서버가 claim_id로 원본 claim에서 붙입니다.
 11. JSON 외 텍스트를 출력하지 마세요.
@@ -290,6 +376,7 @@ def _judge_issue_candidates(
     hint: dict,
     context_map: dict,
     slide_ctx: dict,
+    min_confidence: float,
 ) -> tuple[list[dict], bool, int, dict]:
     from . import claim_common as cv
 
@@ -297,13 +384,14 @@ def _judge_issue_candidates(
         return [], [], False, 0, cv._empty_token_usage()
 
     claim_by_id = {_claim_id(claim): claim for claim in claims if _claim_id(claim)}
-    full_prompt = _build_issue_candidate_prompt(claims, contexts, current_date, hint, slide_ctx)
-    system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
-    response_format = (
-        {"type": "json_object"}
-        if cv._supports_json_object_response_format(cv._resolve_stage_model("judge"))
-        else None
+    full_prompt = _build_issue_candidate_prompt(
+        claims, contexts, current_date, hint, slide_ctx, min_confidence
     )
+    system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
+    # Provider-specific translation happens inside _call_llm.  Do not gate
+    # this on OpenAI-compatible model names: Claude needs the same request to
+    # be translated into forced tool_use, and Gemini into JSON MIME/schema.
+    response_format = {"type": "json_object"}
     api_calls = 0
     token_usage = cv._empty_token_usage()
 
@@ -346,7 +434,7 @@ def _judge_issue_candidates(
                 confidence = _clamp_confidence(raw_issue.get("confidence"))
             except Exception:
                 confidence = 0.0
-            if confidence < issue_judge_min_confidence():
+            if confidence < min_confidence:
                 continue
 
             context_id = _context_id(source_claim)
@@ -391,6 +479,7 @@ def recover_issue_candidate_judgement(
     context_map: dict,
     slide_ctx: dict,
     label: str,
+    min_confidence: float,
 ) -> tuple[list[dict], list[dict], bool, int, dict, bool]:
     from . import claim_common as cv
 
@@ -406,7 +495,7 @@ def recover_issue_candidate_judgement(
             print(f"    ↺ {label} 1차 issue judge 재처리 ({attempt}/{cv.VERIFIER_BATCH_RECOVERY_RETRIES})")
         try:
             issues, claim_scores, parse_failed, api_calls, token_usage = _judge_issue_candidates(
-                claims, contexts, current_date, hint, context_map, slide_ctx
+                claims, contexts, current_date, hint, context_map, slide_ctx, min_confidence
             )
             total_api_calls += api_calls
             total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)
@@ -427,6 +516,8 @@ def judge_issue_candidates_only(
     current_date: str,
     hint: dict,
     slide_ctx: dict,
+    *,
+    min_confidence: float,
     log_prefix: str = "",
 ) -> tuple[list[dict], list[dict], int, dict]:
     """Run only the first issue judge and return issue candidates."""
@@ -458,6 +549,7 @@ def judge_issue_candidates_only(
             batch_map,
             slide_ctx,
             f"1차 issue judge 배치 {batch_idx} {ids}",
+            min_confidence,
         )
         if not ok:
             print(f"    ⚠️ 1차 issue judge 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")

@@ -3,9 +3,49 @@
 """
 
 import os
+import inspect
 import subprocess
 import time
 from pathlib import Path
+
+
+def anthropic_structured_output_request_kwargs(schema, create_method=None):
+    """Return SDK-version-compatible Anthropic Structured Output arguments.
+
+    Current Anthropic SDKs expose ``output_config`` directly on
+    ``messages.create``. Older SDKs do not expose that keyword, but do expose
+    ``extra_body`` for forwarding newly added API fields. In both cases the
+    HTTP request body contains the same top-level ``output_config`` object.
+    """
+    output_config = {
+        "format": {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    }
+
+    if create_method is None:
+        return {"output_config": output_config}
+
+    try:
+        parameters = inspect.signature(create_method).parameters
+    except (TypeError, ValueError):
+        # Prefer the current official SDK contract when introspection is not
+        # available (for example, with some generated/mocked clients).
+        return {"output_config": output_config}
+
+    if "output_config" in parameters:
+        return {"output_config": output_config}
+
+    if "extra_body" in parameters:
+        return {"extra_body": {"output_config": output_config}}
+
+    # A generic **kwargs client is expected to support the current contract.
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return {"output_config": output_config}
+
+    # Keep the failure explicit for an SDK too old to forward unknown fields.
+    return {"output_config": output_config}
 
 
 def resolve_backend_root() -> Path:
