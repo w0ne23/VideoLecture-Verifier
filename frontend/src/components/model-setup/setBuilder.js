@@ -100,7 +100,7 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
 
   const retryCounts = defaultRetryCounts(includeGrounding)
   const stageModels = stagesToStageModels(stages, providers, stageOrder)
-  stageModels.CLASSIFIED_ISSUE_GROUNDING_ENABLED = includeGrounding ? '1' : '0'
+  stageModels.CLASSIFIED_ISSUE_EVIDENCE_ENABLED = includeGrounding ? '1' : '0'
 
   const serializedStages = {}
   stageOrder.forEach(stageKey => {
