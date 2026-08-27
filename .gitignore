@@ -43,6 +43,14 @@ logs/
 .cache/
 huggingface_cache/
 
+# Local benchmark/agent artifacts
+outputs/
+paper_figures/
+tmp_multimodal/
+.codex_tmp/
+.codex_spreadsheet_work/
+Codex*.png
+
 # Frontend
 node_modules/
 frontend/dist/

@@ -301,7 +301,9 @@ def _is_anthropic_model(model: str) -> bool:
     return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
 
 
-def _issue_judge_min_confidence_for_model(model: str) -> float:
+def _issue_judge_min_confidence_for_model(
+    model: str,
+) -> float:
     """Return the first-pass issue detector threshold for a judge model."""
     def _bounded(value: float) -> float:
         return max(0.0, min(1.0, value))
@@ -327,10 +329,7 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
         )
         default = 0.8
     else:
-        try:
-            default = float(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", "0.8") or 0.8)
-        except ValueError:
-            default = 0.8
+        default = 0.8
 
     for key in env_candidates:
         raw = os.getenv(key)
@@ -343,12 +342,8 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
     return _bounded(default)
 
 
-def _issue_judge_disagreement_reject_delta() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_REJECT_DELTA", 0.40)
-
-
-def _issue_judge_disagreement_keep_confidence() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_KEEP_CONFIDENCE", 0.85)
+def _issue_judge_single_model_keep_confidence() -> float:
+    return _env_float("VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE", 0.85)
 
 
 def _issue_judge_score_lookup(
@@ -377,49 +372,28 @@ def _issue_judge_consensus_decision(
     issue_models: list[str],
     evaluated_models: list[str],
     scores_by_claim: dict[str, dict[str, float]],
-    disagreement_threshold: float | None = None,
     single_keep_confidence: float | None = None,
 ) -> dict:
     """Resolve detector votes before downstream verification.
 
-    Two or more positive model votes always pass. Score spread is retained as
-    disagreement metadata, never as a majority-vote rejection. A single-model
-    candidate passes only when that model reaches the strong-keep threshold.
+    Two or more positive model votes always pass. A single-model candidate
+    passes only when that model reaches the strong-keep threshold.
     """
-    disagreement_threshold = (
-        _issue_judge_disagreement_reject_delta()
-        if disagreement_threshold is None
-        else disagreement_threshold
-    )
     single_keep_confidence = (
-        _issue_judge_disagreement_keep_confidence()
+        _issue_judge_single_model_keep_confidence()
         if single_keep_confidence is None
         else single_keep_confidence
     )
     claim_scores = scores_by_claim.get(claim_id, {}) or {}
-    evaluated_scores = {
-        model: _clamp01(claim_scores.get(model, 0.0))
-        for model in evaluated_models
-    }
-    score_values = list(evaluated_scores.values())
-    score_delta = (max(score_values) - min(score_values)) if score_values else 0.0
-    disagreement = {
-        "claim_id": claim_id,
-        "model_scores": {model: round(score, 6) for model, score in evaluated_scores.items()},
-        "confidence_delta": round(score_delta, 6),
-        "disagreement_delta": round(disagreement_threshold, 6),
-        "needs_review": score_delta >= disagreement_threshold,
-    }
-
     issue_model_count = len(issue_models)
     evaluated_count = len(evaluated_models)
     if evaluated_count == 0:
-        return {"keep": False, "status": "all_models_failed", "disagreement": disagreement}
+        return {"keep": False, "status": "all_models_failed"}
     if issue_model_count == 0:
-        return {"keep": False, "status": "no_issue", "disagreement": disagreement}
+        return {"keep": False, "status": "no_issue"}
     if issue_model_count >= 2:
         status = "all_models_agreed" if issue_model_count == evaluated_count else "partial_agreement"
-        return {"keep": True, "status": status, "disagreement": disagreement}
+        return {"keep": True, "status": status}
 
     positive_model = issue_models[0]
     positive_confidence = _clamp01(claim_scores.get(positive_model, 0.0))
@@ -427,21 +401,18 @@ def _issue_judge_consensus_decision(
         return {
             "keep": True,
             "status": "single_model_strong",
-            "disagreement": disagreement,
             "positive_model": positive_model,
             "positive_confidence": round(positive_confidence, 6),
         }
     return {
         "keep": False,
         "status": "rejected_single_model_low_confidence",
-        "disagreement": disagreement,
         "rejection": {
             "claim_id": claim_id,
             "reason": "single_model_below_strong_keep_confidence",
             "positive_model": positive_model,
             "positive_confidence": round(positive_confidence, 6),
             "strong_keep_confidence": round(single_keep_confidence, 6),
-            "model_scores": disagreement["model_scores"],
         },
     }
 
@@ -489,10 +460,16 @@ def _classified_issue_judge_worker(args_tuple):
     """Worker used by the classified issue pipeline's first issue judge."""
     started_at = time.perf_counter()
     try:
-        merged_path, model, claims_serialized, current_date, root, env_vars = args_tuple
+        (
+            merged_path,
+            model,
+            claims_serialized,
+            current_date,
+            root,
+            env_vars,
+        ) = args_tuple
         _setup_worker(root, env_vars, model)
         min_confidence = _issue_judge_min_confidence_for_model(model)
-        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(min_confidence)
         from pipeline.verifier.claim_pipeline import prepare_verification as _prepare_verification
         from pipeline.verifier.issue_detector import judge_issue_candidates_only
 
@@ -505,6 +482,7 @@ def _classified_issue_judge_worker(args_tuple):
             ctx["current_date"],
             ctx["hint"],
             ctx["slide_ctx"],
+            min_confidence=min_confidence,
             log_prefix=model,
         )
 
@@ -671,7 +649,6 @@ def _build_issue_judge_comparison(
     issue_counts = {model: len(judge_results.get(model, {}).get("issues", []) or []) for model in models}
     issues_by_model_claim: dict[str, dict[str, list[dict]]] = {}
     scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
 
     for model in models:
         grouped: dict[str, list[dict]] = {}
@@ -726,7 +703,6 @@ def _build_issue_judge_comparison(
             issue_models=issue_models,
             evaluated_models=evaluated_models,
             scores_by_claim=scores_by_claim,
-            disagreement_threshold=disagreement_reject_delta,
         )
         status = str(decision["status"])
         consensus_rejection = decision.get("rejection")
@@ -758,10 +734,7 @@ def _build_issue_judge_comparison(
                 "status": status,
                 "issue_model_count": len(issue_models),
                 "issue_models": issue_models,
-                # Legacy field retained for readers of older result files.
-                "model_disagreement_rejection": consensus_rejection or {},
-                "consensus_rejection": consensus_rejection or {},
-                "model_disagreement": decision.get("disagreement", {}),
+                "single_model_rejection": consensus_rejection or {},
             },
         })
 
@@ -781,12 +754,7 @@ def _build_issue_judge_comparison(
             "partial_agreement_count": disagreement_count,
             "single_model_only_count": single_model_only_count,
             "rejected_single_model_low_confidence_count": rejected_single_model_count,
-            # Legacy aliases retained for existing benchmark readers. Score
-            # disagreement no longer rejects a two-model majority.
-            "rejected_by_model_disagreement_count": rejected_single_model_count,
-            "model_disagreement_reject_delta": disagreement_reject_delta,
-            "model_disagreement_review_delta": disagreement_reject_delta,
-            "single_model_strong_keep_confidence": _issue_judge_disagreement_keep_confidence(),
+            "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
             "no_issue_claim_count": no_issue_claim_count,
         },
         "exclusive_by_model": exclusive_by_model,
@@ -808,7 +776,6 @@ def _write_issue_judge_merged_output(
     duplicate_claim_ids: list[str] = []
     skipped_without_claim_id = 0
     scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
     rejected_single_model: dict[str, dict] = {}
     failed_models = [
         model for model in models
@@ -829,7 +796,6 @@ def _write_issue_judge_merged_output(
             issue_models=issue_models,
             evaluated_models=evaluated_models,
             scores_by_claim=scores_by_claim,
-            disagreement_threshold=disagreement_reject_delta,
         )
         for claim_id, issue_models in issue_models_by_claim.items()
     }
@@ -903,12 +869,7 @@ def _write_issue_judge_merged_output(
         "duplicate_claim_count": len(set(duplicate_claim_ids)),
         "skipped_without_claim_id": skipped_without_claim_id,
         "rejected_single_model_low_confidence_count": len(rejected_single_model),
-        # Legacy aliases retained for existing benchmark readers. Score
-        # disagreement is now review metadata and cannot veto a majority.
-        "rejected_by_model_disagreement_count": len(rejected_single_model),
-        "model_disagreement_reject_delta": disagreement_reject_delta,
-        "model_disagreement_review_delta": disagreement_reject_delta,
-        "single_model_strong_keep_confidence": _issue_judge_disagreement_keep_confidence(),
+        "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
     }
     payload = {
         "schema_version": "issue_judge_merged.v1",
@@ -920,7 +881,6 @@ def _write_issue_judge_merged_output(
         "summary": summary,
         "issues": merged_issues,
         "rejected_single_model_low_confidence": list(rejected_single_model.values()),
-        "rejected_by_model_disagreement": list(rejected_single_model.values()),
     }
     path = output_dir / f"{base_stem}_issue_judge.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -943,7 +903,6 @@ def run_issue_judge_only(
     issue_judge_models: list[str] | None = None,
     issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     current_date: str | None = None,
-    issue_judge_min_confidence: float | None = None,
     issue_judge_max_workers: int = DEFAULT_ISSUE_JUDGE_MAX_WORKERS,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
@@ -1002,9 +961,6 @@ def run_issue_judge_only(
     ]
     if missing_judge_keys:
         raise RuntimeError(f"issue judge 모델 키가 필요합니다: {', '.join(missing_judge_keys)}")
-    if issue_judge_min_confidence is not None:
-        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(issue_judge_min_confidence)
-
     ctx = prepare_verification(str(merged_file), current_date=current_date)
     claims = _load_claims_jsonl(claims_path)
 
@@ -1023,7 +979,14 @@ def run_issue_judge_only(
         futures = {
             executor.submit(
                 _classified_issue_judge_worker,
-                (str(merged_file), model, claims_serialized, current_date, root, env_vars),
+                (
+                    str(merged_file),
+                    model,
+                    claims_serialized,
+                    current_date,
+                    root,
+                    env_vars,
+                ),
             ): model
             for model in models
         }
@@ -1312,7 +1275,6 @@ def run_classified_issue_pipeline(
     claims_jsonl: str | None = None,
     reuse_claims: bool = False,
     current_date: str | None = None,
-    issue_judge_min_confidence: float | None = None,
     issue_judge_models: list[str] | None = None,
     issue_type_models: list[str] | None = None,
     verifier_models: list[str] | None = None,
@@ -1463,7 +1425,6 @@ def run_classified_issue_pipeline(
             claims_jsonl=claims_result["claims_jsonl"],
             issue_judge_models=resolved_issue_judge_models,
             current_date=current_date,
-            issue_judge_min_confidence=issue_judge_min_confidence,
             issue_judge_batch_size=issue_judge_batch_size,
             issue_judge_max_workers=shared_max_workers,
         )
@@ -1904,12 +1865,6 @@ def main():
         default=CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
         help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
     )
-    parser.add_argument(
-        "--issue-judge-min-confidence",
-        type=float,
-        default=None,
-        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 모델별로 GPT 0.8, Claude 0.60, Grok 0.8",
-    )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
 
@@ -1921,7 +1876,6 @@ def main():
             issue_judge_models=args.issue_judge_models,
             issue_judge_batch_size=args.issue_judge_batch_size,
             current_date=args.date,
-            issue_judge_min_confidence=args.issue_judge_min_confidence,
             issue_judge_max_workers=args.issue_judge_max_workers,
         )
         print("\n=== 1차 Issue Judge 완료 ===")
@@ -1938,7 +1892,6 @@ def main():
         claims_jsonl=args.claims_jsonl,
         reuse_claims=args.reuse_claims,
         current_date=args.date,
-        issue_judge_min_confidence=args.issue_judge_min_confidence,
         issue_judge_models=args.issue_judge_models,
         claim_batch_size=args.claim_batch_size,
         issue_judge_batch_size=args.issue_judge_batch_size,

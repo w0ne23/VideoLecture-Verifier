@@ -43,17 +43,14 @@ _ENV_KEYS = [
     "VERIFIER_DEEPSEEK_API_INITIAL_WAIT",
     "GROQ_API_KEY",
     "ISSUE_JUDGE_MODELS",
-    "ISSUE_JUDGE_MODEL_WEIGHTS",
     "ISSUE_JUDGE_MAX_WORKERS",
-    "VERIFIER_ISSUE_JUDGE_DISAGREEMENT_REJECT_DELTA",
-    "VERIFIER_ISSUE_JUDGE_DISAGREEMENT_KEEP_CONFIDENCE",
+    "VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE",
     "VERIFIER_MODEL",
     "VERIFIER_CLAIM_EXTRACT_MODEL",
     "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
     "VERIFIER_CLAIM_EXTRACT_MAX_WORKERS",
     "VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE",
     "VERIFIER_CLAIM_JUDGE_MODEL",
-    "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE",
     "VERIFIER_ISSUE_JUDGE_PROMPT_LAYOUT",
     "VERIFIER_SLIDE_ERROR_MODEL",
     "VERIFIER_BATCH_SIZE",
@@ -102,7 +99,13 @@ def _collect_env_vars() -> dict:
     from dotenv import load_dotenv
 
     load_dotenv()
-    return {k: os.environ.get(k) for k in _ENV_KEYS if os.environ.get(k)}
+    dynamic_threshold_keys = {
+        key
+        for key in os.environ
+        if key.startswith("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_")
+    }
+    env_keys = set(_ENV_KEYS) | dynamic_threshold_keys
+    return {k: os.environ.get(k) for k in env_keys if os.environ.get(k)}
 
 
 def _write_claims_jsonl(claims: list[dict], output_json_path: str | Path) -> str | None:

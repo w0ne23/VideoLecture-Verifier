@@ -5,18 +5,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-JUDGE_MIN_CONFIDENCE = 0.6
-
-
-def issue_judge_min_confidence() -> float:
-    raw = str(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", str(JUDGE_MIN_CONFIDENCE)) or "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return JUDGE_MIN_CONFIDENCE
-    return max(0.0, min(1.0, value))
-
-
 def _issue_judge_batch_max_workers() -> int:
     raw = (
         os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS")
@@ -181,6 +169,7 @@ def _build_issue_candidate_prompt(
     current_date: str,
     hint: dict,
     slide_ctx: dict,
+    min_confidence: float,
 ) -> str:
     prompt_layout = _issue_judge_prompt_layout()
     shared_context = (
@@ -188,7 +177,6 @@ def _build_issue_candidate_prompt(
         if prompt_layout == "grouped"
         else _build_shared_judge_context(contexts, slide_ctx)
     )
-    min_confidence = issue_judge_min_confidence()
     claim_lines = [_format_claim_for_prompt(claim, index) for index, claim in enumerate(claims, 1)]
     claim_section = (
         ""
@@ -388,6 +376,7 @@ def _judge_issue_candidates(
     hint: dict,
     context_map: dict,
     slide_ctx: dict,
+    min_confidence: float,
 ) -> tuple[list[dict], bool, int, dict]:
     from . import claim_common as cv
 
@@ -395,7 +384,9 @@ def _judge_issue_candidates(
         return [], [], False, 0, cv._empty_token_usage()
 
     claim_by_id = {_claim_id(claim): claim for claim in claims if _claim_id(claim)}
-    full_prompt = _build_issue_candidate_prompt(claims, contexts, current_date, hint, slide_ctx)
+    full_prompt = _build_issue_candidate_prompt(
+        claims, contexts, current_date, hint, slide_ctx, min_confidence
+    )
     system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
     # Provider-specific translation happens inside _call_llm.  Do not gate
     # this on OpenAI-compatible model names: Claude needs the same request to
@@ -443,7 +434,7 @@ def _judge_issue_candidates(
                 confidence = _clamp_confidence(raw_issue.get("confidence"))
             except Exception:
                 confidence = 0.0
-            if confidence < issue_judge_min_confidence():
+            if confidence < min_confidence:
                 continue
 
             context_id = _context_id(source_claim)
@@ -488,6 +479,7 @@ def recover_issue_candidate_judgement(
     context_map: dict,
     slide_ctx: dict,
     label: str,
+    min_confidence: float,
 ) -> tuple[list[dict], list[dict], bool, int, dict, bool]:
     from . import claim_common as cv
 
@@ -503,7 +495,7 @@ def recover_issue_candidate_judgement(
             print(f"    ↺ {label} 1차 issue judge 재처리 ({attempt}/{cv.VERIFIER_BATCH_RECOVERY_RETRIES})")
         try:
             issues, claim_scores, parse_failed, api_calls, token_usage = _judge_issue_candidates(
-                claims, contexts, current_date, hint, context_map, slide_ctx
+                claims, contexts, current_date, hint, context_map, slide_ctx, min_confidence
             )
             total_api_calls += api_calls
             total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)
@@ -524,6 +516,8 @@ def judge_issue_candidates_only(
     current_date: str,
     hint: dict,
     slide_ctx: dict,
+    *,
+    min_confidence: float,
     log_prefix: str = "",
 ) -> tuple[list[dict], list[dict], int, dict]:
     """Run only the first issue judge and return issue candidates."""
@@ -555,6 +549,7 @@ def judge_issue_candidates_only(
             batch_map,
             slide_ctx,
             f"1차 issue judge 배치 {batch_idx} {ids}",
+            min_confidence,
         )
         if not ok:
             print(f"    ⚠️ 1차 issue judge 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")

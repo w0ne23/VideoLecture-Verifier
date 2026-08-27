@@ -232,8 +232,7 @@ def _restore_feedback_display_aliases(items: list[dict[str, Any]]) -> list[dict[
 def build_content_verification_response(lecture_id: str, stem: str, verifier_path: str, data: dict) -> dict[str, Any]:
     """검증 결과 원본 JSON → API 응답 매핑 (순수 함수).
 
-    반환 dict의 키 구성은 프론트엔드와의 계약이다 — tests/test_verifier_contract.py가
-    이 계약을 고정하므로, 키를 바꾸면 테스트와 프론트를 함께 수정해야 한다.
+    반환 dict의 키 구성은 프론트엔드와의 계약이다.
     """
     flow = data.get('claim_decision_flow', {}) or {}
     summary = data.get('claim_decision_flow_summary', {}) or {}
