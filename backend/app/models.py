@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -53,12 +53,17 @@ class ProcessingJob(Base):
     lecture = relationship('Lecture', back_populates='processing_jobs')
 
 
+LECTURE_SOURCE_TAGS = ('youtube', 'kmooc', 'kocw', 'instructor', 'etc')
+
+
 class Lecture(Base):
     __tablename__ = 'lectures'
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String, nullable=True)
     description = Column(Text, nullable=True)
+    # 업로드 시 필수: youtube | kmooc | kocw | instructor | etc
+    source_tag = Column(String, nullable=True)
     video_path = Column(Text, nullable=False)
     output_dir = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -90,4 +95,19 @@ class ModelSettings(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     stage_models = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ModelSettingProfile(Base):
+    """사용자가 저장한 모델 설정 프리셋."""
+
+    __tablename__ = 'model_setting_profiles'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False, unique=True, index=True)
+    stage_models = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    editor_state = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    is_active = Column(Boolean, nullable=False, default=False, server_default='false')
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

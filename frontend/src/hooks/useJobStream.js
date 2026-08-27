@@ -7,7 +7,7 @@ import {
   jobStreamUrl,
   checkHealth,
   retryLecture as retryJobRequest,
-} from '../lib/api'
+} from '../api/pipeline'
 import { isTerminalStatus, markAllStages, mergeStageStatus, phaseFromStatus } from '../lib/jobStreamUtils'
 
 const EMPTY_LECTURE = {

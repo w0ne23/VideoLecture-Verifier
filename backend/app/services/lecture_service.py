@@ -81,10 +81,26 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
         'id': str(lecture.id),
         'title': lecture.title or str(lecture.id),
         'description': lecture.description or '',
+        'source_tag': lecture.source_tag,
         'video_url': make_file_url(lecture.video_path),
         'created_at': lecture.created_at.isoformat() if lecture.created_at else None,
         'job': _job_dict(job),
     }
+
+
+def _lecture_thumbnail_url(lecture: Lecture) -> str:
+    """전처리 단계에서 이미 추출해둔 슬라이드 프레임 중 첫 장을 썸네일로 재사용한다.
+    별도로 영상에서 프레임을 다시 뽑을 필요가 없다 - 아직 전처리 전이면 빈 문자열."""
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if not output_dir:
+        return ''
+    slides_dir = output_dir / 'slides'
+    if not slides_dir.is_dir():
+        return ''
+    candidates = sorted(slides_dir.glob('scene_*_base.jpg'))
+    if not candidates:
+        return ''
+    return make_file_url(candidates[0])
 
 
 async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> list[dict[str, Any]]:
@@ -102,6 +118,8 @@ async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> l
             'id': str(lecture.id),
             'title': lecture.title or str(lecture.id),
             'description': lecture.description or '',
+            'source_tag': lecture.source_tag,
+            'thumbnail_url': _lecture_thumbnail_url(lecture),
             'status': job.status if job else 'unknown',
             'job_id': str(job.id) if job else None,
             'job_type': job.job_type if job else None,
@@ -280,6 +298,69 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
         'classified_issue_verifier_path': data.get('classified_issue_verifier_path', ''),
         'classified_issue_verifier': (data.get('views', {}) or {}).get('classified_issue_verifier', {}),
     }
+
+
+ARTIFACT_STAGE_KEYS: dict[str, str] = {
+    'claim_extraction': 'claims_json',
+    'issue_judge': 'issue_judge',
+    'issue_judge_summary': 'issue_judge_summary',
+    'issue_classification': 'issue_types',
+    'final_verification': 'classified_issue_verifier',
+    'slide_review': 'slide_errors',
+}
+
+
+async def get_lecture_artifact(db: AsyncSession, lecture_id: str, stage: str) -> dict[str, Any]:
+    """GET /lectures/{id}/artifacts/{stage} 전용. 검증 파이프라인 중간단계 산출물 원본을 반환한다.
+
+    /result와 달리 가공 없이 raw JSON을 그대로 내려준다 — 프론트(단계별 리포트 화면)에서
+    필요한 필드만 추려서 렌더링한다.
+    """
+    artifact_key = ARTIFACT_STAGE_KEYS.get(stage)
+    if not artifact_key:
+        raise HTTPException(status_code=404, detail=f'Unknown stage: {stage}')
+
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
+        raise HTTPException(status_code=404, detail='Lecture not found')
+    job = lecture.last_job
+    if not job or job.status != JOB_STATUS_DONE:
+        raise HTTPException(status_code=404, detail='Verification result not ready')
+
+    stem = str(lecture.id)
+    output_dir = resolve_storage_path(lecture.output_dir)
+    if not output_dir:
+        raise HTTPException(status_code=404, detail='Content verification file not found')
+    analyzer_dir = output_dir / f'{stem}_analyzer'
+    candidates = [
+        analyzer_dir / f'{stem}_content_verification.json',
+        output_dir / f'{stem}_content_verification.json',
+        analyzer_dir / f'{stem}_verification_final.json',
+        output_dir / f'{stem}_verification_final.json',
+    ]
+    verifier_path = next((path for path in candidates if path.exists()), None)
+    if not verifier_path:
+        raise HTTPException(status_code=404, detail='Content verification file not found')
+    try:
+        data = json.loads(verifier_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Error reading content verification: {exc}') from exc
+
+    artifacts = data.get('classified_issue_artifacts', {}) or {}
+    artifact_path_value = artifacts.get(artifact_key)
+    if not artifact_path_value:
+        raise HTTPException(status_code=404, detail=f'Artifact not available for stage: {stage}')
+    artifact_path = resolve_storage_path(artifact_path_value)
+    if not artifact_path or not artifact_path.exists():
+        raise HTTPException(status_code=404, detail=f'Artifact file not found for stage: {stage}')
+    try:
+        artifact_data = json.loads(artifact_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'Error reading artifact: {exc}') from exc
+
+    if stage == 'slide_review' and isinstance(artifact_data, dict):
+        artifact_data['slide_errors'] = _attach_slide_image_urls(artifact_data.get('slide_errors', []) or [])
+    return artifact_data
 
 
 async def get_verified_result(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
