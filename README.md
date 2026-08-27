@@ -227,11 +227,11 @@
 
 ### 시연 영상
 
-<p><a href="https://www.youtube.com/watch?v=repqChAJ_vs" target="_blank"><b>▶ 보러가기</b></a></p>
+<p><a href="https://youtu.be/tG65MpIfNlI" target="_blank"><b>▶ 보러가기</b></a></p>
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=repqChAJ_vs" target="_blank">
-    <img src="https://img.youtube.com/vi/repqChAJ_vs/maxresdefault.jpg" alt="Video Lecture Verifier 시연" width="700"/>
+  <a href="https://youtu.be/tG65MpIfNlI" target="_blank">
+    <img src="https://img.youtube.com/vi/tG65MpIfNlI/maxresdefault.jpg" alt="Video Lecture Verifier 시연" width="700"/>
   </a>
 </p>
 
