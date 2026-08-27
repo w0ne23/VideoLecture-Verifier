@@ -1,0 +1,25 @@
+# Minimal first-step LiteLLM configuration.
+# The model_name values intentionally match the model identifiers already used
+# by VeriLec, so enabling the gateway does not require changing stage settings.
+
+model_list:
+  - model_name: gpt-5.4
+    litellm_params:
+      model: openai/gpt-5.4
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      api_base: os.environ/ANTHROPIC_BASE_URL
+
+# Grok, local vLLM and Ollama routes will be added after the OpenAI and Claude
+# paths are verified. Their native VeriLec adapters remain unchanged while this
+# gateway is enabled.
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true

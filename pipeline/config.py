@@ -185,11 +185,44 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
     }
 
 
+def is_litellm_enabled() -> bool:
+    return (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def get_openai_api_config() -> tuple[str, str]:
+    """Return the active OpenAI-compatible key and base URL.
+
+    LiteLLM is deliberately opt-in.  When enabled, the existing OpenAI
+    client callers use the gateway without needing a second SDK or provider-
+    specific branch.  Native Anthropic/Gemini/xAI callers remain unchanged.
+    """
+    if is_litellm_enabled():
+        return (
+            os.getenv("LITELLM_API_KEY") or "",
+            (os.getenv("LITELLM_BASE_URL") or "http://litellm:4000/v1").rstrip("/"),
+        )
+    return (
+        os.getenv("OPENAI_API_KEY") or "",
+        (os.getenv("OPENAI_BASE_URL") or "").rstrip("/"),
+    )
+
+
 def get_openai_client():
-    current_key = os.getenv("OPENAI_API_KEY") or ""
+    current_key, current_base_url = get_openai_api_config()
+    cache_key = f"{current_key}|{current_base_url}"
+
+    def create_client():
+        if not current_key or OpenAI is None:
+            return None
+        kwargs = {"api_key": current_key}
+        if current_base_url:
+            kwargs["base_url"] = current_base_url
+        return OpenAI(**kwargs)
+
     return _cached_client(
-        "openai", current_key,
-        lambda: OpenAI(api_key=current_key) if current_key and OpenAI is not None else None,
+        "openai", cache_key, create_client,
     )
 
 
