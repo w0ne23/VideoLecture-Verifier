@@ -531,9 +531,7 @@ def _check_code_syntax_mechanical(
     transcribe_model = cc._resolve_stage_model("slide_error_transcribe") or model
     title = str(slide.get("title", "") or "")
     prompt = _build_code_transcription_prompt(slide_number, title)
-    response_format = (
-        {"type": "json_object"} if cc._supports_json_object_response_format(transcribe_model) else None
-    )
+    response_format = {"type": "json_object"}
     token_usage = cc._empty_token_usage()
     api_calls = 0
 
@@ -628,9 +626,7 @@ def _transcribe_slide_text(
     transcribe_model = cc._resolve_stage_model("slide_error_transcribe") or model
     title_hint = str(slide.get("title", "") or "")
     prompt = _build_text_transcription_prompt(slide_number, title_hint)
-    response_format = (
-        {"type": "json_object"} if cc._supports_json_object_response_format(transcribe_model) else None
-    )
+    response_format = {"type": "json_object"}
     token_usage = cc._empty_token_usage()
     api_calls = 0
 
@@ -884,9 +880,7 @@ def _verify_error_with_crop(
     prompt = _build_crop_verify_prompt(
         error.get("problematic_text", ""), error.get("corrected_text", ""), error.get("error_type", "")
     )
-    response_format = (
-        {"type": "json_object"} if cc._supports_json_object_response_format(verify_model) else None
-    )
+    response_format = {"type": "json_object"}
     token_usage = cc._empty_token_usage()
     api_calls = 0
 
@@ -940,7 +934,7 @@ def _check_single_slide(
         or _find_slide_image(img_dir, slide_number)
     )
     img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
-    response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
+    response_format = {"type": "json_object"}
     token_usage = transcribe_usage
     api_calls = transcribe_calls
 
@@ -1008,7 +1002,7 @@ def detect_classified_slide_errors(
     slide_classified_path: str | Path | None,
     models: list[str] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    max_workers: int = 1,
+    max_workers: int = 20,
     max_tokens: int = 4096,
     current_date: str | None = None,
     min_score: float | None = None,

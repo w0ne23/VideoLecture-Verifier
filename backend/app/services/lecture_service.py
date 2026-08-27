@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import uuid
 from typing import Any
@@ -300,6 +301,64 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
     }
 
 
+def _is_complete_verification_result(path, stem: str) -> bool:
+    """Return whether a benchmark verification artifact is safe to expose.
+
+    Benchmark runs can leave a syntactically valid final JSON behind even when
+    one of the model-specific verifier calls failed or produced unparseable
+    rows.  Those artifacts must not take precedence over a later complete run.
+    """
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    if not isinstance(data, dict) or data.get('schema_version') != 'content_verification.v2':
+        return False
+
+    model_path = path.parent / f'{stem}_classified_issue_verifier.json'
+    if not model_path.is_file():
+        return True
+    try:
+        verifier = json.loads(model_path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    model_breakdown = (verifier.get('summary', {}) or {}).get('model_breakdown', {}) or {}
+    for model_result in model_breakdown.values():
+        if not isinstance(model_result, dict):
+            return False
+        if model_result.get('status') not in (None, 'ok'):
+            return False
+        if _safe_count(model_result.get('parse_failed_count')):
+            return False
+    return True
+
+
+def _verification_result_candidates(analyzer_dir, output_dir, stem: str) -> list:
+    """Order complete benchmark results before legacy result locations."""
+    benchmark_results = []
+    for benchmark_dir in analyzer_dir.glob('benchmark_*'):
+        path = benchmark_dir / f'{stem}_verification_final.json'
+        if not _is_complete_verification_result(path, stem):
+            continue
+        match = re.search(r'_v(\d+)$', benchmark_dir.name)
+        version = int(match.group(1)) if match else -1
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        benchmark_results.append((version, mtime, path))
+    benchmark_results.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    return [item[2] for item in benchmark_results] + [
+        analyzer_dir / f'{stem}_content_verification.json',
+        output_dir / f'{stem}_content_verification.json',
+        analyzer_dir / f'{stem}_verification_final.json',
+        output_dir / f'{stem}_verification_final.json',
+    ]
+
+
 ARTIFACT_STAGE_KEYS: dict[str, str] = {
     'claim_extraction': 'claims_json',
     'issue_judge': 'issue_judge',
@@ -332,12 +391,7 @@ async def get_lecture_artifact(db: AsyncSession, lecture_id: str, stage: str) ->
     if not output_dir:
         raise HTTPException(status_code=404, detail='Content verification file not found')
     analyzer_dir = output_dir / f'{stem}_analyzer'
-    candidates = [
-        analyzer_dir / f'{stem}_content_verification.json',
-        output_dir / f'{stem}_content_verification.json',
-        analyzer_dir / f'{stem}_verification_final.json',
-        output_dir / f'{stem}_verification_final.json',
-    ]
+    candidates = _verification_result_candidates(analyzer_dir, output_dir, stem)
     verifier_path = next((path for path in candidates if path.exists()), None)
     if not verifier_path:
         raise HTTPException(status_code=404, detail='Content verification file not found')
@@ -381,12 +435,7 @@ async def get_verified_result(db: AsyncSession, lecture_id: str) -> dict[str, An
     if not output_dir:
         raise HTTPException(status_code=404, detail='Content verification file not found')
     analyzer_dir = output_dir / f'{stem}_analyzer'
-    candidates = [
-        analyzer_dir / f'{stem}_content_verification.json',
-        output_dir / f'{stem}_content_verification.json',
-        analyzer_dir / f'{stem}_verification_final.json',
-        output_dir / f'{stem}_verification_final.json',
-    ]
+    candidates = _verification_result_candidates(analyzer_dir, output_dir, stem)
     verifier_path = next((path for path in candidates if path.exists()), None)
     if not verifier_path:
         raise HTTPException(status_code=404, detail='Content verification file not found')

@@ -24,7 +24,11 @@ from config import (
     get_xai_client,
     resolve_anthropic_model,
 )
-from utils import api_call_with_retry, is_retryable_api_error
+from utils import (
+    anthropic_structured_output_request_kwargs,
+    api_call_with_retry,
+    is_retryable_api_error,
+)
 
 
 # ── LLM 추상화 레이어 ────────────────────────────────────────
@@ -91,8 +95,35 @@ def _parse_openai_model_spec(model_spec: str) -> tuple[str, Optional[str]]:
     return spec, None
 
 
+def _is_vllm_model(model: str) -> bool:
+    lowered = str(model or "").strip().lower()
+    return (
+        lowered in {"qwen", "vllm", "qwen3.8"}
+        or lowered.startswith(("vllm:", "vllm/", "qwen:", "qwen/", "qwen-"))
+    )
+
+
+def _resolve_vllm_model(model: str) -> str:
+    raw = str(model or "").strip()
+    lowered = raw.lower()
+    if lowered in {"qwen", "vllm", "qwen3.8"}:
+        return (
+            os.getenv("QWEN_MODEL")
+            or os.getenv("LOCAL_LLM_MODEL")
+            or os.getenv("VLLM_MODEL")
+            or "qwen3.8-27b"
+        ).strip()
+    for prefix in ("vllm:", "vllm/", "qwen:", "qwen/"):
+        if lowered.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return raw
+
+
 def _should_send_openai_temperature(model: str, reasoning_effort: Optional[str]) -> bool:
     if reasoning_effort:
+        return False
+    # gpt-5.6-terra accepts only its default temperature value.
+    if str(model or "").strip().lower() in {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}:
         return False
     return True
 
@@ -187,6 +218,56 @@ def _supports_json_object_response_format(model: str) -> bool:
         or lowered.startswith(("xai:", "xai/"))
         or lowered.startswith("deepseek")
         or lowered.startswith(("ollama:", "ollama/"))
+    )
+
+
+def _json_object_schema(response_format: dict | None) -> dict:
+    """Return a provider-neutral JSON object schema.
+
+    Callers historically passed ``{"type": "json_object"}``, which only
+    requests valid JSON and does not describe the payload fields.  Keep that
+    API compatible while allowing newer callers to pass an OpenAI-style
+    ``json_schema`` object.
+    """
+    fmt = response_format or {}
+    if fmt.get("type") == "json_schema":
+        schema = (fmt.get("json_schema") or {}).get("schema")
+        if isinstance(schema, dict):
+            return schema
+    schema = fmt.get("schema")
+    if isinstance(schema, dict):
+        return schema
+    return {"type": "object", "additionalProperties": True}
+
+
+def _anthropic_structured_output_kwargs(
+    response_format: dict | None,
+    *,
+    create_method=None,
+) -> dict:
+    """Build Anthropic's native Structured Outputs request.
+
+    The common callers use an OpenAI-shaped ``response_format`` object. Claude
+    uses ``output_config.format`` with a JSON Schema instead. This deliberately
+    does not create a synthetic tool: JSON output and tool use are separate
+    Anthropic features, and the verifier only needs a structured response.
+    """
+    if response_format is None:
+        return {}
+
+    schema = _json_object_schema(response_format)
+    try:
+        from anthropic import transform_schema
+
+        schema = transform_schema(schema)
+    except (ImportError, AttributeError, TypeError, ValueError):
+        # The Docker image pins a current SDK. Keep this import-safe for older
+        # environments; the API call will surface any unsupported parameter.
+        schema = dict(schema)
+
+    return anthropic_structured_output_request_kwargs(
+        schema,
+        create_method=create_method,
     )
 
 
@@ -513,6 +594,12 @@ def _extract_anthropic_usage(resp, model: str, stage: str) -> dict:
     output_tokens = _usage_value(usage, "output_tokens")
     cached_tokens = _usage_value(usage, "cache_read_input_tokens")
     cache_creation_tokens = _usage_value(usage, "cache_creation_input_tokens")
+    content_blocks = list(getattr(resp, "content", []) or [])
+    text_length = sum(
+        len(str(getattr(block, "text", "") or ""))
+        for block in content_blocks
+        if getattr(block, "type", "") == "text"
+    )
     return {
         "provider": "anthropic",
         "model": model,
@@ -524,6 +611,17 @@ def _extract_anthropic_usage(resp, model: str, stage: str) -> dict:
         "cached_input_tokens": cached_tokens,
         "cache_creation_input_tokens": cache_creation_tokens,
         "total_tokens": input_tokens + output_tokens + cached_tokens + cache_creation_tokens,
+        "response_metadata": {
+            "response_id": str(getattr(resp, "id", "") or ""),
+            "response_model": str(getattr(resp, "model", "") or model),
+            "stop_reason": str(getattr(resp, "stop_reason", "") or ""),
+            "stop_sequence": str(getattr(resp, "stop_sequence", "") or ""),
+            "content_block_types": [
+                str(getattr(block, "type", "") or "") for block in content_blocks
+            ],
+            "text_length": text_length,
+            "text_empty": text_length == 0,
+        },
     }
 
 def _call_llm(
@@ -543,6 +641,50 @@ def _call_llm(
 
     model_spec = _resolve_stage_model(stage)
     model, reasoning_effort = _parse_openai_model_spec(model_spec)
+
+    # ── Local vLLM / Qwen (OpenAI-compatible) ───────────────
+    if _is_vllm_model(model):
+        import base64
+        from openai import OpenAI
+
+        api_key = os.getenv("LOCAL_LLM_API_KEY") or os.getenv("VLLM_API_KEY") or os.getenv("Qwen_3.6")
+        base_url = os.getenv("LOCAL_LLM_BASE_URL") or os.getenv("VLLM_BASE_URL") or os.getenv("QWEN_BASE_URL")
+        if not base_url:
+            raise RuntimeError("LOCAL_LLM_BASE_URL(또는 VLLM_BASE_URL)가 설정되지 않았습니다.")
+        if not api_key:
+            raise RuntimeError("LOCAL_LLM_API_KEY(또는 VLLM_API_KEY)가 설정되지 않았습니다.")
+
+        resolved_model = _resolve_vllm_model(model)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=_deepseek_request_timeout())
+        image_payloads = []
+        if image_bytes_list:
+            image_payloads.extend([b for b in image_bytes_list if b])
+        elif image_bytes:
+            image_payloads.append(image_bytes)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        if image_payloads:
+            content = []
+            for img in image_payloads:
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img).decode()}"}})
+            content.append({"type": "text", "text": prompt})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        def call_api():
+            return client.chat.completions.create(
+                model=resolved_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temp,
+                response_format=response_format or {"type": "json_object"},
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+
+        resp = api_call_with_retry(call_api)
+        return resp.choices[0].message.content or "", _extract_openai_usage(resp, resolved_model, stage)
 
     # ── OpenAI ──────────────────────────────────────────────
     if model.startswith("gpt") or model.startswith("o1") or model.startswith("o3"):
@@ -782,6 +924,14 @@ def _call_llm(
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": content}],
             )
+            # Use Anthropic's native Structured Outputs JSON Schema contract.
+            # The response is returned in a text content block containing JSON.
+            kwargs.update(
+                _anthropic_structured_output_kwargs(
+                    response_format,
+                    create_method=client.messages.create,
+                )
+            )
             # Sonnet 5 rejects the legacy sampling parameter with HTTP 400.
             # Keep it for older Anthropic models, whose behaviour already relies
             # on the configured verifier temperature.
@@ -796,9 +946,26 @@ def _call_llm(
             return client.messages.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
+        content_blocks = list(getattr(resp, "content", []) or [])
+        tool_blocks = [
+            block for block in content_blocks
+            if getattr(block, "type", "") == "tool_use"
+        ]
+        if tool_blocks:
+            # Backward-compatible parsing for mocked/legacy responses. Native
+            # Structured Outputs should return a text block in normal operation.
+            tool_input = getattr(tool_blocks[0], "input", None)
+            if isinstance(tool_input, dict):
+                usage = _extract_anthropic_usage(resp, resolved_model, stage)
+                # Keep the exact structured payload for post-mortem analysis.
+                # This is output-only; prompts and credentials are never stored.
+                usage.setdefault("response_metadata", {})[
+                    "tool_use_input_json"
+                ] = json.dumps(tool_input, ensure_ascii=False)
+                return json.dumps(tool_input, ensure_ascii=False), usage
         text_blocks = [
             getattr(block, "text", "")
-            for block in getattr(resp, "content", []) or []
+            for block in content_blocks
             if getattr(block, "type", "") == "text"
         ]
         return "".join(text_blocks), _extract_anthropic_usage(resp, resolved_model, stage)
@@ -819,6 +986,11 @@ def _call_llm(
     else:
         cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
     cfg_kwargs["response_mime_type"] = "application/json"
+    if response_format and response_format.get("type") == "json_schema":
+        schema = _json_object_schema(response_format)
+        # google-genai uses response_schema for the Python SDK.  Keep this in
+        # the adapter instead of leaking Gemini-specific fields to callers.
+        cfg_kwargs["response_schema"] = schema
 
     client_sequence = get_gemini_client_sequence()
     if len(client_sequence) == 1:
@@ -859,9 +1031,9 @@ def _call_llm(
 # ── 설정 ──────────────────────────────────────────────────
 
 BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "15"))
-VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
-VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
-VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
+VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gpt-5.6-luna-medium")
+VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "gpt-5.6-luna-medium")
+VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "gpt-5.6-luna-medium")
 VERIFIER_SLIDE_ERROR_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", "")
 VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))

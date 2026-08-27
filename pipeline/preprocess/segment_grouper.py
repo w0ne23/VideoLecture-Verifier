@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from google.genai import types
 
-from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
+from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2, get_openai_client
 from .text_processor import _is_ollama_model, _resolve_ollama_model
 from .utils import api_call_with_retry
 
@@ -30,7 +30,7 @@ CONTEXT_GROUP_MODEL = os.getenv("GRAPHLEC_CONTEXT_GROUP_MODEL", "ollama:qwen3.8:
 
 CONTEXT_PARALLEL_REQUESTS = max(
     1,
-    int(os.getenv("VERILEC_CONTEXT_PARALLEL_REQUESTS", "12")),
+    int(os.getenv("VERILEC_CONTEXT_PARALLEL_REQUESTS", "20")),
 )
 # Ollama로 라우팅되면 서버 동시 처리 한도에 맞춰 상한을 낮춘다 (text_processor._effective_parallel_requests와 동일 패턴).
 CONTEXT_OLLAMA_PARALLEL_REQUESTS = max(
@@ -46,7 +46,7 @@ def _effective_context_parallel_requests() -> int:
 
 
 def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = True) -> str:
-    """CONTEXT_GROUP_MODEL에 따라 Ollama 또는 Gemini로 호출하고 응답 텍스트를 반환한다."""
+    """설정된 모델에 따라 Ollama, OpenAI 호환 API 또는 Gemini로 호출한다."""
     if _is_ollama_model(CONTEXT_GROUP_MODEL):
         from .config import get_ollama_client
 
@@ -71,9 +71,28 @@ def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = 
         response = api_call_with_retry(call_api)
         return (response.choices[0].message.content or "").strip()
 
+    if CONTEXT_GROUP_MODEL.lower().startswith(("gpt-", "openai:")):
+        client = get_openai_client()
+        if client is None:
+            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+        model = CONTEXT_GROUP_MODEL.removeprefix("openai:")
+
+        def call_api():
+            kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_completion_tokens": max_output_tokens,
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            return client.chat.completions.create(**kwargs)
+
+        response = api_call_with_retry(call_api)
+        return (response.choices[0].message.content or "").strip()
+
     def call_api():
         return gemini_client_2.models.generate_content(
-            model=GEMINI_GENERATIVE_MODEL,
+            model=CONTEXT_GROUP_MODEL or GEMINI_GENERATIVE_MODEL,
             contents=[types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(
                 temperature=0.1,
@@ -83,6 +102,19 @@ def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = 
 
     response = api_call_with_retry(call_api)
     return (response.text or "").strip()
+
+CONTEXT_SOFT_MAX_SEGMENTS = max(
+    1,
+    int(os.getenv("VERILEC_CONTEXT_SOFT_MAX_SEGMENTS", "20")),
+)
+CONTEXT_HARD_MAX_SEGMENTS = max(
+    CONTEXT_SOFT_MAX_SEGMENTS,
+    int(os.getenv("VERILEC_CONTEXT_HARD_MAX_SEGMENTS", "20")),
+)
+CONTEXT_HARD_LOOKAHEAD_SEGMENTS = max(
+    0,
+    int(os.getenv("VERILEC_CONTEXT_HARD_LOOKAHEAD_SEGMENTS", "0")),
+)
 
 
 # 문장 종결로 볼 문장부호 (한국어·영어·공백 제거 후 끝)
@@ -243,6 +275,87 @@ def _is_operational_or_transition_segment(text: str) -> bool:
     if not t:
         return False
     return len(t) <= 90 and bool(_OPERATIONAL_CONTEXT_RE.search(t))
+
+
+def _is_natural_context_boundary(groups: list[dict], boundary: int) -> bool:
+    """세그먼트 경계가 문장/호흡상 안전한 분할 지점인지 판단한다."""
+    if boundary < 0 or boundary >= len(groups) - 1:
+        return False
+    left = groups[boundary]
+    right = groups[boundary + 1]
+    left_text = (left.get("text") or "").strip()
+    try:
+        gap = float(right.get("start", 0.0)) - float(left.get("end", 0.0))
+    except (TypeError, ValueError):
+        gap = 0.0
+    return bool(SENTENCE_END_PATTERN.match(left_text)) or gap >= PAUSE_SENTENCE
+
+
+def _apply_context_segment_limit(
+    groups: list[dict],
+    llm_breaks: set[int],
+) -> set[int]:
+    """긴 context를 안전한 경계에서만 제한한다.
+
+    soft limit에 도달하면 자연 경계를 찾고, hard limit에 도달한 뒤에도
+    경계가 없으면 짧은 lookahead 후 세그먼트 경계에서 비상 분할한다.
+    세그먼트 내부 텍스트는 절대 자르지 않는다.
+    """
+    if len(groups) <= CONTEXT_SOFT_MAX_SEGMENTS:
+        return set(llm_breaks)
+
+    semantic_breaks = {
+        i for i in llm_breaks if 0 <= i < len(groups) - 1
+    }
+    natural_breaks = {
+        i for i in range(len(groups) - 1)
+        if _is_natural_context_boundary(groups, i)
+    }
+    safe_breaks = semantic_breaks | natural_breaks
+    enforced = set(semantic_breaks)
+    context_start = 0
+    pending_break: int | None = None
+
+    for boundary in range(len(groups) - 1):
+        if boundary in semantic_breaks:
+            enforced.add(boundary)
+            context_start = boundary + 1
+            pending_break = None
+            continue
+
+        if pending_break is not None:
+            if boundary == pending_break:
+                enforced.add(boundary)
+                context_start = boundary + 1
+                pending_break = None
+            continue
+
+        current_count = boundary - context_start + 1
+        if current_count < CONTEXT_SOFT_MAX_SEGMENTS:
+            continue
+
+        if boundary in natural_breaks:
+            enforced.add(boundary)
+            context_start = boundary + 1
+            continue
+
+        if current_count >= CONTEXT_HARD_MAX_SEGMENTS:
+            lookahead_end = min(
+                len(groups) - 2,
+                boundary + CONTEXT_HARD_LOOKAHEAD_SEGMENTS,
+            )
+            candidate = next(
+                (i for i in range(boundary + 1, lookahead_end + 1) if i in safe_breaks),
+                None,
+            )
+            if candidate is not None:
+                pending_break = candidate
+            else:
+                # 세그먼트 내부가 아니라 세그먼트 사이에서만 비상 분할한다.
+                enforced.add(boundary)
+                context_start = boundary + 1
+
+    return enforced
 
 
 def decide_merge_pair(current_text: str, next_text: str, max_chars: int = 400) -> bool:
@@ -612,7 +725,7 @@ def group_segments_by_scene_and_context(
                 scene_idx = scene_ranges[-1]["scene_index"]
         seg_to_scene.append(scene_idx)
 
-    # Scene별 의미 경계 판단은 서로 독립적인 Gemini 호출이므로 병렬 실행한다.
+    # Scene별 의미 경계 판단은 서로 독립적인 LLM 호출이므로 병렬 실행한다.
     # 결과는 scene_ranges 순서로 다시 조립해 기존 JSON 순서를 유지한다.
     scene_entries = []
     for r in scene_ranges:
@@ -672,7 +785,10 @@ def group_segments_by_scene_and_context(
             })
             continue
 
-        break_after = break_after_by_entry.get(entry_index, set())
+        break_after = _apply_context_segment_limit(
+            initial_groups,
+            break_after_by_entry.get(entry_index, set()),
+        )
 
         # 수업 운영/감사/짧은 전환 멘트는 본 설명 context와 섞이지 않도록 앞뒤를 끊는다.
         for j, g in enumerate(initial_groups):
