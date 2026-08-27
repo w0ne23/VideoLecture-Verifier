@@ -216,6 +216,9 @@
 
 <p align="center"><img src="./docs/img/upload.png" alt="강의 영상 업로드 화면" width="900"/></p>
 
+#### 강의 영상 분석 및 검증 진행
+<p align="center"><img src="./docs/img/pipeline.gif" alt="강의 영상 분석 및 검증 진행 화면" width="900"/></p>
+
 #### 지식 오류 탐지 결과 및 피드백
 
 <p align="center"><img src="./docs/img/feedback.gif" alt="지식 오류 탐지 결과 및 피드백 화면" width="700"/></p>
@@ -224,11 +227,13 @@
 
 ### 시연 영상
 
-> 시연 영상은 준비 중입니다. 촬영 후 아래에 유튜브 링크와 썸네일이 추가될 예정입니다.
->
-> ```
-> [<img src="썸네일_이미지_URL" alt="Video Lecture Verifier 시연"/>](유튜브_링크)
-> ```
+<p><a href="https://www.youtube.com/watch?v=repqChAJ_vs" target="_blank"><b>▶ 보러가기</b></a></p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=repqChAJ_vs" target="_blank">
+    <img src="https://img.youtube.com/vi/repqChAJ_vs/maxresdefault.jpg" alt="Video Lecture Verifier 시연" width="700"/>
+  </a>
+</p>
 
 <br/>
 
