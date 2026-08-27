@@ -418,8 +418,15 @@ def _issue_judge_consensus_decision(
 
 
 def _missing_provider_key(model: str) -> str | None:
-    if _is_openai_model(model) and not os.getenv("OPENAI_API_KEY"):
-        return "OPENAI_API_KEY"
+    if _is_openai_model(model):
+        gateway_enabled = (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if gateway_enabled:
+            if not os.getenv("LITELLM_API_KEY"):
+                return "LITELLM_API_KEY"
+        elif not os.getenv("OPENAI_API_KEY"):
+            return "OPENAI_API_KEY"
     if _is_xai_model(model) and not os.getenv("XAI_API_KEY"):
         return "XAI_API_KEY"
     if _is_deepseek_model(model) and not os.getenv("DEEPSEEK_API_KEY"):

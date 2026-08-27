@@ -15,7 +15,10 @@ from app.db import AsyncSessionLocal
 from app.models import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_TYPE_VERIFY, JOB_TYPE_VERIFY_ONLY
 from pipeline.logging_utils import pipeline_log_context
 from app.services.job_service import update_job_stage_sync
-from app.services.model_settings_service import STAGE_MODEL_ENV_KEYS, fetch_stage_models_sync
+from app.services.model_settings_service import (
+    STAGE_MODEL_ENV_KEYS,
+    fetch_runtime_model_settings_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +79,22 @@ def pipeline_process(
         # 관리자가 설정 화면에서 지정한 모델이 있으면 그 값을, 없으면 지금까지처럼
         # .env 기본값을 쓴다. 이 프로세스 안에서만 os.environ을 갱신하므로 다른
         # 동시 작업이나 부모 프로세스에는 영향을 주지 않는다.
-        stage_models = fetch_stage_models_sync()
+        runtime_model_settings = fetch_runtime_model_settings_sync()
+        stage_models = runtime_model_settings.get('stage_models', {})
         # 이전 잡에서 남은 stage env가 남지 않도록 허용 키를 먼저 비운다.
         for env_key in STAGE_MODEL_ENV_KEYS:
             os.environ.pop(env_key, None)
         for env_key, value in stage_models.items():
             os.environ[env_key] = value
+        # The legacy env map remains available to old pipeline paths.  New
+        # adapters can resolve endpoint/base URL/credentials from this single
+        # provider-neutral document.
+        import json
+        os.environ['VERILEC_LLM_CONFIG_JSON'] = json.dumps(
+            runtime_model_settings.get('llm_config', {}),
+            ensure_ascii=False,
+            separators=(',', ':'),
+        )
         os.environ['VERIFIER_MODEL_MODE'] = 'generic' if stage_models else 'fixed'
 
         from app.services.storage_service import resolve_storage_path

@@ -7,24 +7,16 @@ import {
   stagesToStageModels,
   validateStagesForSave,
 } from './stageModels'
-
-const PROVIDERS_META = {
-  openai: {
-    name: 'OpenAI',
-    prefix: /^sk-(?!ant-)/,
-    versions: ['GPT-5.4', 'GPT-5.4 Mini', 'GPT-5.4 Nano'],
-  },
-  anthropic: {
-    name: 'Anthropic',
-    prefix: /^sk-ant-/,
-    versions: ['Claude Opus 4.8', 'Claude Sonnet 5', 'Claude Haiku 4.5'],
-  },
-  xai: {
-    name: 'xAI',
-    prefix: /^xai-/,
-    versions: ['Grok-4', 'Grok-4 Mini'],
-  },
-}
+import {
+  defaultEndpointConfig,
+  buildLlmConfig,
+  detectProvider,
+  loadRegisteredLlms,
+  maskKey,
+  PROVIDERS_META,
+  providerRequiresKey,
+  saveRegisteredLlms,
+} from './llmRegistry'
 
 const STAGE_ORDER = ['claim', 'detect', 'classify', 'judge', 'ground', 'slide']
 
@@ -94,27 +86,6 @@ const createInitialRetryCounts = () => ({
   slide: 1,
 })
 
-function maskKey(key) {
-  if (key.length <= 8) return key
-  return `${key.slice(0, 8)}******${key.slice(-4)}`
-}
-
-function detectProvider(key) {
-  if (PROVIDERS_META.anthropic.prefix.test(key)) return 'anthropic'
-  if (PROVIDERS_META.xai.prefix.test(key)) return 'xai'
-  if (PROVIDERS_META.openai.prefix.test(key)) return 'openai'
-  return null
-}
-
-function loadProviders() {
-  try {
-    const saved = JSON.parse(localStorage.getItem('verilec_providers') || 'null')
-    return Array.isArray(saved) ? saved : []
-  } catch {
-    return []
-  }
-}
-
 function recomputeWeights(selected) {
   const count = selected.length
   if (!count) return {}
@@ -127,26 +98,25 @@ function recomputeWeights(selected) {
 
 function providerName(providers, providerId) {
   const provider = providers.find(item => item.id === providerId)
-  return provider ? PROVIDERS_META[provider.type].name : ''
+  return provider ? (PROVIDERS_META[provider.type]?.name || provider.type) : ''
 }
 
 function getAutoStages(providers) {
   const nextStages = createInitialStages()
   const firstProvider = providers[0]
-  const firstMeta = PROVIDERS_META[firstProvider.type]
 
   nextStages.claim.selected = firstProvider.id
-  nextStages.claim.version = firstMeta.versions[0]
+  nextStages.claim.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
   nextStages.ground.selected = firstProvider.id
-  nextStages.ground.version = firstMeta.versions[0]
+  nextStages.ground.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
   nextStages.slide.selected = firstProvider.id
-  nextStages.slide.version = firstMeta.versions[0]
+  nextStages.slide.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
 
   ;['detect', 'classify', 'judge'].forEach(stageKey => {
     const selected = providers.map(provider => provider.id)
     nextStages[stageKey].selected = selected
     nextStages[stageKey].versions = providers.reduce((versions, provider) => {
-      versions[provider.id] = PROVIDERS_META[provider.type].versions[0]
+      versions[provider.id] = provider.version || PROVIDERS_META[provider.type]?.versions?.[0] || ''
       return versions
     }, {})
     nextStages[stageKey].weights = recomputeWeights(selected)
@@ -175,7 +145,7 @@ export default function ModelSetupConsole({
 }) {
   const [view, setView] = useState('key')
   const [presetName, setPresetName] = useState(initialName)
-  const [providers, setProviders] = useState(() => loadProviders())
+  const [providers, setProviders] = useState(() => loadRegisteredLlms())
   const [providerSelect, setProviderSelect] = useState('auto')
   const [keyValue, setKeyValue] = useState('')
   const [rememberKey, setRememberKey] = useState(true)
@@ -231,6 +201,7 @@ export default function ModelSetupConsole({
     return {
       name: presetName.trim(),
       stage_models: stageModels,
+      llm_config: buildLlmConfig(providers, stages, STAGE_ORDER),
       editor_state: serializeEditorState(stages, retryCounts, providers, STAGE_ORDER),
     }
   }
@@ -268,18 +239,16 @@ export default function ModelSetupConsole({
 
   useEffect(() => {
     if (rememberKey) {
-      localStorage.setItem(
-        'verilec_providers',
-        JSON.stringify(providers.filter(provider => !provider.isPresetPlaceholder)),
-      )
+      saveRegisteredLlms(providers.filter(provider => !provider.isPresetPlaceholder))
       return
     }
+    localStorage.removeItem('verilec_registered_llms')
     localStorage.removeItem('verilec_providers')
   }, [providers, rememberKey])
 
   const addProvider = () => {
     const key = keyValue.trim()
-    if (!key) {
+    if (!key && providerSelect === 'auto') {
       window.alert('API 키를 입력해주세요.')
       return
     }
@@ -293,6 +262,9 @@ export default function ModelSetupConsole({
         return
       }
       finalType = detected
+    } else if (providerRequiresKey(finalType) && !key) {
+      window.alert('API 키를 입력해주세요.')
+      return
     } else if (detected && detected !== providerSelect) {
       const shouldUseDetected = window.confirm(
         `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n선택하신 ${PROVIDERS_META[providerSelect].name} 대신 ${PROVIDERS_META[detected].name}로 등록할까요?`,
@@ -314,7 +286,16 @@ export default function ModelSetupConsole({
       }
       return [
         ...current,
-        { id: nextProviderId(current), type: finalType, keyMasked: maskKey(key), isPresetPlaceholder: false },
+        {
+          id: nextProviderId(current),
+          type: finalType,
+          version: PROVIDERS_META[finalType]?.versions?.[0] || '',
+          modelId: PROVIDERS_META[finalType]?.versions?.[0] || '',
+          keyMasked: providerRequiresKey(finalType) ? maskKey(key) : '키 불필요',
+          providerName: PROVIDERS_META[finalType]?.name || finalType,
+          ...defaultEndpointConfig(finalType),
+          isPresetPlaceholder: false,
+        },
       ]
     })
     setKeyValue('')
@@ -386,7 +367,7 @@ export default function ModelSetupConsole({
 
     setStages(current => {
       const stage = current[activeStage]
-      const meta = PROVIDERS_META[provider.type]
+      const meta = PROVIDERS_META[provider.type] || PROVIDERS_META.custom
       if (stage.mode === 'single') {
         return {
           ...current,
@@ -566,7 +547,7 @@ export default function ModelSetupConsole({
                   <div className="ms-provider-list">
                     {providers.map(provider => (
                       <div className="ms-provider-row" key={provider.id}>
-                        <span className="ms-provider-name">{PROVIDERS_META[provider.type].name}</span>
+                        <span className="ms-provider-name">{PROVIDERS_META[provider.type]?.name || provider.type}</span>
                         <span className="ms-provider-key">{provider.keyMasked}</span>
                         <span className="ms-provider-check">
                           {provider.isPresetPlaceholder ? '복원' : 'OK'}
@@ -698,7 +679,7 @@ export default function ModelSetupConsole({
                 <p className="ms-desc">{activeStageConfig.desc}</p>
                 <div className="ms-chip-row">
                   {providers.map(provider => {
-                    const meta = PROVIDERS_META[provider.type]
+                    const meta = PROVIDERS_META[provider.type] || PROVIDERS_META.custom
                     const isSelected = activeStageConfig.mode === 'single'
                       ? activeStageConfig.selected === provider.id
                       : activeStageConfig.selected.includes(provider.id)

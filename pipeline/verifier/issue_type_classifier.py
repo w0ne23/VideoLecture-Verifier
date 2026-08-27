@@ -631,8 +631,10 @@ def _call_openai_like(
         raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.") from exc
 
     if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = None
+        from pipeline.config import get_openai_api_config
+
+        api_key, base_url = get_openai_api_config()
+        base_url = base_url or None
     elif provider == "vllm":
         api_key = (
             os.getenv("LOCAL_LLM_API_KEY")

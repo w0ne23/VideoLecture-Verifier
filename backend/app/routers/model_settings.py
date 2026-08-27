@@ -12,24 +12,27 @@ router = APIRouter()
 
 class ModelSettingsIn(BaseModel):
     stage_models: dict[str, str] = {}
+    llm_config: dict = {}
 
 
 class ModelSettingProfileIn(BaseModel):
     name: str
     stage_models: dict[str, str] = {}
+    llm_config: dict = {}
     editor_state: dict = {}
 
 
 @router.get('/admin/model-settings')
 async def get_model_settings(db: AsyncSession = Depends(get_db)):
-    stage_models = await model_settings_service.get_model_settings(db)
-    return {'stage_models': stage_models, 'mode': 'generic' if stage_models else 'fixed'}
+    payload = await model_settings_service.get_runtime_model_settings(db)
+    return {**payload, 'mode': 'generic' if payload['stage_models'] else 'fixed'}
 
 
 @router.put('/admin/model-settings')
 async def update_model_settings(payload: ModelSettingsIn, db: AsyncSession = Depends(get_db)):
-    stage_models = await model_settings_service.update_model_settings(db, payload.stage_models)
-    return {'stage_models': stage_models, 'mode': 'generic' if stage_models else 'fixed'}
+    stage_models = await model_settings_service.update_model_settings(db, payload.stage_models, payload.llm_config)
+    saved = await model_settings_service.get_runtime_model_settings(db)
+    return {**saved, 'mode': 'generic' if stage_models else 'fixed'}
 
 
 @router.get('/admin/model-settings/profiles')
@@ -52,6 +55,7 @@ async def create_profile(payload: ModelSettingProfileIn, db: AsyncSession = Depe
             db,
             name=payload.name,
             stage_models=payload.stage_models,
+            llm_config=payload.llm_config,
             editor_state=payload.editor_state,
         )
     except ValueError as exc:
@@ -66,6 +70,7 @@ async def update_profile(profile_id: str, payload: ModelSettingProfileIn, db: As
             profile_id,
             name=payload.name,
             stage_models=payload.stage_models,
+            llm_config=payload.llm_config,
             editor_state=payload.editor_state,
         )
     except LookupError as exc:

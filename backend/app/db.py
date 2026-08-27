@@ -18,10 +18,21 @@ async def _ensure_lecture_source_tag(conn):
     ))
 
 
+async def _ensure_llm_config_columns(conn):
+    """Add endpoint config columns for databases created before the config API."""
+    await conn.execute(text(
+        "ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS llm_config JSONB NOT NULL DEFAULT '{}'::jsonb"
+    ))
+    await conn.execute(text(
+        "ALTER TABLE model_setting_profiles ADD COLUMN IF NOT EXISTS llm_config JSONB NOT NULL DEFAULT '{}'::jsonb"
+    ))
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_lecture_source_tag(conn)
+        await _ensure_llm_config_columns(conn)
     logger.info('--- [DB] Database initialized. ---')
 
 

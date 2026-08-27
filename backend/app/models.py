@@ -95,6 +95,9 @@ class ModelSettings(Base):
 
     id = Column(Integer, primary_key=True, default=1)
     stage_models = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    # Provider-neutral endpoint and stage binding configuration.  Kept
+    # separate from the legacy stage_models env map during migration.
+    llm_config = Column(JSONB, nullable=False, default=dict, server_default='{}')
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -106,6 +109,7 @@ class ModelSettingProfile(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False, unique=True, index=True)
     stage_models = Column(JSONB, nullable=False, default=dict, server_default='{}')
+    llm_config = Column(JSONB, nullable=False, default=dict, server_default='{}')
     editor_state = Column(JSONB, nullable=False, default=dict, server_default='{}')
     is_active = Column(Boolean, nullable=False, default=False, server_default='false')
     last_used_at = Column(DateTime(timezone=True), nullable=True)

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.config import DATABASE_URL
+from app.llm_config import normalize_llm_config
 from app.models import ModelSettingProfile, ModelSettings
 
 SETTINGS_ID = 1
@@ -46,6 +47,7 @@ def _serialize_profile(row: ModelSettingProfile) -> dict:
         'id': str(row.id),
         'name': row.name,
         'stage_models': _sanitize_stage_models(row.stage_models),
+        'llm_config': normalize_llm_config(row.llm_config),
         'editor_state': _sanitize_editor_state(row.editor_state),
         'is_active': bool(row.is_active),
         'last_used_at': row.last_used_at.isoformat() if row.last_used_at else None,
@@ -71,6 +73,25 @@ async def _get_legacy_settings(db: AsyncSession) -> dict[str, str]:
     return _sanitize_stage_models(row.stage_models)
 
 
+async def _get_legacy_llm_config(db: AsyncSession) -> dict:
+    row = await db.get(ModelSettings, SETTINGS_ID)
+    return normalize_llm_config(row.llm_config if row else {})
+
+
+async def get_runtime_model_settings(db: AsyncSession) -> dict:
+    """Return both the legacy env map and the provider-neutral config."""
+    active = await _get_active_profile_row(db)
+    if active:
+        return {
+            'stage_models': _sanitize_stage_models(active.stage_models),
+            'llm_config': normalize_llm_config(active.llm_config),
+        }
+    return {
+        'stage_models': await _get_legacy_settings(db),
+        'llm_config': await _get_legacy_llm_config(db),
+    }
+
+
 async def _ensure_unique_name(db: AsyncSession, name: str, *, exclude_id: UUID | None = None):
     stmt = select(ModelSettingProfile).where(func.lower(ModelSettingProfile.name) == name.lower())
     if exclude_id is not None:
@@ -87,17 +108,20 @@ async def get_model_settings(db: AsyncSession) -> dict[str, str]:
     return await _get_legacy_settings(db)
 
 
-async def update_model_settings(db: AsyncSession, stage_models: dict) -> dict[str, str]:
+async def update_model_settings(db: AsyncSession, stage_models: dict, llm_config: dict | None = None) -> dict[str, str]:
     cleaned = _sanitize_stage_models(stage_models)
+    cleaned_config = normalize_llm_config(llm_config)
     active = await _get_active_profile_row(db)
     if active:
         active.stage_models = cleaned
+        active.llm_config = cleaned_config
     else:
         row = await db.get(ModelSettings, SETTINGS_ID)
         if row:
             row.stage_models = cleaned
+            row.llm_config = cleaned_config
         else:
-            db.add(ModelSettings(id=SETTINGS_ID, stage_models=cleaned))
+            db.add(ModelSettings(id=SETTINGS_ID, stage_models=cleaned, llm_config=cleaned_config))
     await db.commit()
     return cleaned
 
@@ -125,7 +149,14 @@ async def get_profile(db: AsyncSession, profile_id: UUID | str) -> dict | None:
     return _serialize_profile(row) if row else None
 
 
-async def create_profile(db: AsyncSession, *, name: str, stage_models: dict, editor_state: dict | None = None) -> dict:
+async def create_profile(
+    db: AsyncSession,
+    *,
+    name: str,
+    stage_models: dict,
+    llm_config: dict | None = None,
+    editor_state: dict | None = None,
+) -> dict:
     clean_name = (name or '').strip()
     if not clean_name:
         raise ValueError('프리셋 이름을 입력해주세요.')
@@ -134,6 +165,7 @@ async def create_profile(db: AsyncSession, *, name: str, stage_models: dict, edi
     row = ModelSettingProfile(
         name=clean_name,
         stage_models=_sanitize_stage_models(stage_models),
+        llm_config=normalize_llm_config(llm_config),
         editor_state=_sanitize_editor_state(editor_state),
     )
     db.add(row)
@@ -148,6 +180,7 @@ async def update_profile(
     *,
     name: str,
     stage_models: dict,
+    llm_config: dict | None = None,
     editor_state: dict | None = None,
 ) -> dict:
     row = await db.get(ModelSettingProfile, profile_id)
@@ -161,6 +194,7 @@ async def update_profile(
 
     row.name = clean_name
     row.stage_models = _sanitize_stage_models(stage_models)
+    row.llm_config = normalize_llm_config(llm_config)
     row.editor_state = _sanitize_editor_state(editor_state)
     await db.commit()
     await db.refresh(row)
@@ -216,6 +250,20 @@ def fetch_stage_models_sync() -> dict[str, str]:
             session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
             async with session_factory() as db:
                 return await get_model_settings(db)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
+
+
+def fetch_runtime_model_settings_sync() -> dict:
+    """Synchronous worker entry point for the full endpoint configuration."""
+    async def _run() -> dict:
+        engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
+        try:
+            session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with session_factory() as db:
+                return await get_runtime_model_settings(db)
         finally:
             await engine.dispose()
 
