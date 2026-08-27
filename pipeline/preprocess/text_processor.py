@@ -25,9 +25,10 @@ from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 load_dotenv()
 
 GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
-PASS1_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL", "gemini-3-flash-preview").strip()
-PASS2_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL", "gpt-5.4-mini").strip()
-PASS3_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL", "gpt-5.4").strip()
+# 상용 API로 되돌리려면: PASS1=gemini-3-flash-preview, PASS2=gpt-5.4-mini, PASS3=gpt-5.4
+PASS1_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+PASS2_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+PASS3_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
 TEXT_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_REASONING_EFFORT", "minimal").strip().lower()
 PASS2_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_REASONING_EFFORT", "minimal").strip().lower()
 PASS3_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_REASONING_EFFORT", "low").strip().lower()
