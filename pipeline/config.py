@@ -29,6 +29,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from groq import Groq
 from google import genai
+from google.genai import types as genai_types
 
 try:
     from openai import OpenAI
@@ -91,6 +92,11 @@ def _gemini_env_keys() -> tuple[str, str]:
     return key_1, key_2
 
 
+# 응답이 오지 않고 무한정 걸리는 요청을 잡아내기 위한 요청 타임아웃(ms).
+# 미설정 시 SDK/httpx 기본값에 맡겨져 한 요청이 스레드를 영구히 붙잡을 수 있다.
+GEMINI_REQUEST_TIMEOUT_MS = int(os.getenv("GRAPHLEC_GEMINI_TIMEOUT_MS", "120000"))
+
+
 def get_gemini_client():
     """비디오 파이프라인용 Gemini 클라이언트. 키가 없으면 명확한 에러."""
     key_1, _ = _gemini_env_keys()
@@ -99,7 +105,13 @@ def get_gemini_client():
             "Gemini API 키가 없습니다. GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY) 환경변수를 "
             "설정하세요 — 슬라이드 텍스트화/필기 분석 단계에 필요합니다."
         )
-    return _cached_client("gemini_1", key_1, lambda: genai.Client(api_key=key_1))
+    return _cached_client(
+        "gemini_1", key_1,
+        lambda: genai.Client(
+            api_key=key_1,
+            http_options=genai_types.HttpOptions(timeout=GEMINI_REQUEST_TIMEOUT_MS),
+        ),
+    )
 
 
 def get_gemini_client_2():
@@ -110,7 +122,13 @@ def get_gemini_client_2():
             "Gemini API 키가 없습니다. GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY, 보조로 "
             "GOOGLE_API_KEY_2) 환경변수를 설정하세요 — 텍스트 교정/세그먼트 그룹핑 단계에 필요합니다."
         )
-    return _cached_client("gemini_2", key_2, lambda: genai.Client(api_key=key_2))
+    return _cached_client(
+        "gemini_2", key_2,
+        lambda: genai.Client(
+            api_key=key_2,
+            http_options=genai_types.HttpOptions(timeout=GEMINI_REQUEST_TIMEOUT_MS),
+        ),
+    )
 
 
 def get_groq_client():
