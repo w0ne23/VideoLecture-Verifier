@@ -367,7 +367,7 @@ def _wait_for_person_mask_gpu_gate(cfg: SampleCacheConfig, batch_size: int) -> N
     if min_free_mb <= 0 and stagger_sec <= 0.0:
         return
 
-    lock_path = Path(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_GATE_LOCK", "/tmp/verilec_person_mask_gpu_gate.lock"))
+    lock_path = Path(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_GATE_LOCK", "/tmp/vlverifier_person_mask_gpu_gate.lock"))
     stamp_path = lock_path.with_suffix(".stamp")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -426,7 +426,7 @@ def _run_person_model_serialized(model, frames: list[np.ndarray], conf: float):
     lock_path = Path(
         os.getenv(
             "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_EXEC_LOCK",
-            "/tmp/verilec_person_mask_gpu_execute.lock",
+            "/tmp/vlverifier_person_mask_gpu_execute.lock",
         )
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -460,7 +460,7 @@ def _acquire_person_mask_trt_context_slot() -> tuple[object, int]:
     root = Path(
         os.getenv(
             "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXT_DIR",
-            "/tmp/verilec_person_mask_trt_context_slots",
+            "/tmp/vlverifier_person_mask_trt_context_slots",
         )
     )
     root.mkdir(parents=True, exist_ok=True)
@@ -2601,7 +2601,7 @@ def create_sample_cache_chunked(
     else:
         for spec in specs:
             spec["person_mask_active_ranges"] = []
-    with tempfile.TemporaryDirectory(prefix="verilec_sample_cache_chunks_", dir=str(temp_root)) as tmp_root:
+    with tempfile.TemporaryDirectory(prefix="vlverifier_sample_cache_chunks_", dir=str(temp_root)) as tmp_root:
         tmp_root_path = Path(tmp_root)
         manifest_by_index: dict[int, Path] = {}
         person_mask_futures = []

@@ -512,7 +512,7 @@ def _detect_annotation_chunk_worker(args: tuple) -> list[dict]:
 
 
 def _annotation_worker_count(interval_count: int) -> int:
-    requested = os.getenv("VERILEC_ANNOT_WORKERS", "0").strip()
+    requested = os.getenv("VLVERIFIER_ANNOT_WORKERS", "0").strip()
     try:
         workers = int(requested)
     except ValueError:
@@ -672,7 +672,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-gap-sec", type=float, default=AnnotationConfig.min_gap_sec)
     parser.add_argument("--scene-start-guard-sec", type=float, default=AnnotationConfig.scene_start_guard_sec)
     parser.add_argument("--scene-end-guard-sec", type=float, default=AnnotationConfig.scene_end_guard_sec)
-    parser.add_argument("--workers", type=int, help="Override VERILEC_ANNOT_WORKERS for this run")
+    parser.add_argument("--workers", type=int, help="Override VLVERIFIER_ANNOT_WORKERS for this run")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -692,7 +692,7 @@ def main() -> None:
         scene_end_guard_sec=max(0.0, args.scene_end_guard_sec),
     )
     if args.workers is not None:
-        os.environ["VERILEC_ANNOT_WORKERS"] = str(max(1, args.workers))
+        os.environ["VLVERIFIER_ANNOT_WORKERS"] = str(max(1, args.workers))
     detect_annotations(args.cache, args.scenes, args.output, cfg)
 
 

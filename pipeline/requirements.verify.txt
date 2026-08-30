@@ -1,4 +1,4 @@
-# VeriLec verify 파이프라인 의존성 (preprocess + verifier 경로)
+# VLVerifier verify 파이프라인 의존성 (preprocess + verifier 경로)
 # Docker/배포는 backend/requirements.txt와 이 파일을 설치하면 됨 (backend/Dockerfile 참고).
 #
 # 시스템 의존성 (pip 아닌 apt로 설치):

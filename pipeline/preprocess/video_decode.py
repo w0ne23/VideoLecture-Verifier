@@ -198,7 +198,7 @@ def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
                 "-loglevel",
                 "error",
                 "-init_hw_device",
-                "cuda=verilec_cuda",
+                "cuda=vlverifier_cuda",
                 "-f",
                 "lavfi",
                 "-i",

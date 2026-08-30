@@ -79,8 +79,8 @@ export const PROVIDERS_META = {
   },
 }
 
-const REGISTRY_KEY = 'verilec_registered_llms'
-const LEGACY_PROVIDERS_KEY = 'verilec_providers'
+const REGISTRY_KEY = 'vlverifier_registered_llms'
+const LEGACY_PROVIDERS_KEY = 'vlverifier_providers'
 
 export function maskKey(key) {
   if (!key || key.length <= 8) return key || ''

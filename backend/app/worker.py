@@ -97,7 +97,7 @@ def pipeline_process(
         # adapters can resolve endpoint/base URL/credentials from this single
         # provider-neutral document.
         import json
-        os.environ['VERILEC_LLM_CONFIG_JSON'] = json.dumps(
+        os.environ['VLVERIFIER_LLM_CONFIG_JSON'] = json.dumps(
             runtime_model_settings.get('llm_config', {}),
             ensure_ascii=False,
             separators=(',', ':'),

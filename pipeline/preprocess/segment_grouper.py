@@ -30,7 +30,7 @@ CONTEXT_GROUP_MODEL = os.getenv("GRAPHLEC_CONTEXT_GROUP_MODEL", "ollama:qwen3.8:
 
 CONTEXT_PARALLEL_REQUESTS = max(
     1,
-    int(os.getenv("VERILEC_CONTEXT_PARALLEL_REQUESTS", "20")),
+    int(os.getenv("VLVERIFIER_CONTEXT_PARALLEL_REQUESTS", "20")),
 )
 # Ollama로 라우팅되면 서버 동시 처리 한도에 맞춰 상한을 낮춘다 (text_processor._effective_parallel_requests와 동일 패턴).
 CONTEXT_OLLAMA_PARALLEL_REQUESTS = max(
@@ -105,15 +105,15 @@ def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = 
 
 CONTEXT_SOFT_MAX_SEGMENTS = max(
     1,
-    int(os.getenv("VERILEC_CONTEXT_SOFT_MAX_SEGMENTS", "20")),
+    int(os.getenv("VLVERIFIER_CONTEXT_SOFT_MAX_SEGMENTS", "20")),
 )
 CONTEXT_HARD_MAX_SEGMENTS = max(
     CONTEXT_SOFT_MAX_SEGMENTS,
-    int(os.getenv("VERILEC_CONTEXT_HARD_MAX_SEGMENTS", "20")),
+    int(os.getenv("VLVERIFIER_CONTEXT_HARD_MAX_SEGMENTS", "20")),
 )
 CONTEXT_HARD_LOOKAHEAD_SEGMENTS = max(
     0,
-    int(os.getenv("VERILEC_CONTEXT_HARD_LOOKAHEAD_SEGMENTS", "0")),
+    int(os.getenv("VLVERIFIER_CONTEXT_HARD_LOOKAHEAD_SEGMENTS", "0")),
 )
 
 

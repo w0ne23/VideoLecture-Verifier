@@ -22,8 +22,8 @@ services:
 
   backend:
     # 2 GiB works with Docker Desktop and small machines.  Large Linux hosts
-    # can raise this through VERILEC_SHM_SIZE or the GPU override.
-    shm_size: "${VERILEC_SHM_SIZE:-2g}"
+    # can raise this through VLVERIFIER_SHM_SIZE or the GPU override.
+    shm_size: "${VLVERIFIER_SHM_SIZE:-2g}"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -55,7 +55,7 @@ services:
       GRAPHLEC_VLM_APPLY: "1"
       GRAPHLEC_VLM_PROVIDER: "ollama"
       GRAPHLEC_OLLAMA_BASE_URL: "http://ollama:11434"
-      GRAPHLEC_OLLAMA_MODEL: "${VERILEC_VLM_MODEL:-gemma4:12b}"
+      GRAPHLEC_OLLAMA_MODEL: "${VLVERIFIER_VLM_MODEL:-gemma4:12b}"
       GRAPHLEC_VLM_WORKERS: "15"
       GRAPHLEC_VLM_BATCH_IMAGES: "2"
       GRAPHLEC_VLM_BATCH_CANDIDATES: "1"
@@ -65,8 +65,8 @@ services:
       GRAPHLEC_VLM_IMAGE_WIDTH: "768"
       # P2A base slide t1/t1_structure — 속도보다 정확도 우선이라 로컬 모델 중
       # qwen3-vl:30b 사용. gpt-5.4-mini로 되돌리려면 provider만 openai로 바꾸면 됨.
-      GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER: "${VERILEC_TEXTUALIZER_PROVIDER:-ollama}"
-      GRAPHLEC_SLIDE_TEXTUALIZER_MODEL: "${VERILEC_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
+      GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER: "${VLVERIFIER_TEXTUALIZER_PROVIDER:-ollama}"
+      GRAPHLEC_SLIDE_TEXTUALIZER_MODEL: "${VLVERIFIER_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
       GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "12"
 
       # Verifier concurrency. Each multi-model stage applies this limit per
@@ -89,7 +89,7 @@ services:
       # enabled.
       LITELLM_ENABLED: "${LITELLM_ENABLED:-0}"
       LITELLM_BASE_URL: "${LITELLM_BASE_URL:-http://litellm:4000/v1}"
-      LITELLM_API_KEY: "${LITELLM_API_KEY:-sk-verilec-local-dev}"
+      LITELLM_API_KEY: "${LITELLM_API_KEY:-sk-vlverifier-local-dev}"
 
       # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
       # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
@@ -200,12 +200,12 @@ services:
     profiles:
       - vlm
     image: ollama/ollama:latest
-    container_name: verilec-ollama
+    container_name: vlverifier-ollama
     environment:
       # 모델 기본 컨텍스트(Qwen3 계열은 262144)로 그대로 로드하면 KV 캐시만으로
       # GPU를 다 채워 연산이 CPU로 밀려난다 — 실제로 겪은 문제라 명시적으로 낮춘다.
-      OLLAMA_CONTEXT_LENGTH: "${VERILEC_OLLAMA_CONTEXT_LENGTH:-16384}"
-      OLLAMA_NUM_PARALLEL: "${VERILEC_OLLAMA_NUM_PARALLEL:-4}"
+      OLLAMA_CONTEXT_LENGTH: "${VLVERIFIER_OLLAMA_CONTEXT_LENGTH:-16384}"
+      OLLAMA_NUM_PARALLEL: "${VLVERIFIER_OLLAMA_NUM_PARALLEL:-4}"
     volumes:
       - ollama:/root/.ollama
     ports:
@@ -225,7 +225,7 @@ services:
       - "--port"
       - "4000"
     environment:
-      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-verilec-local-dev}"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"

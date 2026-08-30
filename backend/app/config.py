@@ -17,4 +17,4 @@ CORS_ORIGINS = [
     for item in os.getenv('CORS_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000').split(',')
     if item.strip()
 ]
-BACKEND_WORKERS = max(1, int(os.getenv('VERILEC_BACKEND_WORKERS', '1') or '1'))
+BACKEND_WORKERS = max(1, int(os.getenv('VLVERIFIER_BACKEND_WORKERS', '1') or '1'))

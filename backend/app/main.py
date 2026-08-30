@@ -12,7 +12,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 
-app = FastAPI(title='VeriLec API', lifespan=lifespan)
+app = FastAPI(title='VLVerifier API', lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

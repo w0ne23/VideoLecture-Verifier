@@ -242,8 +242,8 @@ export default function ModelSetupConsole({
       saveRegisteredLlms(providers.filter(provider => !provider.isPresetPlaceholder))
       return
     }
-    localStorage.removeItem('verilec_registered_llms')
-    localStorage.removeItem('verilec_providers')
+    localStorage.removeItem('vlverifier_registered_llms')
+    localStorage.removeItem('vlverifier_providers')
   }, [providers, rememberKey])
 
   const addProvider = () => {
