@@ -176,6 +176,17 @@ services:
       db:
         condition: service_healthy
 
+  # 정적 빌드된 SPA를 nginx로 서빙하고 /api·/files 를 backend로 프록시한다.
+  # 개발 중 코드 즉시 반영이 필요하면 docker-compose.dev.yml 을 함께 사용한다.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
   ocr:
     profiles:
       - ocr
