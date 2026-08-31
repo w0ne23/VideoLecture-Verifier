@@ -241,6 +241,18 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
             error = f'시스템/프로세스 오류: {exc}'
             success = False
 
+        # 통계 페이지용 요약 적재. verify(실사용) 완료 건만, 실패는 삼킨다.
+        # job 을 done 으로 표시하기 "전에" 넣어서, 프론트가 done 을 보고 통계를
+        # 리페치하는 순간 이미 행이 존재하도록 한다.
+        if success and job_type_val == JOB_TYPE_VERIFY:
+            try:
+                from app.services import stats_service
+                async with AsyncSessionLocal() as db:
+                    if await stats_service.record_verification_stats(db, lecture_id_val, job_id_val):
+                        await db.commit()
+            except Exception:
+                logger.exception('[%s] verification_stats 적재 실패 (무시)', job_id_val)
+
         async with AsyncSessionLocal() as db:
             if success:
                 await db.execute(text("""
@@ -255,13 +267,3 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
                     WHERE id = :id
                 """), {'id': job_id_val, 'status': JOB_STATUS_ERROR, 'err': error, 'stage': '분석 중 오류가 발생했습니다.'})
             await db.commit()
-
-        # 통계 페이지용 요약 적재. verify(실사용) 완료 건만, 실패는 삼킨다.
-        if success and job_type_val == JOB_TYPE_VERIFY:
-            try:
-                from app.services import stats_service
-                async with AsyncSessionLocal() as db:
-                    if await stats_service.record_verification_stats(db, lecture_id_val, job_id_val):
-                        await db.commit()
-            except Exception:
-                logger.exception('[%s] verification_stats 적재 실패 (무시)', job_id_val)
