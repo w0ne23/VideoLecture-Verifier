@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ISSUE_TYPES } from '../../data/mockStats'
+import { ISSUE_TYPES } from '../../config/statsConfig'
 
 function polar(cx, cy, r, angle) {
   const rad = ((angle - 90) * Math.PI) / 180
@@ -37,8 +37,9 @@ function slicesFor(typeDist, total) {
   }).filter(Boolean)
 }
 
-// 현재 도메인 하나를 중앙에 크게, 이전·다음 도메인은 옆에 반투명하게 보여주는 캐러셀.
-// 화살표(이등변 삼각형) 버튼으로 도메인을 넘겨볼 수 있다.
+// 현재 도메인 하나를 중앙에 크게, 이전·다음 도메인은 옆에 반투명하게 보여준다.
+// 화살표 버튼으로 넘겨보며, 양 끝에서 멈춘다(순환하지 않음) — 도메인이 2개일 때
+// 순환하면 양옆에 같은 도메인이 보여 "같은 게 두 개"처럼 오해되기 때문.
 function DomainPie({ row, radius, showLabels }) {
   const size = radius * 2 + 8
   const cx = size / 2
@@ -82,20 +83,20 @@ function DomainPie({ row, radius, showLabels }) {
 export default function DomainBubblePies({ rows, animKey, onIndexChange }) {
   const [index, setIndex] = useState(0)
   const count = rows.length
-  const safeIndex = ((index % count) + count) % count
+  const safeIndex = Math.min(Math.max(index, 0), count - 1)
 
-  const goPrev = () => setIndex(current => current - 1)
-  const goNext = () => setIndex(current => current + 1)
+  const goPrev = () => setIndex(current => Math.max(0, current - 1))
+  const goNext = () => setIndex(current => Math.min(count - 1, current + 1))
 
-  // 캐러셀이 넘어갈 때마다 지금 중앙에 있는 도메인을 부모(설명 패널)에도 알려서,
+  // 넘길 때마다 지금 중앙에 있는 도메인을 부모(설명 패널)에도 알려서,
   // 그래프와 아래 설명이 항상 같은 도메인을 가리키게 한다.
   useEffect(() => {
     onIndexChange?.(safeIndex)
   }, [safeIndex, onIndexChange])
 
   const currentRow = rows[safeIndex]
-  const prevRow = count > 1 ? rows[(safeIndex - 1 + count) % count] : null
-  const nextRow = count > 1 ? rows[(safeIndex + 1) % count] : null
+  const prevRow = safeIndex > 0 ? rows[safeIndex - 1] : null
+  const nextRow = safeIndex < count - 1 ? rows[safeIndex + 1] : null
 
   return (
     <div key={animKey} className="stats-bubbles-carousel" role="img" aria-label="도메인별 이슈 원 그래프">
@@ -103,7 +104,7 @@ export default function DomainBubblePies({ rows, animKey, onIndexChange }) {
         type="button"
         className="stats-bubbles-nav stats-bubbles-nav--prev"
         onClick={goPrev}
-        disabled={count <= 1}
+        disabled={safeIndex <= 0}
         aria-label="이전 도메인"
       >
         <span className="stats-bubbles-nav-arrow" />
@@ -129,7 +130,7 @@ export default function DomainBubblePies({ rows, animKey, onIndexChange }) {
         type="button"
         className="stats-bubbles-nav stats-bubbles-nav--next"
         onClick={goNext}
-        disabled={count <= 1}
+        disabled={safeIndex >= count - 1}
         aria-label="다음 도메인"
       >
         <span className="stats-bubbles-nav-arrow" />

@@ -1,4 +1,4 @@
-import { PROCESS_STAGES } from '../../data/mockStats'
+import { PROCESS_STAGES } from '../../config/statsConfig'
 
 export default function ProcessStageLegend() {
   return (

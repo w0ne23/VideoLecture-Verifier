@@ -1,44 +1,44 @@
 import { useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import DomainBubblePies from '../components/stats/DomainBubblePies'
 import GroupedBarChart from '../components/stats/GroupedBarChart'
 import IssueTypeLegend from '../components/stats/IssueTypeLegend'
 import ProcessStageLegend from '../components/stats/ProcessStageLegend'
 import StackedBarChart from '../components/stats/StackedBarChart'
 import StatsInsight from '../components/stats/StatsInsight'
-import {
-  MOCK_BY_DOMAIN,
-  MOCK_BY_DURATION,
-  MOCK_BY_TAG,
-  buildDomainInsight,
-  buildInsight,
-} from '../data/mockStats'
+import { getStats } from '../api/stats'
+import { DOMAIN_LABELS, SOURCE_TAG_LABELS, buildDomainInsight, buildInsight } from '../config/statsConfig'
 
 const VIEWS = [
-  {
-    id: 'domain',
-    label: '도메인별',
-  },
-  {
-    id: 'tag',
-    label: '출처별',
-  },
-  {
-    id: 'duration',
-    label: '강의 길이별',
-  },
+  { id: 'domain', label: '도메인별' },
+  { id: 'tag', label: '출처별' },
+  { id: 'duration', label: '강의 길이별' },
 ]
 
-function rowsFor(view) {
-  if (view === 'duration') return MOCK_BY_DURATION
-  if (view === 'domain') return MOCK_BY_DOMAIN
-  return MOCK_BY_TAG
+const EMPTY_STATS = { lecture_count: 0, by_tag: [], by_domain: [], by_duration: [] }
+
+/** API 행에 표시용 label 을 붙인다. by_duration 은 이미 label 을 갖고 있다. */
+function decorate(view, rows) {
+  if (view === 'duration') return rows
+  const labels = view === 'tag' ? SOURCE_TAG_LABELS : DOMAIN_LABELS
+  return rows.map(row => ({ ...row, label: labels[row.key] || row.key }))
 }
 
 export default function StatsPage() {
   const [view, setView] = useState('domain')
   const [animKey, setAnimKey] = useState(0)
   const [domainIndex, setDomainIndex] = useState(0)
-  const rows = useMemo(() => rowsFor(view), [view])
+
+  const { data = EMPTY_STATS, isLoading, error } = useQuery({
+    queryKey: ['stats'],
+    queryFn: getStats,
+  })
+
+  const rows = useMemo(() => {
+    const raw = view === 'duration' ? data.by_duration : view === 'tag' ? data.by_tag : data.by_domain
+    return decorate(view, raw || [])
+  }, [view, data])
+
   const insight = useMemo(
     () => (view === 'domain' ? buildDomainInsight(rows[domainIndex]) : buildInsight(view, rows)),
     [view, rows, domainIndex],
@@ -49,6 +49,8 @@ export default function StatsPage() {
     setAnimKey(key => key + 1)
     setDomainIndex(0)
   }
+
+  const isEmpty = !isLoading && !error && data.lecture_count === 0
 
   return (
     <div className="stats-page">
@@ -73,19 +75,31 @@ export default function StatsPage() {
         </div>
       </div>
 
-      <p className="stats-note">{VIEWS.find(item => item.id === view)?.blurb}</p>
+      {isLoading && <p className="stats-note">불러오는 중…</p>}
+      {error && <p className="stats-note">통계를 불러오지 못했습니다: {error.message}</p>}
+      {isEmpty && (
+        <p className="stats-note">
+          검증이 완료된 강의가 아직 없습니다. 강의를 업로드해 검증하면 여기에 집계됩니다.
+        </p>
+      )}
 
-      <div className="stats-layout">
-        <section className="stats-chart-panel">
-          {view === 'duration' ? <ProcessStageLegend /> : <IssueTypeLegend />}
-          {view === 'tag' && <GroupedBarChart rows={rows} animKey={animKey} />}
-          {view === 'duration' && <StackedBarChart rows={rows} animKey={animKey} />}
-          {view === 'domain' && (
-            <DomainBubblePies rows={rows} animKey={animKey} onIndexChange={setDomainIndex} />
-          )}
-        </section>
-        <StatsInsight title={insight.title} bullets={insight.bullets} />
-      </div>
+      {!isLoading && !error && !isEmpty && rows.length === 0 && (
+        <p className="stats-note">이 보기에 표시할 데이터가 없습니다.</p>
+      )}
+
+      {!isLoading && !error && !isEmpty && rows.length > 0 && (
+        <div className="stats-layout">
+          <section className="stats-chart-panel">
+            {view === 'duration' ? <ProcessStageLegend /> : <IssueTypeLegend />}
+            {view === 'tag' && <GroupedBarChart rows={rows} animKey={animKey} />}
+            {view === 'duration' && <StackedBarChart rows={rows} animKey={animKey} />}
+            {view === 'domain' && (
+              <DomainBubblePies rows={rows} animKey={animKey} onIndexChange={setDomainIndex} />
+            )}
+          </section>
+          <StatsInsight title={insight.title} bullets={insight.bullets} />
+        </div>
+      )}
     </div>
   )
 }

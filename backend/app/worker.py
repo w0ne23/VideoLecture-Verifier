@@ -255,3 +255,13 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
                     WHERE id = :id
                 """), {'id': job_id_val, 'status': JOB_STATUS_ERROR, 'err': error, 'stage': '분석 중 오류가 발생했습니다.'})
             await db.commit()
+
+        # 통계 페이지용 요약 적재. verify(실사용) 완료 건만, 실패는 삼킨다.
+        if success and job_type_val == JOB_TYPE_VERIFY:
+            try:
+                from app.services import stats_service
+                async with AsyncSessionLocal() as db:
+                    if await stats_service.record_verification_stats(db, lecture_id_val, job_id_val):
+                        await db.commit()
+            except Exception:
+                logger.exception('[%s] verification_stats 적재 실패 (무시)', job_id_val)
