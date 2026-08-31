@@ -226,6 +226,24 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 
 .error-text { color: var(--red); font-size: 0.88rem; margin: 10px 0 0; }
 .list-note { color: var(--muted); }
+
+.not-found {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 64px 16px;
+  text-align: center;
+}
+.not-found h2 { margin: 0; }
+.not-found-code {
+  margin: 0;
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+.not-found .btn { margin-top: 8px; }
 .list-heading { font-size: 1.35rem; font-weight: 800; margin: 0; }
 .list-heading-count { margin-left: 10px; font-size: 0.85rem; font-weight: 600; color: var(--muted); }
 

@@ -13,6 +13,7 @@ import VerifyDemoPage from './pages/VerifyDemoPage'
 import VerifyDemoDiagramPage from './pages/VerifyDemoDiagramPage'
 import VerifyDemoLivePage from './pages/VerifyDemoLivePage'
 import StatsPage from './pages/StatsPage'
+import NotFoundPage from './pages/NotFoundPage'
 import ModelSetupLayout from './pages/model-setup/ModelSetupLayout'
 import ModelSetupEntryPage from './pages/model-setup/ModelSetupEntryPage'
 import ModelSetsPage from './pages/model-setup/ModelSetsPage'
@@ -62,6 +63,9 @@ function AppShell() {
               <Route path="new" element={<Navigate to="/model-setup/sets" replace />} />
               <Route path="presets/:profileId/edit" element={<RedirectPresetEdit />} />
             </Route>
+            {/* 매칭되는 라우트가 없을 때. nginx 는 모든 경로에 index.html 을 내려주므로
+                (SPA 새로고침 지원) 잘못된 주소도 여기로 온다. */}
+            <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </main>
       </div>
