@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 
 METADATA_FILENAME = "metadata.json"
 MATERIALIZED_FILENAME = "materialized_frames.json"
-DEFAULT_DECODE_BACKEND = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
+DEFAULT_DECODE_BACKEND = os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")
 
 
 def _load_json(path: str | Path) -> dict:

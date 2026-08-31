@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -115,3 +115,52 @@ class ModelSettingProfile(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class VerificationStats(Base):
+    """완료된 verify 실행 1건에서 추출한 통계용 요약. 통계 페이지가 이 테이블만
+    집계한다. 원본(진실)은 여전히 디스크의 verification_final.json 등이고, 이 행은
+    조회 편의를 위한 투영이다.
+
+    - job_type='verify' + status='done' 인 실행만 적재한다 (verify_only 제외).
+    - 재검증 시 같은 lecture_id 행을 지우고 다시 넣어 1강의 1행을 유지한다
+      (수정 전후 뷰는 Phase 4에서 정책 재검토).
+    - 결과 JSON 파일이 없으면 적재하지 않는다.
+    """
+
+    __tablename__ = 'verification_stats'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    lecture_id = Column(
+        UUID(as_uuid=True), ForeignKey('lectures.id', ondelete='CASCADE'), nullable=False, index=True
+    )
+    job_id = Column(
+        UUID(as_uuid=True), ForeignKey('processing_jobs.id', ondelete='CASCADE'), nullable=True
+    )
+
+    # lectures.source_tag 를 비정규화 복사 (집계 시 조인 회피). 없으면 'etc'.
+    source_tag = Column(String, nullable=False, server_default='etc')
+    # 파이프라인이 분류한 학문 도메인. 불명이면 'etc'(기타).
+    domain = Column(String, nullable=False, server_default='etc')
+    sub_domain = Column(String, nullable=False, server_default='')
+
+    video_duration_sec = Column(Float, nullable=True)
+    preprocess_sec = Column(Float, nullable=True)
+    verify_sec = Column(Float, nullable=True)
+    total_sec = Column(Float, nullable=True)
+
+    # feedback 상태별 개수. 슬라이드 오류도 지식 오류로 포함한다.
+    confirmed_count = Column(Integer, nullable=False, server_default='0')
+    review_count = Column(Integer, nullable=False, server_default='0')
+    rejected_count = Column(Integer, nullable=False, server_default='0')
+    slide_error_count = Column(Integer, nullable=False, server_default='0')
+
+    # 상태 × 유형 분포: { "confirmed": {type: n}, "review": {...}, "rejected": {...} }
+    # 통계 페이지는 confirmed+review 만 합산하고 rejected 는 버린다.
+    breakdown_by_type = Column(JSONB, nullable=False, default=dict, server_default='{}')
+
+    verifier_models = Column(JSONB, nullable=False, default=list, server_default='[]')
+    verifier_version = Column(Integer, nullable=True)
+
+    verification_date = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

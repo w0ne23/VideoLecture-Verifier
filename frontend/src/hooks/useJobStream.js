@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { PHASES, normalizePipelineStages } from '../components/verifier/verifierConstants'
 import {
   deleteLecture,
@@ -17,9 +18,10 @@ const EMPTY_LECTURE = {
   status: '',
 }
 
-// graphLec의 useJobStream을 verify 전용으로 축소 이식한 버전.
+// VLVerifier의 useJobStream을 verify 전용으로 축소 이식한 버전.
 // 라우터 의존을 없애고, 목록 복귀는 onExit 콜백으로 위임한다.
 export function useJobStream(lectureId, { onExit } = {}) {
+  const queryClient = useQueryClient()
   const eventSourceRef = useRef(null)
   const verifierLoadedRef = useRef(false)
   const ignoreNextStreamErrorRef = useRef(false)
@@ -116,6 +118,12 @@ export function useJobStream(lectureId, { onExit } = {}) {
         setPipelineStages(prev => mergeStageStatus(prev, payload.pipeline_stages || []))
 
         loadVerificationIfReady(payload.status)
+
+        // verify 완료 → 통계 페이지가 열려 있으면 자동 갱신.
+        // 백엔드가 done 표시 전에 verification_stats 를 넣으므로 여기서 행이 보장된다.
+        if (payload.status === 'done') {
+          queryClient.invalidateQueries({ queryKey: ['stats'] })
+        }
 
         if (isTerminalStatus(payload.status)) {
           closeEventSource({ ignoreStreamError: true })

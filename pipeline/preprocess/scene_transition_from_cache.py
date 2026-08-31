@@ -1015,10 +1015,10 @@ def run_cache_probe_parallel(
     sampled_fps = float(manifest["cache"]["sampled_fps"])
     sample_count = int(manifest["cache"].get("sample_count") or len(manifest.get("frames", [])))
 
-    requested_workers = int(workers if workers is not None else os.getenv("GRAPHLEC_SCENE_PROBE_WORKERS", "1"))
-    chunk_samples = int(chunk_samples if chunk_samples is not None else os.getenv("GRAPHLEC_SCENE_PROBE_CHUNK_SAMPLES", "2000"))
-    guard_samples = int(guard_samples if guard_samples is not None else os.getenv("GRAPHLEC_SCENE_PROBE_GUARD_SAMPLES", "100"))
-    keep_parts = os.getenv("GRAPHLEC_SCENE_PROBE_KEEP_PARTS", "0") == "1"
+    requested_workers = int(workers if workers is not None else os.getenv("VLVERIFIER_SCENE_PROBE_WORKERS", "1"))
+    chunk_samples = int(chunk_samples if chunk_samples is not None else os.getenv("VLVERIFIER_SCENE_PROBE_CHUNK_SAMPLES", "2000"))
+    guard_samples = int(guard_samples if guard_samples is not None else os.getenv("VLVERIFIER_SCENE_PROBE_GUARD_SAMPLES", "100"))
+    keep_parts = os.getenv("VLVERIFIER_SCENE_PROBE_KEEP_PARTS", "0") == "1"
 
     chunk_samples = max(1, chunk_samples)
     guard_samples = max(0, guard_samples)

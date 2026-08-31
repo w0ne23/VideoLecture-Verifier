@@ -26,18 +26,18 @@ load_dotenv()
 
 GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
 # 상용 API로 되돌리려면: PASS1=gemini-3-flash-preview, PASS2=gpt-5.4-mini, PASS3=gpt-5.4
-PASS1_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
-PASS2_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
-PASS3_TEXT_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
-TEXT_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_REASONING_EFFORT", "minimal").strip().lower()
-PASS2_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_REASONING_EFFORT", "minimal").strip().lower()
-PASS3_REASONING_EFFORT = os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_REASONING_EFFORT", "low").strip().lower()
-TEXT_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_TEXT_MAX_OUTPUT_TOKENS", "8192"))
-PASS2_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS2_MAX_OUTPUT_TOKENS", "4096"))
-PASS3_MAX_OUTPUT_TOKENS = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_MAX_OUTPUT_TOKENS", "2048"))
-PASS3_ITEM_BATCH_SIZE = max(1, int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_PASS3_ITEM_BATCH_SIZE", "12")))
-IMAGE_PROVIDER = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "text").strip().lower()
-IMAGE_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
+PASS1_TEXT_MODEL = os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS1_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+PASS2_TEXT_MODEL = os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS2_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+PASS3_TEXT_MODEL = os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS3_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+TEXT_REASONING_EFFORT = os.getenv("VLVERIFIER_TEXT_PROCESSOR_REASONING_EFFORT", "minimal").strip().lower()
+PASS2_REASONING_EFFORT = os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS2_REASONING_EFFORT", "minimal").strip().lower()
+PASS3_REASONING_EFFORT = os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS3_REASONING_EFFORT", "low").strip().lower()
+TEXT_MAX_OUTPUT_TOKENS = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_TEXT_MAX_OUTPUT_TOKENS", "8192"))
+PASS2_MAX_OUTPUT_TOKENS = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS2_MAX_OUTPUT_TOKENS", "4096"))
+PASS3_MAX_OUTPUT_TOKENS = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS3_MAX_OUTPUT_TOKENS", "2048"))
+PASS3_ITEM_BATCH_SIZE = max(1, int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_PASS3_ITEM_BATCH_SIZE", "12")))
+IMAGE_PROVIDER = os.getenv("VLVERIFIER_TEXT_PROCESSOR_IMAGE_PROVIDER", "text").strip().lower()
+IMAGE_MODEL = os.getenv("VLVERIFIER_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "12"))
 PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_PARALLEL_REQUESTS", "20")))
@@ -247,7 +247,7 @@ def _call_openai_text_correction(
                 kwargs["extra_body"] = {"think": think_override}
         elif reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-        temperature = os.getenv("GRAPHLEC_TEXT_PROCESSOR_OPENAI_TEMPERATURE", "0").strip()
+        temperature = os.getenv("VLVERIFIER_TEXT_PROCESSOR_OPENAI_TEMPERATURE", "0").strip()
         if temperature:
             kwargs["temperature"] = float(temperature)
 
@@ -324,10 +324,10 @@ def _call_openai_image_correction(prompt: str, image_bytes: bytes):
 
 def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int | None = None):
     if max_retries is None:
-        max_retries = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
+        max_retries = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
     if initial_wait is None:
-        initial_wait = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
-    max_wait = float(os.getenv("GRAPHLEC_API_RETRY_MAX_WAIT_SEC", "60"))
+        initial_wait = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
+    max_wait = float(os.getenv("VLVERIFIER_API_RETRY_MAX_WAIT_SEC", "60"))
     infinite = max_retries <= 0
     attempt = 0
     while infinite or attempt < max_retries:
@@ -565,7 +565,7 @@ def extract_glossary_terms(slide_texts: dict[int, dict]) -> list[str]:
         if term.isupper() or re.search(r"[\d_.()]", term):
             add_term(term)
 
-    max_terms = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_MAX_GLOSSARY_TERMS", "800"))
+    max_terms = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_MAX_GLOSSARY_TERMS", "800"))
     return list(ordered_terms.keys())[:max_terms]
 
 
@@ -1474,7 +1474,7 @@ def _prepare_pass3_jobs(
     subdomain = domain_info.get("subdomain", "")
     print(f"    도메인: {domain_info['domain']}, 서브도메인: {subdomain}")
 
-    glossary_window = max(0, int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_GLOSSARY_SLIDE_WINDOW", "1")))
+    glossary_window = max(0, int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_GLOSSARY_SLIDE_WINDOW", "1")))
     total_glossary_terms = len(extract_glossary_terms(extracted_slide_texts))
     if total_glossary_terms:
         print(

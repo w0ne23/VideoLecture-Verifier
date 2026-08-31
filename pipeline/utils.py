@@ -52,7 +52,7 @@ def resolve_backend_root() -> Path:
     """
     subprocess cwd / PYTHONPATH 기준 프로젝트 루트.
 
-    - 로컬 graphLec: 저장소 루트 (`app/backend/pipeline` 경로)
+    - 로컬 VLVerifier: 저장소 루트 (`app/backend/pipeline` 경로)
     - Docker: /app (형제 패키지 `app`, `pipeline` — 위와 겹치지 않음)
 
     로컬 `.../app/backend` 는 `pipeline/` 과 `app/main.py` 를 동시에 가지므로,

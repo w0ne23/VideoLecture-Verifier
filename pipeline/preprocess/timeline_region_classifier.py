@@ -77,9 +77,9 @@ class RegionClassifierConfig:
     # The dependency is only one previous sample, so chunked workers can safely
     # use a small guard overlap. Defaults target long lecture videos on a large
     # CPU machine without overwhelming sampled_frames.avi random access.
-    motion_workers: int = _env_int("GRAPHLEC_REGION_WORKERS", 8)
-    motion_chunk_samples: int = _env_int("GRAPHLEC_REGION_CHUNK_SAMPLES", 2000)
-    motion_guard_samples: int = _env_int("GRAPHLEC_REGION_GUARD_SAMPLES", 1)
+    motion_workers: int = _env_int("VLVERIFIER_REGION_WORKERS", 8)
+    motion_chunk_samples: int = _env_int("VLVERIFIER_REGION_CHUNK_SAMPLES", 2000)
+    motion_guard_samples: int = _env_int("VLVERIFIER_REGION_GUARD_SAMPLES", 1)
 
     # Per-sample coarse thresholds, based on sampled-cache prev_* metrics.
     active_mse: float = 90.0

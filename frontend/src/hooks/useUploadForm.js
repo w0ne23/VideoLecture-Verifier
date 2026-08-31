@@ -10,7 +10,7 @@ function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
 }
 
-// graphLec의 useUploadForm을 verify 전용으로 축소한 버전.
+// VLVerifier의 useUploadForm을 verify 전용으로 축소한 버전.
 // 업로드 성공 시 onUploaded(lectureId)로 상세 화면 전환을 위임한다.
 export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)

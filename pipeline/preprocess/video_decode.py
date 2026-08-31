@@ -18,7 +18,7 @@ _FFMPEG_HWACCEL_DEVICE_CACHE: dict[str, bool] = {}
 
 
 def _gpu_only_enabled() -> bool:
-    return os.getenv("GRAPHLEC_GPU_ONLY", "0").strip().lower() not in {"", "0", "false", "no"}
+    return os.getenv("VLVERIFIER_GPU_ONLY", "0").strip().lower() not in {"", "0", "false", "no"}
 
 
 def _opencv_video_metadata(input_path: str) -> dict | None:
@@ -222,7 +222,7 @@ def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
 
 
 def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | None]:
-    backend = (preferred_backend or os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")).strip().lower()
+    backend = (preferred_backend or os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")).strip().lower()
     hwaccels = _ffmpeg_hwaccels()
     system = platform.system().lower()
     gpu_only = _gpu_only_enabled()
@@ -233,11 +233,11 @@ def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | No
     )
     if backend == "ffmpeg-cuda":
         if gpu_only and not cuda_usable:
-            raise RuntimeError("GRAPHLEC_GPU_ONLY=1 but ffmpeg-cuda is not available")
+            raise RuntimeError("VLVERIFIER_GPU_ONLY=1 but ffmpeg-cuda is not available")
         return ("ffmpeg", "cuda") if cuda_usable else ("opencv", None)
     if backend == "ffmpeg-videotoolbox":
         if gpu_only and "videotoolbox" not in hwaccels:
-            raise RuntimeError("GRAPHLEC_GPU_ONLY=1 but ffmpeg-videotoolbox is not available")
+            raise RuntimeError("VLVERIFIER_GPU_ONLY=1 but ffmpeg-videotoolbox is not available")
         return ("ffmpeg", "videotoolbox") if "videotoolbox" in hwaccels else ("opencv", None)
     if backend == "auto":
         if cuda_usable:
@@ -245,10 +245,10 @@ def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | No
         if system == "darwin" and "videotoolbox" in hwaccels:
             return "ffmpeg", "videotoolbox"
         if gpu_only:
-            raise RuntimeError("GRAPHLEC_GPU_ONLY=1 but no GPU decode backend is available")
+            raise RuntimeError("VLVERIFIER_GPU_ONLY=1 but no GPU decode backend is available")
         return "opencv", None
     if gpu_only and backend == "opencv":
-        raise RuntimeError("GRAPHLEC_GPU_ONLY=1 does not allow OpenCV decode backend")
+        raise RuntimeError("VLVERIFIER_GPU_ONLY=1 does not allow OpenCV decode backend")
     return "opencv", None
 
 
@@ -572,15 +572,15 @@ def read_frame_at_timestamp(
             return frame
         if _gpu_only_enabled():
             raise RuntimeError(
-                f"GRAPHLEC_GPU_ONLY=1 and ffmpeg timestamp decode failed at {timestamp_sec:.6f}s"
+                f"VLVERIFIER_GPU_ONLY=1 and ffmpeg timestamp decode failed at {timestamp_sec:.6f}s"
             )
     elif _gpu_only_enabled():
-        raise RuntimeError("GRAPHLEC_GPU_ONLY=1 requires ffmpeg GPU timestamp decode")
+        raise RuntimeError("VLVERIFIER_GPU_ONLY=1 requires ffmpeg GPU timestamp decode")
     frame = _read_frame_by_timestamp_ffmpeg(input_path, timestamp_sec, width, height, None)
     if frame is not None:
         return frame
     if _gpu_only_enabled():
         raise RuntimeError(
-            f"GRAPHLEC_GPU_ONLY=1 and non-GPU ffmpeg timestamp fallback would be required at {timestamp_sec:.6f}s"
+            f"VLVERIFIER_GPU_ONLY=1 and non-GPU ffmpeg timestamp fallback would be required at {timestamp_sec:.6f}s"
         )
     return _read_frame_by_timestamp_opencv(input_path, timestamp_sec)

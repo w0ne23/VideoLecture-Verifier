@@ -1,4 +1,4 @@
-import { ISSUE_TYPES } from '../../data/mockStats'
+import { ISSUE_TYPES } from '../../config/statsConfig'
 
 const W = 720
 const H = 380

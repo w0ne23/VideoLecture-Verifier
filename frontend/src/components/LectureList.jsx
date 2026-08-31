@@ -112,10 +112,10 @@ export default function LectureList({ onSelect, filters = {} }) {
                   </span>
                 </span>
                 {lecture.created_at && <span className="lecture-card-date">{formatDate(lecture.created_at)}</span>}
-                {lecture.status !== 'done' && (
-                  <span className="lecture-card-stage">
-                    {lecture.status === 'error' ? lecture.error_message : lecture.current_stage}
-                  </span>
+                {/* 진행 중 강의는 status-chip('분석 중')로 충분하므로 current_stage 는 생략.
+                    오류만 사유를 보여준다. */}
+                {lecture.status === 'error' && lecture.error_message && (
+                  <span className="lecture-card-stage">{lecture.error_message}</span>
                 )}
               </span>
             </button>
