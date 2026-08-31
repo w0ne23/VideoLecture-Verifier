@@ -75,14 +75,14 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    provider: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER", "openai")
-    model: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini")
+    provider: str = os.getenv("VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER", "openai")
+    model: str = os.getenv("VLVERIFIER_SLIDE_TEXTUALIZER_MODEL", "gpt-5.4-mini")
     max_retries: int = 3
     retry_delay: float = 5.0
-    workers: int = int(os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS", "20"))
-    ocr_provider: str = os.getenv("GRAPHLEC_SLIDE_OCR_PROVIDER", "none")
-    ocr_model_dir: str = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "")
-    ocr_lang: str = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual")
+    workers: int = int(os.getenv("VLVERIFIER_SLIDE_TEXTUALIZER_WORKERS", "20"))
+    ocr_provider: str = os.getenv("VLVERIFIER_SLIDE_OCR_PROVIDER", "none")
+    ocr_model_dir: str = os.getenv("VLVERIFIER_SLIDE_OCR_MODEL_DIR", "")
+    ocr_lang: str = os.getenv("VLVERIFIER_SLIDE_OCR_LANG", "multilingual")
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)

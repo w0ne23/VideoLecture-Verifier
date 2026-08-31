@@ -26,8 +26,8 @@ def to_container_path(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke-test the OCR service with one image.")
     parser.add_argument("image", nargs="?", default=str(DEFAULT_IMAGE), help="Host path to an image file")
-    parser.add_argument("--base-url", default=os.getenv("GRAPHLEC_SLIDE_OCR_BASE_URL", "http://localhost:8010"))
-    parser.add_argument("--lang", default=os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual"))
+    parser.add_argument("--base-url", default=os.getenv("VLVERIFIER_SLIDE_OCR_BASE_URL", "http://localhost:8010"))
+    parser.add_argument("--lang", default=os.getenv("VLVERIFIER_SLIDE_OCR_LANG", "multilingual"))
     args = parser.parse_args()
 
     image_path = Path(args.image)

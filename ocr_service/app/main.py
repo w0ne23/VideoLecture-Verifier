@@ -17,8 +17,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 LOCAL_STORAGE_DIR = Path(os.getenv("LOCAL_STORAGE_DIR", "/app/storage"))
-OCR_LANG = os.getenv("GRAPHLEC_SLIDE_OCR_LANG", "multilingual").strip().lower()
-OCR_MODEL_DIR = os.getenv("GRAPHLEC_SLIDE_OCR_MODEL_DIR", "").strip()
+OCR_LANG = os.getenv("VLVERIFIER_SLIDE_OCR_LANG", "multilingual").strip().lower()
+OCR_MODEL_DIR = os.getenv("VLVERIFIER_SLIDE_OCR_MODEL_DIR", "").strip()
 
 
 class OCRRequest(BaseModel):

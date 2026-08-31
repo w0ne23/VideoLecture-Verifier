@@ -18,7 +18,7 @@ const EMPTY_LECTURE = {
   status: '',
 }
 
-// graphLec의 useJobStream을 verify 전용으로 축소 이식한 버전.
+// VLVerifier의 useJobStream을 verify 전용으로 축소 이식한 버전.
 // 라우터 의존을 없애고, 목록 복귀는 onExit 콜백으로 위임한다.
 export function useJobStream(lectureId, { onExit } = {}) {
   const queryClient = useQueryClient()

@@ -25,8 +25,8 @@ from .utils import api_call_with_retry
 
 # 기존: 아래 세 LLM 호출(decide_semantic_merges/decide_context_breaks/decide_merge_pair)은
 # GEMINI_GENERATIVE_MODEL(gemini-2.5-flash)로 하드코딩되어 있었음.
-# 상용 API로 되돌리려면: GRAPHLEC_CONTEXT_GROUP_MODEL=gemini-2.5-flash (또는 GEMINI_GENERATIVE_MODEL)
-CONTEXT_GROUP_MODEL = os.getenv("GRAPHLEC_CONTEXT_GROUP_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
+# 상용 API로 되돌리려면: VLVERIFIER_CONTEXT_GROUP_MODEL=gemini-2.5-flash (또는 GEMINI_GENERATIVE_MODEL)
+CONTEXT_GROUP_MODEL = os.getenv("VLVERIFIER_CONTEXT_GROUP_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
 
 CONTEXT_PARALLEL_REQUESTS = max(
     1,

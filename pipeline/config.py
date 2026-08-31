@@ -94,7 +94,7 @@ def _gemini_env_keys() -> tuple[str, str]:
 
 # 응답이 오지 않고 무한정 걸리는 요청을 잡아내기 위한 요청 타임아웃(ms).
 # 미설정 시 SDK/httpx 기본값에 맡겨져 한 요청이 스레드를 영구히 붙잡을 수 있다.
-GEMINI_REQUEST_TIMEOUT_MS = int(os.getenv("GRAPHLEC_GEMINI_TIMEOUT_MS", "120000"))
+GEMINI_REQUEST_TIMEOUT_MS = int(os.getenv("VLVERIFIER_GEMINI_TIMEOUT_MS", "120000"))
 
 
 def get_gemini_client():

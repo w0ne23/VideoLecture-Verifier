@@ -49,8 +49,8 @@ class ProbeConfig:
     resize_width: int = 768
     # Hold a candidate longer so a slide-build animation can settle before
     # the first frame is committed as the scene base.
-    delay_sec: float = _env_float("GRAPHLEC_SCENE_BASE_DELAY_SEC", 2.0)
-    max_pending_sec: float = _env_float("GRAPHLEC_SCENE_BASE_MAX_PENDING_SEC", 5.0)
+    delay_sec: float = _env_float("VLVERIFIER_SCENE_BASE_DELAY_SEC", 2.0)
+    max_pending_sec: float = _env_float("VLVERIFIER_SCENE_BASE_MAX_PENDING_SEC", 5.0)
     stable_mse: float = 80.0
     stable_hash: int = 4
     stable_prev_mse: float = 40.0
