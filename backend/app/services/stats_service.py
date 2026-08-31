@@ -64,13 +64,17 @@ def _num(value: Any) -> float | None:
 def _split_preprocess_verify(timings_doc: dict) -> tuple[float | None, float | None, float | None]:
     """pipeline_timings.json 에서 전처리/검증/총 소요 시간(초)을 뽑는다.
 
-    - 총합: run_history 의 마지막 verify 실행 elapsed_sec 우선(가장 신뢰), 없으면
-      elapsed_total_sec.
-    - 전처리: `P{n} ... total` 롤업 키만 합산 (하위 P1A/P1B 등과 이중 카운트 방지).
-      이 키들은 매 실행마다 갱신된다.
-    - 검증: total - preprocess (0 이상). 정상 콜드런에서는 P1A(슬라이드 추출)가
-      전처리를 지배하고 검증이 그 뒤에 순차 실행되므로 이 차이가 곧 검증 시간이다.
-      이미 전처리된 강의를 재검증하면 검증이 P3와 겹쳐 이 값이 과소평가될 수 있다.
+    파이프라인은 전처리 → 검증 순차 실행이지만, pipeline_timings.json 은 스킵된
+    스테이지의 이전 실행 시간을 보존한다("이 강의 전처리는 원래 N초 걸린다"를 계속
+    보여주려고). 그래서 `총 − 전처리` 로 검증 시간을 구하면 재검증 시 0 이 된다.
+    대신 각 단계의 스테이지 시간을 직접 합산한다.
+
+    - 전처리: `P{n} ... total` 롤업 키 합 (하위 P1A/P1B 와 이중 카운트 방지)
+    - 검증: `V1` + `V2A~V2F*` 스테이지 시간 합. 검증 내부는 병렬이라 wall-clock 보다
+      약간 크게 나올 수 있으나, "검증 시간은 강의 길이와 무관"이라는 뷰의 취지엔 맞다.
+      (`V2 run_verifier` 롤업은 stale 될 수 있어 폴백으로만 사용)
+    - 총합: run_history 의 마지막 실행 elapsed_sec 우선(진짜 wall-clock), 없으면
+      elapsed_total_sec, 그래도 없으면 전처리+검증.
     """
     timings = timings_doc.get('timings') or {}
     if not isinstance(timings, dict):
@@ -81,21 +85,28 @@ def _split_preprocess_verify(timings_doc: dict) -> tuple[float | None, float | N
         if isinstance(k, str) and re.match(r'P\d+ .*\btotal\b', k) and _num(v) is not None
     )
 
+    # V1 build_analyzer_input + V2A/V2B/.../V2F1/V2F2 (스킵되는 'V2 run_verifier',
+    # 'V2 verifier 백그라운드 시작' 은 제외 — 이들은 'V2' 뒤에 공백).
+    ver = sum(
+        v for k, v in timings.items()
+        if isinstance(k, str) and re.match(r'V(1 |2[A-Z])', k) and _num(v) is not None
+    )
+    if not ver:
+        ver = next(
+            (v for k, v in timings.items()
+             if isinstance(k, str) and k.startswith('V2 run_verifier') and _num(v) is not None),
+            0.0,
+        )
+
     total = None
     for run in reversed(timings_doc.get('run_history') or []):
-        if run.get('job_type') in ('verify', 'verify_only') and _num(run.get('elapsed_sec')):
+        if _num(run.get('elapsed_sec')):
             total = run['elapsed_sec']
             break
     if total is None:
         total = _num(timings_doc.get('elapsed_total_sec'))
     if total is None:
-        v_sum = sum(
-            v for k, v in timings.items()
-            if isinstance(k, str) and re.match(r'V[12]', k) and _num(v) is not None
-        )
-        total = pre + v_sum
-
-    ver = max(0.0, total - pre) if total is not None else None
+        total = pre + ver
 
     return (
         round(pre, 3) if pre else None,
