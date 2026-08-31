@@ -1,6 +1,6 @@
 # Minimal first-step LiteLLM configuration.
 # The model_name values intentionally match the model identifiers already used
-# by VeriLec, so enabling the gateway does not require changing stage settings.
+# by VLVerifier, so enabling the gateway does not require changing stage settings.
 
 model_list:
   - model_name: gpt-5.4
@@ -15,7 +15,7 @@ model_list:
       api_base: os.environ/ANTHROPIC_BASE_URL
 
 # Grok, local vLLM and Ollama routes will be added after the OpenAI and Claude
-# paths are verified. Their native VeriLec adapters remain unchanged while this
+# paths are verified. Their native VLVerifier adapters remain unchanged while this
 # gateway is enabled.
 
 general_settings:

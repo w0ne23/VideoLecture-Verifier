@@ -17,7 +17,7 @@ from threading import Lock
 from typing import Any, Optional
 
 
-USD_TO_KRW = float(os.getenv("VERILEC_USD_TO_KRW", "1400"))
+USD_TO_KRW = float(os.getenv("VLVERIFIER_USD_TO_KRW", "1400"))
 
 TOKEN_PRICES_USD_PER_1M: dict[str, dict[str, float]] = {
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cached_input": 0.03},

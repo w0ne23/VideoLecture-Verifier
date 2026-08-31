@@ -1,7 +1,7 @@
 import { PIPELINE_NODES } from './verifierConstants'
 
 // graphLec PipelineProgress의 단일 행(verify 전용) 축소판.
-// 2행 그래프 플로우 레이아웃은 VeriLec에 없으므로 노드/커넥터만 남겼다.
+// 2행 그래프 플로우 레이아웃은 VLVerifier에 없으므로 노드/커넥터만 남겼다.
 
 function getStageStatus(stages, key) {
   return stages.find(s => s.stage === key)?.status ?? 'wait'

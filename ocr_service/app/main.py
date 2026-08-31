@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="VeriLec OCR Service", lifespan=lifespan)
+app = FastAPI(title="VLVerifier OCR Service", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

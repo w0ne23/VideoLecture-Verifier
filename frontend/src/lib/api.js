@@ -51,7 +51,7 @@ export async function deleteLecture(lectureId) {
   return res.json()
 }
 
-// 주의: 이전 프로젝트와 달리 VeriLec 백엔드에서는 confirm이 /lectures 라우터에 있다.
+// 주의: 이전 프로젝트와 달리 VLVerifier 백엔드에서는 confirm이 /lectures 라우터에 있다.
 export async function confirmLectureVerification(lectureId) {
   const res = await fetch(`${API_BASE}/lectures/${lectureId}/verify/confirm`, { method: 'POST' })
   if (!res.ok) throw new Error(await readError(res, 'Verification confirm failed'))

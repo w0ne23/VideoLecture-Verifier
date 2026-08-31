@@ -1,12 +1,12 @@
 services:
   backend:
-    shm_size: "${VERILEC_SHM_SIZE:-64g}"
+    shm_size: "${VLVERIFIER_SHM_SIZE:-64g}"
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
         INSTALL_TENSORRT: "1"
     environment:
-      NVIDIA_VISIBLE_DEVICES: "${VERILEC_NVIDIA_DEVICE:-1}"
+      NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
       GRAPHLEC_SLIDE_DECODE_BACKEND: ffmpeg-cuda
       GRAPHLEC_SLIDE_OCR_PROVIDER: http
@@ -26,19 +26,19 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${VERILEC_NVIDIA_DEVICE:-1}"]
+              device_ids: ["${VLVERIFIER_NVIDIA_DEVICE:-1}"]
               capabilities: [gpu]
 
   ocr:
     environment:
-      NVIDIA_VISIBLE_DEVICES: "${VERILEC_NVIDIA_DEVICE:-1}"
+      NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${VERILEC_NVIDIA_DEVICE:-1}"]
+              device_ids: ["${VLVERIFIER_NVIDIA_DEVICE:-1}"]
               capabilities: [gpu]
 
   ollama:
@@ -46,13 +46,13 @@ services:
       # 두 카드에 걸쳐 텐서를 분산했을 때 GPU 0이 세 번 연속(ERR! 두 번 +
       # 시스템 행 한 번) 죽는 걸 확인했다 — GSP 펌웨어를 꺼도 재현됨. RTX 4090은
       # NVLink가 없어 P2P 자체가 이 하드웨어에서 불안정한 것으로 보여, 안전하게
-      # backend/ocr와 같은 GPU 한 장(VERILEC_NVIDIA_DEVICE)만 쓰도록 고정한다.
-      NVIDIA_VISIBLE_DEVICES: "${VERILEC_NVIDIA_DEVICE:-1}"
+      # backend/ocr와 같은 GPU 한 장(VLVERIFIER_NVIDIA_DEVICE)만 쓰도록 고정한다.
+      NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["${VERILEC_NVIDIA_DEVICE:-1}"]
+              device_ids: ["${VLVERIFIER_NVIDIA_DEVICE:-1}"]
               capabilities: [gpu]

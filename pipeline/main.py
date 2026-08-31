@@ -1274,13 +1274,13 @@ def get_parser():
     parser.add_argument(
         "--slide-decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
-        default=os.getenv("VERILEC_SLIDE_DECODE_BACKEND", "auto"),
+        default=os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto"),
         help="P1A extract_slides 프레임 디코드 백엔드 (default: auto)",
     )
     parser.add_argument(
         "--slide-extract-workers",
         type=int,
-        default=int(os.getenv("VERILEC_SLIDE_EXTRACT_WORKERS", "0")),
+        default=int(os.getenv("VLVERIFIER_SLIDE_EXTRACT_WORKERS", "0")),
         help="P1A extract_slides 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
     )
     parser.add_argument("--skip-analyzer", action="store_true",

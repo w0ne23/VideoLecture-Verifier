@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Select the portable CPU stack or the NVIDIA stack without making callers
 # remember Compose override files. Override automatic detection with
-# VERILEC_MODE=cpu or VERILEC_MODE=gpu when needed.
+# VLVERIFIER_MODE=cpu or VLVERIFIER_MODE=gpu when needed.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-mode="${VERILEC_MODE:-auto}"
+mode="${VLVERIFIER_MODE:-auto}"
 case "$mode" in
   auto|cpu|gpu) ;;
   *)
-    printf 'Invalid VERILEC_MODE=%s; use auto, cpu, or gpu.\n' "$mode" >&2
+    printf 'Invalid VLVERIFIER_MODE=%s; use auto, cpu, or gpu.\n' "$mode" >&2
     exit 2
     ;;
 esac
@@ -28,7 +28,7 @@ if [ "$machine_arch" = "x86_64" ] || [ "$machine_arch" = "amd64" ]; then
 fi
 
 if [ "$mode" = "gpu" ] && [ "$gpu_ready" -ne 1 ]; then
-  printf 'VERILEC_MODE=gpu was requested, but NVIDIA Docker GPU support was not detected.\n' >&2
+  printf 'VLVERIFIER_MODE=gpu was requested, but NVIDIA Docker GPU support was not detected.\n' >&2
   exit 1
 fi
 if [ "$mode" = "auto" ]; then
@@ -42,9 +42,9 @@ fi
 compose_args=(-f docker-compose.yml)
 if [ "$mode" = "gpu" ]; then
   compose_args+=(-f docker-compose.gpu.yml --profile ocr)
-  printf 'VeriLec mode: GPU (CUDA decode, TensorRT, Nemotron OCR)\n'
+  printf 'VLVerifier mode: GPU (CUDA decode, TensorRT, Nemotron OCR)\n'
 else
-  printf 'VeriLec mode: CPU (OpenCV decode, CPU YOLO, embedded RapidOCR PP-OCRv5 Korean)\n'
+  printf 'VLVerifier mode: CPU (OpenCV decode, CPU YOLO, embedded RapidOCR PP-OCRv5 Korean)\n'
 fi
 
 exec docker compose "${compose_args[@]}" "$@"

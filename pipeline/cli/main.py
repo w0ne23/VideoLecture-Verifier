@@ -33,7 +33,7 @@ def run_verify(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description='VeriLec pipeline CLI')
+    parser = argparse.ArgumentParser(description='VLVerifier pipeline CLI')
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     run_video_parser = subparsers.add_parser('run-video', help='run full video verify pipeline')

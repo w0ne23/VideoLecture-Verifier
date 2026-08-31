@@ -1,6 +1,6 @@
 import { PHASES, VERIFY_STAGE_KEYS, normalizePipelineStages } from '../components/verifier/verifierConstants'
 
-// VeriLec 백엔드는 verify 워크플로우만 지원: 상태 → 화면 phase 매핑도 verify 기준만 남긴다.
+// VLVerifier 백엔드는 verify 워크플로우만 지원: 상태 → 화면 phase 매핑도 verify 기준만 남긴다.
 export function phaseFromStatus(status) {
   if (status === 'error') return PHASES.ERROR
   if (status === 'done' || status === 'waiting_approval') return PHASES.VERIFY_READY

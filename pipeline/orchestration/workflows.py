@@ -91,7 +91,7 @@ def run_pipeline(args, progress_callback=None, *, helpers):
         helpers.JOB_TYPE_VERIFIED_UPLOAD,
         helpers.JOB_TYPE_LEGACY_FULL,
     }:
-        raise RuntimeError(f'VeriLec supports verify workflow only, got: {job_type}')
+        raise RuntimeError(f'VLVerifier supports verify workflow only, got: {job_type}')
 
     if job_type == helpers.JOB_TYPE_VERIFY_ONLY:
         # 전처리 산출물이 이미 있다는 전제 하에, 재전처리 없이 이전 실행이 남긴
