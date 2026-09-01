@@ -9,6 +9,7 @@ from sqlalchemy.pool import NullPool
 from app.config import DATABASE_URL
 from app.llm_config import normalize_llm_config
 from app.models import ModelSettingProfile, ModelSettings
+from app.services.credential_service import load_runtime_credentials
 
 SETTINGS_ID = 1
 
@@ -90,6 +91,18 @@ async def get_runtime_model_settings(db: AsyncSession) -> dict:
         'stage_models': await _get_legacy_settings(db),
         'llm_config': await _get_legacy_llm_config(db),
     }
+
+
+async def get_runtime_pipeline_settings(db: AsyncSession) -> dict:
+    """Return settings plus decrypted credentials for the private worker only."""
+    payload = await get_runtime_model_settings(db)
+    refs = {
+        str(endpoint.get('credential_ref') or '').strip()
+        for endpoint in payload.get('llm_config', {}).get('endpoints', [])
+        if isinstance(endpoint, dict)
+    }
+    payload['credentials'] = await load_runtime_credentials(db, refs)
+    return payload
 
 
 async def _ensure_unique_name(db: AsyncSession, name: str, *, exclude_id: UUID | None = None):
@@ -263,7 +276,7 @@ def fetch_runtime_model_settings_sync() -> dict:
         try:
             session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
             async with session_factory() as db:
-                return await get_runtime_model_settings(db)
+                return await get_runtime_pipeline_settings(db)
         finally:
             await engine.dispose()
 

@@ -44,18 +44,15 @@ services:
       GRAPHLEC_SLIDE_OCR_LANG: korean
       GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
-      # LocalVLM — 슬라이드 후보 검토는 우리가 직접 제공하는 전처리라 외부 API가
-      # 아니라 로컬 LLM(Ollama)으로 돌린다.
-      # 상용 API 버전:
-      #   GRAPHLEC_VLM_PROVIDER: "openai"
-      #   GRAPHLEC_OPENAI_BASE_URL: "https://api.openai.com/v1"
-      #   GRAPHLEC_OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      #   GRAPHLEC_OPENAI_MODEL: "gpt-5.6-luna"
+      # LocalVLM은 provider 설정에 따라 Ollama 또는 LiteLLM(OpenAI 호환)을 사용한다.
       GRAPHLEC_VLM_ENABLED: "1"
       GRAPHLEC_VLM_APPLY: "1"
-      GRAPHLEC_VLM_PROVIDER: "ollama"
+      GRAPHLEC_VLM_PROVIDER: "${VLVERIFIER_VLM_PROVIDER:-ollama}"
       GRAPHLEC_OLLAMA_BASE_URL: "http://ollama:11434"
       GRAPHLEC_OLLAMA_MODEL: "${VLVERIFIER_VLM_MODEL:-gemma4:12b}"
+      GRAPHLEC_OPENAI_BASE_URL: "${GRAPHLEC_OPENAI_BASE_URL:-http://litellm:4000/v1}"
+      GRAPHLEC_OPENAI_API_KEY: "${GRAPHLEC_OPENAI_API_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
+      GRAPHLEC_OPENAI_MODEL: "${GRAPHLEC_OPENAI_MODEL:-gpt-5.6-luna}"
       GRAPHLEC_VLM_WORKERS: "15"
       GRAPHLEC_VLM_BATCH_IMAGES: "2"
       GRAPHLEC_VLM_BATCH_CANDIDATES: "1"
@@ -68,6 +65,11 @@ services:
       GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER: "${VLVERIFIER_TEXTUALIZER_PROVIDER:-ollama}"
       GRAPHLEC_SLIDE_TEXTUALIZER_MODEL: "${VLVERIFIER_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
       GRAPHLEC_SLIDE_TEXTUALIZER_WORKERS: "12"
+      GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL: "${GRAPHLEC_TEXT_PROCESSOR_PASS1_MODEL:-ollama:qwen3.8:27b-q4_K_M}"
+      GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL: "${GRAPHLEC_TEXT_PROCESSOR_PASS2_MODEL:-ollama:qwen3.8:27b-q4_K_M}"
+      GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL: "${GRAPHLEC_TEXT_PROCESSOR_PASS3_MODEL:-ollama:qwen3.8:27b-q4_K_M}"
+      GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL: "${GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL:-gpt-4.1-mini}"
+      GRAPHLEC_CONTEXT_GROUP_MODEL: "${GRAPHLEC_CONTEXT_GROUP_MODEL:-ollama:qwen3.8:27b-q4_K_M}"
 
       # Verifier concurrency. Each multi-model stage applies this limit per
       # model, while the claim extractor and slide checker use it as their
@@ -89,7 +91,9 @@ services:
       # enabled.
       LITELLM_ENABLED: "${LITELLM_ENABLED:-0}"
       LITELLM_BASE_URL: "${LITELLM_BASE_URL:-http://litellm:4000/v1}"
-      LITELLM_API_KEY: "${LITELLM_API_KEY:-sk-vlverifier-local-dev}"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
+      LITELLM_API_KEY: "${LITELLM_API_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
+      VLVERIFIER_CREDENTIAL_ENCRYPTION_KEY: "${VLVERIFIER_CREDENTIAL_ENCRYPTION_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
 
       # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
       # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
@@ -241,8 +245,15 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
       XAI_API_KEY: "${XAI_API_KEY:-}"
+      GOOGLE_API_KEY_1: "${GOOGLE_API_KEY_1:-${GOOGLE_API_KEY:-}}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-ollama}"
       OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      LOCAL_LLM_API_KEY: "${LOCAL_LLM_API_KEY:-${VLLM_API_KEY:-local}}"
+      LOCAL_LLM_BASE_URL: "${LOCAL_LLM_BASE_URL:-${VLLM_BASE_URL:-}}"
+      VLLM_API_KEY: "${VLLM_API_KEY:-local}"
+      VLLM_BASE_URL: "${VLLM_BASE_URL:-}"
     volumes:
       - ./docker/litellm/config.yaml:/app/config.yaml:ro
     ports:

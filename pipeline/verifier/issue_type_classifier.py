@@ -950,7 +950,45 @@ def _call_llm(
     web_search_force: bool = False,
     web_search_context_size: str | None = None,
     structured_schema: dict[str, Any] | None = None,
+    stage: str = "issue_classify",
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
+    # Web-selected endpoint bindings take precedence for ordinary JSON calls.
+    # OpenAI web-search calls stay on the existing Responses adapter because
+    # the search tool is an OpenAI-specific capability, not a chat endpoint
+    # parameter that can be forwarded to every compatible server.
+    try:
+        from .runtime_llm import call_runtime_llm, resolve_runtime_binding
+    except ImportError:
+        from runtime_llm import call_runtime_llm, resolve_runtime_binding
+
+    runtime_binding = None if web_search else resolve_runtime_binding(stage, model_spec)
+    if runtime_binding:
+        runtime_result = call_runtime_llm(
+            runtime_binding,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            response_format=(
+                {
+                    "type": "json_schema",
+                    "schema": structured_schema,
+                }
+                if structured_schema
+                else {"type": "json_object"}
+            ),
+            model_spec=model_spec,
+            stage=stage,
+        )
+        if runtime_result is not None:
+            text, usage = runtime_result
+            resolved = {
+                "provider": runtime_binding.get("provider", ""),
+                "alias": model_spec,
+                "resolved_model": runtime_binding.get("resolved_model", model_spec),
+                "endpoint_ref": runtime_binding.get("endpoint_ref", ""),
+            }
+            return text, usage, resolved
+
     resolved = _resolve_model_spec(model_spec)
     provider = resolved["provider"]
     model = resolved["resolved_model"]

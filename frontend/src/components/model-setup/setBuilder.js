@@ -4,7 +4,7 @@ import {
   stagesToStageModels,
   VERSION_TO_MODEL_ID,
 } from './stageModels'
-import { PROVIDERS_META, versionToModelId } from './llmRegistry'
+import { buildLlmConfig, versionToModelId } from './llmRegistry'
 
 const MULTI_STAGES = ['detect', 'classify', 'judge']
 const SINGLE_STAGES = ['claim', 'slide']
@@ -42,7 +42,10 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
   }
 
   const main = selected.find(llm => llm.id === mainLlmId) || selected[0]
-  const providers = selected.map(llm => ({ id: llm.id, type: llm.type }))
+  // Keep the complete endpoint records here. In particular, a model set must
+  // carry credentialRef into llm_config; reducing this to {id, type} silently
+  // dropped the web-registered credential for preset-based runs.
+  const providers = selected
   const selectedIds = selected.map(llm => llm.id)
   const weights = equalWeights(selectedIds)
 
@@ -114,6 +117,7 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
           providerType: main.type,
           version: main.version,
           modelId: main.modelId || versionToModelId(main.version),
+          credentialRef: main.credentialRef || '',
         }],
       }
       return
@@ -126,6 +130,7 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
         providerType: llm.type,
         version: llm.version,
         modelId: llm.modelId || versionToModelId(llm.version),
+        credentialRef: llm.credentialRef || '',
         weight: Number(weights[llm.id] || 0),
       })),
     }
@@ -134,6 +139,7 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
   return {
     name: (name || '').trim(),
     stage_models: stageModels,
+    llm_config: buildLlmConfig(selected, stages, stageOrder),
     editor_state: {
       kind: 'llm_set_v2',
       selectedLlmIds: selectedIds,
@@ -144,8 +150,9 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
         type: llm.type,
         version: llm.version,
         modelId: llm.modelId || versionToModelId(llm.version),
+        credentialRef: llm.credentialRef || '',
         keyMasked: llm.keyMasked || '',
-        providerName: PROVIDERS_META[llm.type]?.name || llm.type,
+        providerName: llm.providerName || llm.type,
       })),
       stages: serializedStages,
       retryCounts,
@@ -196,7 +203,8 @@ export function parseSetEditorState(editorState, registeredLlms = []) {
         version: model.version,
         modelId,
         keyMasked: '',
-        providerName: PROVIDERS_META[model.providerType]?.name || model.providerType,
+        credentialRef: model.credentialRef || '',
+        providerName: model.providerName || model.providerType,
       })
     })
   })

@@ -30,6 +30,11 @@ from utils import (
     is_retryable_api_error,
 )
 
+try:
+    from .runtime_llm import call_runtime_llm, resolve_runtime_binding
+except ImportError:
+    from runtime_llm import call_runtime_llm, resolve_runtime_binding
+
 
 # ── LLM 추상화 레이어 ────────────────────────────────────────
 
@@ -641,6 +646,28 @@ def _call_llm(
 
     model_spec = _resolve_stage_model(stage)
     model, reasoning_effort = _parse_openai_model_spec(model_spec)
+
+    # A profile selected in the web UI is authoritative for the stage.  Keep
+    # the existing provider branches below as a compatibility fallback for
+    # jobs started without a saved provider-neutral configuration.
+    runtime_binding = resolve_runtime_binding(stage, model)
+    if runtime_binding:
+        runtime_result = call_runtime_llm(
+            runtime_binding,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temp,
+            response_format=response_format,
+            image_bytes=image_bytes,
+            image_bytes_list=image_bytes_list,
+            model_spec=model_spec,
+            stage=stage,
+        )
+        if runtime_result is not None:
+            text, usage = runtime_result
+            usage.setdefault("endpoint_ref", runtime_binding.get("endpoint_ref", ""))
+            return text, usage
 
     # ── Local vLLM / Qwen (OpenAI-compatible) ───────────────
     if _is_vllm_model(model):

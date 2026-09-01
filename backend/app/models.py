@@ -115,3 +115,22 @@ class ModelSettingProfile(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LlmCredential(Base):
+    """웹에서 등록한 Provider credential.
+
+    API key 원문은 저장하지 않고 application-level encryption으로 암호화한
+    값만 저장한다. ``credential_ref``만 모델 설정에 들어가며, 실제 값은
+    강의 실행 프로세스에서만 복호화한다.
+    """
+
+    __tablename__ = 'llm_credentials'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=True)
+    fingerprint = Column(String, nullable=False, index=True)
+    encrypted_api_key = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

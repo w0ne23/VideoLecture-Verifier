@@ -419,6 +419,12 @@ def _issue_judge_consensus_decision(
 
 
 def _missing_provider_key(model: str) -> str | None:
+    # The web UI stores the secret behind a credential_ref. In that mode the
+    # worker exposes only the decrypted, job-scoped credential map; legacy
+    # provider environment variables are intentionally absent. Do not reject
+    # a configured model before runtime_llm gets a chance to resolve it.
+    if _runtime_credential_available_for_model(model):
+        return None
     if _is_openai_model(model):
         gateway_enabled = (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
             "1", "true", "yes", "on"
@@ -435,6 +441,54 @@ def _missing_provider_key(model: str) -> str | None:
     if _is_anthropic_model(model) and not os.getenv("ANTHROPIC_API_KEY"):
         return "ANTHROPIC_API_KEY"
     return None
+
+
+def _runtime_credential_available_for_model(model: str) -> bool:
+    """Check a saved web credential without resolving or registering anything."""
+    try:
+        credentials = json.loads(os.getenv("VLVERIFIER_CREDENTIALS_JSON", "") or "{}")
+        config = json.loads(os.getenv("VLVERIFIER_LLM_CONFIG_JSON", "") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(credentials, dict) or not isinstance(config, dict):
+        return False
+
+    requested = str(model or "").strip().lower()
+    if not requested:
+        return False
+    requested_base = re.sub(r"-(low|medium|high|xhigh)$", "", requested)
+    endpoints = {
+        str(item.get("id") or ""): item
+        for item in config.get("endpoints", []) or []
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    stage_bindings = config.get("stage_bindings", {})
+    if not isinstance(stage_bindings, dict):
+        return False
+    for values in stage_bindings.values():
+        if not isinstance(values, list):
+            continue
+        for binding in values:
+            if not isinstance(binding, dict):
+                continue
+            bound_model = str(binding.get("model") or "").strip().lower()
+            if not bound_model:
+                continue
+            bound_base = re.sub(r"-(low|medium|high|xhigh)$", "", bound_model)
+            model_match = (
+                bound_base == requested_base
+                or bound_base.rsplit("/", 1)[-1] == requested_base
+                or (requested_base in {"gpt", "openai"} and bound_base.startswith("gpt"))
+                or (requested_base in {"claude", "anthropic"} and bound_base.startswith("claude"))
+                or (requested_base in {"grok", "xai"} and bound_base.startswith("grok"))
+            )
+            if not model_match:
+                continue
+            endpoint = endpoints.get(str(binding.get("endpoint_ref") or ""), {})
+            reference = str(endpoint.get("credential_ref") or "").strip()
+            if reference.startswith("credential:") and credentials.get(reference):
+                return True
+    return False
 
 
 def _rebuild_classified_claim_batches(claims: list[dict], contexts: list[dict], batch_size: int) -> list[dict]:

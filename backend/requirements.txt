@@ -4,6 +4,7 @@ sqlalchemy[asyncio]
 asyncpg
 python-multipart
 python-dotenv
+cryptography>=42.0.0
 openai>=1.0.0
 anthropic>=0.125.0
 rapidocr>=3.9.0

@@ -18,3 +18,7 @@ CORS_ORIGINS = [
     if item.strip()
 ]
 BACKEND_WORKERS = max(1, int(os.getenv('VLVERIFIER_BACKEND_WORKERS', '1') or '1'))
+LITELLM_MODEL_CATALOG_URL = os.getenv(
+    'LITELLM_MODEL_CATALOG_URL',
+    'https://api.litellm.ai/model_catalog',
+).rstrip('/')

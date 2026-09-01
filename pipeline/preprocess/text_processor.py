@@ -177,6 +177,11 @@ def _is_ollama_model(model: str) -> bool:
     return spec.startswith("ollama:") or spec.startswith("ollama/")
 
 
+def _is_gemini_model(model: str) -> bool:
+    spec = str(model or "").strip().lower()
+    return spec.startswith(("gemini:", "gemini/", "gemini-"))
+
+
 def _effective_parallel_requests(*models: str) -> int:
     """models 중 하나라도 Ollama면 서버 동시 처리 한도(OLLAMA_PARALLEL_REQUESTS)를,
     전부 상용 API면 기존 PARALLEL_REQUESTS를 반환한다."""
@@ -248,7 +253,7 @@ def _call_openai_text_correction(
         elif reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         temperature = os.getenv("GRAPHLEC_TEXT_PROCESSOR_OPENAI_TEMPERATURE", "0").strip()
-        if temperature:
+        if temperature and not str(resolved_model).strip().lower().startswith("gpt-5.6"):
             kwargs["temperature"] = float(temperature)
 
         while True:
@@ -297,13 +302,15 @@ def _call_openai_image_correction(prompt: str, image_bytes: bytes):
     ]
 
     def call():
-        return client.chat.completions.create(
-            model=IMAGE_MODEL,
-            messages=[{"role": "user", "content": content}],
-            response_format={"type": "json_object"},
-            max_completion_tokens=8192,
-            temperature=0,
-        )
+        kwargs = {
+            "model": IMAGE_MODEL,
+            "messages": [{"role": "user", "content": content}],
+            "response_format": {"type": "json_object"},
+            "max_completion_tokens": 8192,
+        }
+        if not str(IMAGE_MODEL).strip().lower().startswith("gpt-5.6"):
+            kwargs["temperature"] = 0
+        return client.chat.completions.create(**kwargs)
 
     response = api_call_with_retry(call)
     try:
@@ -777,7 +784,7 @@ Pass1에서 후보를 놓치는 것(recall)이 후보를 과하게 내는 것보
         )
 
     try:
-        if _is_ollama_model(PASS1_TEXT_MODEL):
+        if _is_ollama_model(PASS1_TEXT_MODEL) or not _is_gemini_model(PASS1_TEXT_MODEL):
             response_text = _call_openai_text_correction(
                 prompt,
                 stage="stage3b_text_processor_pass1",

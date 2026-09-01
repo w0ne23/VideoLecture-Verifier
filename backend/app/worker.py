@@ -102,6 +102,15 @@ def pipeline_process(
             ensure_ascii=False,
             separators=(',', ':'),
         )
+        # Decrypted credentials exist only in this child process for the
+        # lifetime of the job. They are never returned by the settings API or
+        # persisted in the model configuration JSON.
+        os.environ.pop('VLVERIFIER_CREDENTIALS_JSON', None)
+        os.environ['VLVERIFIER_CREDENTIALS_JSON'] = json.dumps(
+            runtime_model_settings.get('credentials', {}),
+            ensure_ascii=False,
+            separators=(',', ':'),
+        )
         os.environ['VERIFIER_MODEL_MODE'] = 'generic' if stage_models else 'fixed'
 
         from app.services.storage_service import resolve_storage_path
@@ -169,6 +178,11 @@ def pipeline_process(
             with log_file_path.open('a', encoding='utf-8') as log_file:
                 log_file.write(f'\n[{job_id}] Pipeline failed: {details}\n')
         return False, None, str(exc)
+    finally:
+        # ProcessPool workers can be reused for another job. Never leave a
+        # decrypted credential map in a long-lived child process after this
+        # pipeline run, including when the run fails.
+        os.environ.pop('VLVERIFIER_CREDENTIALS_JSON', None)
 
 
 async def worker_loop(worker_index: int = 0, worker_count: int = 1):

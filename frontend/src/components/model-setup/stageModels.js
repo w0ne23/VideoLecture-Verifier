@@ -218,6 +218,7 @@ export function serializeEditorState(stages, retryCounts, providers, stageOrder)
           providerType: provider.type,
           version: stage.version,
           modelId: versionToModelId(stage.version),
+          credentialRef: provider.credentialRef || '',
         }],
       }
       return
@@ -237,6 +238,7 @@ export function serializeEditorState(stages, retryCounts, providers, stageOrder)
             providerType: provider.type,
             version,
             modelId: versionToModelId(version),
+            credentialRef: provider.credentialRef || '',
             weight: Number(stage.weights?.[providerId] || 0),
           }
         })
@@ -262,6 +264,7 @@ export function ensureProvidersForEditorState(existingProviders, editorState) {
         id: nextProviderId(nextProviders),
         type: model.providerType,
         keyMasked: '저장된 프리셋',
+        credentialRef: model.credentialRef || '',
         isPresetPlaceholder: true,
       }
       nextProviders.push(provider)

@@ -1085,6 +1085,7 @@ def _call_model_for_batch(
             max_tokens=max_tokens,
             web_search=False,
             structured_schema=_final_verifier_schema([ref["id"] for ref in batch]),
+            stage="verify",
         )
         if isinstance(usage, dict):
             usages.append(usage)
@@ -1136,6 +1137,7 @@ def _call_model_for_batch(
                 max_tokens=max_tokens,
                 web_search=False,
                 structured_schema=_final_verifier_schema([ref["id"]]),
+                stage="verify",
             )
             if isinstance(single_usage, dict):
                 usages.append(single_usage)
