@@ -12,11 +12,13 @@ export const PIPELINE_NODES = [
   { id: 'slide_analyze', label: '슬라이드 분석', stageKey: 'preprocess_slide_analyze', stageLabel: '슬라이드 분석' },
   { id: 'audio_transcribe', label: '음성 전사', stageKey: 'preprocess_audio_transcribe', stageLabel: '음성 전사' },
   { id: 'verifier_data', label: '검증 데이터 구성', stageKey: 'verifier_build_analyzer_input', stageLabel: '검증 입력 데이터 구성' },
-  { id: 'claim_extraction', label: '주장 추출', stageKey: 'verifier_claim_extraction', stageLabel: '주장 후보 추출' },
-  { id: 'issue_judge', label: '이슈 후보 판단', stageKey: 'verifier_issue_judge', stageLabel: '이슈 후보 판단' },
-  { id: 'issue_classification', label: '이슈 유형 분류', stageKey: 'verifier_issue_classification', stageLabel: '이슈 유형 분류' },
-  { id: 'final_verification', label: '멀티 LLM 검증', stageKey: 'verifier_final_verification', stageLabel: '멀티 LLM 검증' },
-  { id: 'web_grounding', label: '웹 근거 검증', stageKey: 'verifier_web_grounding', stageLabel: '웹 근거 검증' },
+  { id: 'claim_extraction', label: 'claim 추출', stageKey: 'verifier_claim_extraction', stageLabel: 'claim 추출' },
+  { id: 'issue_judge', label: '오류 탐지', stageKey: 'verifier_issue_judge', stageLabel: '오류 탐지' },
+  { id: 'issue_classification', label: '오류 유형 분류', stageKey: 'verifier_issue_classification', stageLabel: '오류 유형 분류' },
+  // 웹 근거 수집으로 사실/시의성 오류 후보를 걸러내는 단계. 백엔드 실행 순서상
+  // 유형 분류 다음, 최종 판단 이전이다.
+  { id: 'web_grounding', label: '오류 필터링', stageKey: 'verifier_web_grounding', stageLabel: '오류 필터링' },
+  { id: 'final_verification', label: '오류 최종 판단', stageKey: 'verifier_final_verification', stageLabel: '오류 최종 판단' },
   // 슬라이드 검사/문법·코드 오류 점검도 서로 독립된 검사라 백엔드가 각자 진행 상태를
   // 따로 보고한다(pipeline/verifier/classified_slide_error_checker.py).
   { id: 'slide_inspect', label: '슬라이드 검사', stageKey: 'verify_slide_inspect', stageLabel: '슬라이드 검사' },

@@ -352,61 +352,66 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .detail-video { width: 100%; border-radius: 12px; background: #000; max-height: 420px; }
 .detail-actions { margin-top: 4px; }
 
-.stage-pipeline {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
-  padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--card);
+/* 단계 탭 줄 + 요약 노드 줄을 한 패널로. 두 줄 다 같은 5칸 그리드라 세로 정렬이 맞는다. */
+.stage-flow {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--card);
 }
-.stage-pipeline-step {
-  display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px;
+.stage-flow-tabs,
+.stage-flow-nodes {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 22px; align-items: stretch;
+}
+.stage-flow-tab {
+  position: relative;
+  display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 8px; border-radius: 10px;
   border: 1px solid transparent; background: none; cursor: pointer; font: inherit; color: var(--muted);
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  min-width: 0;
 }
-.stage-pipeline-step:hover { color: var(--text); }
-.stage-pipeline-step.is-active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--text); }
-.stage-pipeline-index {
-  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; flex-shrink: 0;
-  border-radius: 50%; background: var(--surface-2); color: var(--muted); font-size: 0.74rem; font-weight: 800;
+/* 단계 사이 화살표 — 그리드 gap 안에 절대배치라 열 정렬에 영향 없음. */
+.stage-flow-tab:not(:last-child)::after {
+  content: '→';
+  position: absolute; right: -15px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); font-size: 0.95rem; line-height: 1; pointer-events: none;
+}
+.stage-flow-tab:hover { color: var(--text); }
+.stage-flow-tab.is-active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--text); }
+.stage-flow-index {
+  display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex-shrink: 0;
+  border-radius: 50%; background: var(--surface-2); color: var(--muted); font-size: 0.72rem; font-weight: 800;
   transition: background 0.15s ease, color 0.15s ease;
 }
-.stage-pipeline-step.is-active .stage-pipeline-index { background: var(--primary); color: var(--text); }
-.stage-pipeline-label { font-size: 0.86rem; font-weight: 600; white-space: nowrap; }
-.stage-pipeline-arrow { display: flex; align-items: center; color: var(--muted); flex-shrink: 0; }
-.stage-pipeline-arrow svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.stage-flow-tab.is-active .stage-flow-index { background: var(--primary); color: var(--text); }
+/* 창이 좁아지면 글자만 줄여 한 줄을 유지 (줄바꿈·말줄임 대신 축소). */
+.stage-flow-label {
+  min-width: 0;
+  font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: clamp(0.58rem, 1.35vw, 0.82rem);
+}
 @media (max-width: 640px) {
-  .stage-pipeline-label { display: none; }
+  .stage-flow-tabs, .stage-flow-nodes { gap: 16px; }
+  .stage-flow-tab:not(:last-child)::after { right: -12px; font-size: 0.85rem; }
+}
+@media (max-width: 460px) {
+  .stage-flow-label { display: none; }
+  .flow-node-row, .flow-branch-row, .flow-detail-row { font-size: 0.72rem; }
+  .flow-node { padding: 8px 8px; }
 }
 
-.flow-summary {
-  border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 14px 16px;
-}
-.flow-summary-head { font-size: 0.78rem; font-weight: 700; color: var(--muted); margin-bottom: 10px; }
-.flow-summary-row { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
-.flow-column { flex: 1 1 0; min-width: 168px; display: flex; flex-direction: column; gap: 6px; }
-.flow-column-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.flow-column-title {
-  font-size: 0.72rem; font-weight: 800; color: var(--muted); letter-spacing: 0.01em;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.flow-detail-toggle {
-  flex-shrink: 0; border: none; background: none; color: var(--primary); font-size: 0.7rem; font-weight: 700;
-  cursor: pointer; padding: 0;
-}
 .flow-node { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); padding: 9px 10px; }
 .flow-node-row, .flow-branch-row, .flow-detail-row {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 0.78rem; padding: 2px 0;
 }
-.flow-node-row span, .flow-branch-row span, .flow-detail-row span { color: var(--muted); }
-.flow-node-row strong, .flow-branch-row strong, .flow-detail-row strong { color: var(--text); font-weight: 800; }
+.flow-node-row span, .flow-branch-row span, .flow-detail-row span {
+  color: var(--muted); min-width: 0; overflow-wrap: anywhere;
+}
+.flow-node-row strong, .flow-branch-row strong, .flow-detail-row strong {
+  color: var(--text); font-weight: 800; flex-shrink: 0;
+}
 .flow-branch-rows { margin-top: 2px; }
 .flow-node-detail { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
 .flow-detail-divider { height: 1px; background: var(--border); margin: 4px 0; }
-.flow-summary-arrow { flex: 0 0 auto; align-self: center; color: var(--muted); }
-.flow-summary-arrow svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-@media (max-width: 900px) {
-  .flow-summary-row { flex-wrap: wrap; }
-  .flow-summary-arrow { display: none; }
-  .flow-column { min-width: 45%; }
-}
 
 .stage-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; }
 .stage-filter-btn {
@@ -857,6 +862,28 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
   font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--slate);
 }
 .claim-tag--type { background: var(--surface-2); color: var(--slate); font-weight: 600; }
+/* 유형/분류 칩 — 파랑 계열 한 묶음 (값별 색은 --tag-color) */
+.claim-tag--cat {
+  font-weight: 700;
+  color: var(--tag-color, #2563eb);
+  background: color-mix(in srgb, var(--tag-color, #2563eb) 12%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--tag-color, #2563eb) 32%, transparent);
+}
+/* 모델 칩 — 중립 회색 + 브랜드 색 점 한 묶음 */
+.claim-tag--model {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--surface-2); color: var(--slate); font-weight: 600;
+}
+.claim-tag--model::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--tag-color, var(--muted));
+}
+/* 판정 사유 칩 — 의미색 한 묶음 */
+.claim-tag--reject { background: var(--red-soft); color: var(--red); font-weight: 700; }
+.claim-tag--accept { background: var(--green-soft); color: var(--green); font-weight: 700; }
+.claim-tag--review { background: var(--amber-soft); color: var(--amber); font-weight: 700; }
+/* 부가 정보 칩 (슬라이드·상태 등) — 흐린 회색 */
+.claim-tag--muted { background: var(--surface-2); color: var(--muted); }
 .claim-tag--type-factual_error { background: var(--red-soft); color: var(--red); }
 .claim-tag--type-temporal_error { background: var(--amber-soft); color: var(--amber); }
 .claim-tag--type-scope_overclaim { background: var(--info-soft); color: var(--info); }
@@ -897,15 +924,16 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .claim-card--compact .claim-card-index { font-size: 0.7rem; }
 .claim-card--compact .claim-tag,
 .claim-card--compact .claim-location-chip { font-size: 0.66rem; padding: 1px 7px; }
-.claim-card--compact .claim-text { margin-top: 3px; font-size: 0.82rem; font-weight: 500; line-height: 1.4; }
+.claim-card--compact .claim-text { margin-top: 4px; font-size: 0.95rem; font-weight: 500; line-height: 1.45; }
 .claim-card--compact .claim-card-toggle { width: 18px; height: 18px; font-size: 0.8rem; }
 .claim-card--compact .claim-detail { margin-top: 8px; }
-.claim-card--compact .claim-detail-body { gap: 8px; padding-top: 6px; }
+.claim-card--compact .claim-detail-body { gap: 8px; padding-top: 0; }
 .claim-card--compact .claim-detail-group { padding-top: 8px; }
+.claim-card--compact .claim-detail-group--no-divider { padding-top: 0; }
 .claim-card--compact .slide-error-change { font-size: 0.86rem; }
 
 .claim-detail {
-  margin-top: 12px; padding-top: 2px;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
 }
 .claim-detail-body { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
 .claim-detail-group { border-top: 1px solid var(--surface-2); padding-top: 6px; }
