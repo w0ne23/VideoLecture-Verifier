@@ -802,9 +802,19 @@ def _call_anthropic(
             create_method=client.messages.create,
         )
     )
-    if "sonnet-5" not in model.lower():
-        request_kwargs["temperature"] = 0.0
-    resp = client.messages.create(**request_kwargs)
+    # Some Anthropic models/SDK call shapes reject the legacy sampling parameter
+    # (Sonnet 5 with HTTP 400, Opus 4.8 with a client-side TypeError when
+    # combined with Structured Outputs) — which one varies by model and SDK
+    # version, so instead of hardcoding model names we try with it and drop it
+    # on that specific failure.
+    request_kwargs["temperature"] = 0.0
+    try:
+        resp = client.messages.create(**request_kwargs)
+    except Exception as exc:
+        if "temperature" not in request_kwargs or "temperature" not in str(exc).lower():
+            raise
+        request_kwargs.pop("temperature")
+        resp = client.messages.create(**request_kwargs)
     content_blocks = list(getattr(resp, "content", []) or [])
     tool_blocks = [
         block for block in content_blocks
@@ -1097,11 +1107,18 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 time.sleep(retry_wait)
         except Exception as exc:
             last_exc = exc
+            # anthropic.APIConnectionError.__str__() is always the hardcoded
+            # "Connection error." regardless of the real cause — surface the
+            # wrapped cause too so a genuine root cause (TLS, DNS, proxy, ...)
+            # is visible instead of just that generic string.
+            cause = getattr(exc, "__cause__", None)
+            detail = f"{type(exc).__name__}: {exc}" + (f" (caused by {type(cause).__name__}: {cause})" if cause else "")
             if attempt >= attempts:
+                print(f"    [{model}] batch {batch_index}/{total_batches} 최종 실패: {detail}", flush=True)
                 raise
             print(
                 f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
-                f"{attempt}/{attempts - 1}: {exc}",
+                f"{attempt}/{attempts - 1}: {detail}",
                 flush=True,
             )
             if retry_wait:
