@@ -1964,8 +1964,22 @@ def _extract_slides_staged(
     output_dir: str,
     debug: bool = False,
     decode_backend: str | None = None,
+    progress_callback=None,
 ) -> list[dict]:
     import time
+
+    # 아래 Step 0 ~ 4B-6은 항상 이 순서대로, 정확히 이 개수(23개)만 실행되는 고정
+    # 시퀀스다 — 배치 크기처럼 실행 전에는 모르는 값이 아니라 코드에 이미 정해져
+    # 있는 상수라서, 각 단계가 끝날 때마다 (완료 단계 수, 23)을 그대로 실측
+    # 진행률로 보고할 수 있다.
+    _STAGED_TOTAL_STEPS = 23
+    _step_counter = 0
+
+    def _tick() -> None:
+        nonlocal _step_counter
+        _step_counter += 1
+        if progress_callback:
+            progress_callback(_step_counter, _STAGED_TOTAL_STEPS)
 
     try:
         from .annotation_from_cache import detect_annotations
@@ -2009,11 +2023,13 @@ def _extract_slides_staged(
         workers=int(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2")),
     )
     log.info("  Step 0 done: sample cache 생성 elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     log.info("  Step 1: timeline region 분류")
     step_t0 = time.perf_counter()
     region_payload = classify_regions(str(cache_dir), str(regions_dir))
     log.info("  Step 1 done: timeline region 분류 elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
     regions_path = regions_dir / "timeline_segments.json"
 
     log.info("  Step 2: slide region scene/base 추출")
@@ -2025,12 +2041,14 @@ def _extract_slides_staged(
         regions_path=str(regions_path),
     )
     log.info("  Step 2 done: slide region scene/base 추출 elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
     scenes_path = scenes_dir / "scene_transitions.json"
 
     log.info("  Step 3: scene 내부 annotation frame 추출")
     step_t0 = time.perf_counter()
     detect_annotations(str(cache_dir), str(scenes_path), str(annotations_dir))
     log.info("  Step 3 done: scene 내부 annotation frame 추출 elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
     annotations_path = annotations_dir / "scene_annotations.json"
 
     log.info("  Step 4A: LocalVLM review용 임시 frame materialize")
@@ -2058,17 +2076,20 @@ def _extract_slides_staged(
             decode_backend=decode_backend or Config.DECODE_BACKEND,
         )
     log.info("  Step 4A done: LocalVLM review용 임시 frame materialize elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     review_metadata_path = review_dir / "metadata.json"
     with open(review_metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
     log.info("  Step 4A-1 done: review metadata load elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     cfg = Config()
     step_t0 = time.perf_counter()
     metadata = reparent_annotations_to_next_base(metadata, review_dir)
     log.info("  Step 4A-1b done: missed-cut annotation reparent elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     # Remove transient scenes before building OCR/VLM candidates.  Otherwise a
@@ -2076,18 +2097,22 @@ def _extract_slides_staged(
     # been judged as separate, so the newly-adjacent pair is never reviewed.
     metadata = drop_short_lived_slide_scenes(metadata, cfg)
     log.info("  Step 4A-1c done: drop_short_lived_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = mark_clean_final_frames(metadata)
     log.info("  Step 4A-2 done: mark_clean_final_frames elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = mark_visual_duplicates(metadata, review_dir, cfg)
     log.info("  Step 4A-3 done: mark_visual_duplicates elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     add_transition_review_candidates(review_dir, scenes_path, metadata)
     log.info("  Step 4A-4 done: add_transition_review_candidates elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     # local_vlm._prepare_review_candidates regenerates chronological build
     # candidates from review_slides/metadata.json.  The file originally written
@@ -2098,61 +2123,73 @@ def _extract_slides_staged(
     with open(review_metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     log.info("  Step 4A-4b done: LocalVLM review metadata sync elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = maybe_run_local_vlm_review(metadata, review_dir)
     log.info("  Step 4A-5 done: maybe_run_local_vlm_review elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = collapse_contiguous_same_slide_scenes(metadata, review_dir=review_dir)
     log.info("  Step 4A-6 done: collapse_contiguous_same_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = remap_metadata_for_final_materialize(metadata)
     log.info("  Step 4A-7 done: remap_metadata_for_final_materialize elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     fps, total_frames, _, _ = _video_metadata(input_path)
     duration = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
     log.info("  Step 4A-8 done: video metadata reload elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata = refresh_scene_time_ranges(metadata, duration)
     metadata = mark_clean_final_frames(metadata)
     metadata = finalize_scene_slide_metadata(metadata)
     log.info("  Step 4A-9 done: metadata finalize elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     log.info("  Step 4B: VLM 판정 반영 후 최종 frame materialize")
     step_t0 = time.perf_counter()
     _materialize_metadata_frames(input_path, out_path, metadata)
     _verify_materialized_metadata_frames(input_path, out_path, metadata)
     log.info("  Step 4B-1 done: final frame materialize elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     copy_local_vlm_review_artifacts(review_dir, out_path)
     log.info("  Step 4B-2 done: copy_local_vlm_review_artifacts elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     log_scene_slide_summary(metadata)
     log.info("  Step 4B-3 done: log_scene_slide_summary elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     metadata_path = out_path / "metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     log.info("  Step 4B-4 done: metadata.json write elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     scene_slide_map_path = out_path / "scene_slide_map.json"
     with open(scene_slide_map_path, "w", encoding="utf-8") as f:
         json.dump(build_scene_slide_map(metadata), f, ensure_ascii=False, indent=2)
     log.info("  Step 4B-5 done: scene_slide_map.json write elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     step_t0 = time.perf_counter()
     canonical_slide_annotations_path = out_path / "canonical_slide_annotations.json"
     with open(canonical_slide_annotations_path, "w", encoding="utf-8") as f:
         json.dump(build_canonical_slide_annotations(metadata), f, ensure_ascii=False, indent=2)
     log.info("  Step 4B-6 done: canonical_slide_annotations.json write elapsed=%.1fs", _elapsed(step_t0))
+    _tick()
 
     video_count = sum(1 for item in metadata if item.get("scene_type") == "video" and item.get("capture_type") == "base")
     scene_count = len({m["scene_index"] for m in metadata if m.get("scene_index") is not None})
@@ -2176,13 +2213,16 @@ def extract_slides(
     decode_backend: str | None = None,
     extract_workers: int | None = None,
     use_staged: bool = True,
+    progress_callback=None,
 ):
     if use_staged:
         if decode_backend:
             log.info("staged slide_extractor decode_backend=%s", decode_backend)
         if extract_workers is not None:
             log.info("staged slide_extractor에서는 extract_workers=%s 설정을 사용하지 않습니다.", extract_workers)
-        return _extract_slides_staged(input_path, output_dir, debug=debug, decode_backend=decode_backend)
+        return _extract_slides_staged(
+            input_path, output_dir, debug=debug, decode_backend=decode_backend, progress_callback=progress_callback
+        )
 
     return _extract_slides_legacy(
         input_path=input_path,

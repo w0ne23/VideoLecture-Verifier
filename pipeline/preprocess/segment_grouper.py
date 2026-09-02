@@ -15,6 +15,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
 
 from google.genai import types
 
@@ -366,16 +367,22 @@ def group_segments_by_scene_and_context(
     *,
     use_llm_merge: bool = True,
     use_pause_sentence: bool = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 의미 전환점 기준으로 컨텍스트 구성.
     use_pause_sentence: True면 침묵/문장끝 기준 분할 추가 (나중에 사용할 옵션).
+    progress_callback(done, total)이 주어지면 scene별 LLM 경계 판단(job)이 하나
+    끝날 때마다 실측 진행률을 보고한다. 병렬 LLM job이 하나도 없으면(use_llm_merge=False
+    이거나 여러 세그먼트를 가진 scene이 없으면) 즉시 (0, 0)으로 완료 처리한다.
 
     반환: (groups_flat, scenes_structure)
     - groups_flat: 강조 분석용 그룹 리스트 (start, end, text, segment_indices, scene_index, context_index_in_scene)
     - scenes_structure: 최종 JSON용 [ { scene_index, slide_number, start_sec, end_sec, text, contexts: [...] } ]
     """
     if not segments or not scene_ranges:
+        if progress_callback:
+            progress_callback(0, 0)
         return [], []
 
     seg_to_scene = []
@@ -418,6 +425,8 @@ def group_segments_by_scene_and_context(
     ]
     if llm_jobs:
         worker_count = min(_effective_context_parallel_requests(), len(llm_jobs))
+        total_jobs = len(llm_jobs)
+        done_jobs = 0
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_map = {
                 executor.submit(decide_context_breaks, groups): entry_index
@@ -429,6 +438,13 @@ def group_segments_by_scene_and_context(
                     break_after_by_entry[entry_index] = set(future.result() or set())
                 except Exception:
                     break_after_by_entry[entry_index] = set()
+                if progress_callback:
+                    done_jobs += 1
+                    progress_callback(done_jobs, total_jobs)
+    elif progress_callback:
+        # LLM 경계 판단이 필요한 scene이 하나도 없으면(use_llm_merge=False거나 전부
+        # 세그먼트 1개짜리 scene) band를 즉시 완료 처리한다.
+        progress_callback(0, 0)
 
     scenes_structure = []
     groups_flat = []

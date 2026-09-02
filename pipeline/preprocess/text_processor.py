@@ -14,7 +14,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Callable, Optional
 
 from dotenv import load_dotenv
 from google import genai
@@ -1423,11 +1423,16 @@ def _prepare_pass3_jobs(
     textualized_data: dict,
     textualized_dir: Path,
     use_pass2: bool = True,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> dict:
     """Pass1/Pass2를 실행해 Pass3 검증용 후보 job을 만든다.
 
     Pass3 재현성 테스트 등에서 동일한 Pass1/2 후보 세트를 재사용하기 위해
     correct_segments_three_pass에서 Pass1/2 단계만 분리했다.
+
+    progress_callback(band, done, total)이 주어지면 job이 하나씩 끝날 때마다
+    "pass1"/"pass2" 두 band로 나눠 보고한다 — 한 job 안에서 Pass1을 마친 시점과
+    (use_pass2면) Pass2까지 마친 시점을 따로 신호한다.
     """
     scene_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
     scene_meta_by_index = _build_scene_metadata_index(metadata)
@@ -1482,6 +1487,25 @@ def _prepare_pass3_jobs(
             f"batch별 현재±{glossary_window} 슬라이드만 사용"
         )
 
+    progress_lock = Lock()
+    pass1_done = 0
+    pass2_done = 0
+
+    def _tick(band: str) -> None:
+        # parallel_jobs는 이 함수가 호출되는 시점(=executor 제출 이후)에는 이미 다
+        # 채워져 있으므로, 총량으로 그냥 len(parallel_jobs)를 읽어도 된다.
+        nonlocal pass1_done, pass2_done
+        if not progress_callback:
+            return
+        with progress_lock:
+            if band == "pass1":
+                pass1_done += 1
+                done = pass1_done
+            else:
+                pass2_done += 1
+                done = pass2_done
+        progress_callback(band, done, len(parallel_jobs))
+
     def process_sub_batch(
         sub: list[tuple[int, dict]],
         context: str,
@@ -1489,11 +1513,16 @@ def _prepare_pass3_jobs(
         glossary: str = "",
     ) -> tuple[str, list[dict]]:
         pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
+        _tick("pass1")
         if not use_pass2:
+            # Pass2를 아예 안 쓰는 실행이면 그 band는 각 job이 끝나는 대로 바로
+            # 다 찬 것으로 본다 — Pass1과 동시에 완료 신호를 보낸다.
+            _tick("pass2")
             return context, _build_pass3_items(sub, pass1, {})
 
         pass2_batch = _build_pass2_batch_from_pass1(sub, pass1)
         pass2 = _correct_batch_pass2(pass2_batch, context, glossary=glossary)
+        _tick("pass2")
         return context, _build_pass3_items(sub, pass1, pass2)
 
     parallel_jobs: list[tuple[list[tuple[int, dict]], str, str, str]] = []
@@ -1530,6 +1559,12 @@ def _prepare_pass3_jobs(
             sub = no_slide[offset:offset + BATCH_SIZE]
             parallel_jobs.append((sub, "", "", ""))
 
+    if not parallel_jobs and progress_callback:
+        # 교정 대상 자체가 없으면 job이 하나도 안 도니 _tick이 안 불린다 — 두 band를
+        # 즉시 완료 처리해서 뒤 단계(그룹화)가 기다리지 않게 한다.
+        progress_callback("pass1", 0, 0)
+        progress_callback("pass2", 0, 0)
+
     pass12_workers = _effective_parallel_requests(PASS1_TEXT_MODEL, PASS2_TEXT_MODEL)
     print(
         f"    총 {len(parallel_jobs)}개 batch를 최대 {pass12_workers}개 병렬로 교정 중...",
@@ -1562,15 +1597,20 @@ def _prepare_pass3_jobs(
     }
 
 
-def _run_pass3_jobs(pass3_jobs: list[tuple[list[dict], str]]) -> dict[int, dict]:
+def _run_pass3_jobs(
+    pass3_jobs: list[tuple[list[dict], str]],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> dict[int, dict]:
     """Pass3(merge_pass3_items)만 실행. PASS3_TEXT_MODEL을 바꿔가며 동일한
     pass3_jobs(=동일 Pass1/2 후보)를 재사용해 재현성을 테스트할 때 쓴다."""
     all_corrections: dict[int, dict] = {}
     total_pass3_items = sum(len(items) for items, _ in pass3_jobs)
     if pass3_jobs:
         pass3_workers = _effective_parallel_requests(PASS3_TEXT_MODEL)
+        total_jobs = len(pass3_jobs)
+        done_jobs = 0
         print(
-            f"    Pass3 후보 {total_pass3_items}개를 {len(pass3_jobs)}개 batch로 검증 중...",
+            f"    Pass3 후보 {total_pass3_items}개를 {total_jobs}개 batch로 검증 중...",
             end="",
             flush=True,
         )
@@ -1582,7 +1622,13 @@ def _run_pass3_jobs(pass3_jobs: list[tuple[list[dict], str]]) -> dict[int, dict]
             for future in as_completed(futures):
                 all_corrections.update(future.result())
                 print(".", end="", flush=True)
+                if progress_callback:
+                    done_jobs += 1
+                    progress_callback(done_jobs, total_jobs)
         print()
+    elif progress_callback:
+        # 검증할 Pass3 후보가 아예 없으면 band를 즉시 완료 처리한다.
+        progress_callback(0, 0)
     return all_corrections
 
 
@@ -1653,12 +1699,26 @@ def correct_segments_three_pass(
     textualized_data: dict,
     textualized_dir: Path,
     use_pass2: bool = True,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> list[dict]:
+    """progress_callback(band, done, total)이 주어지면 "pass1"/"pass2"/"pass3" 세 band로
+    나눠 실측 진행률을 보고한다. band별 총량은 그 band가 시작되는 시점에만 알면 된다
+    (Pass1/2 총량은 job 리스트가 다 만들어진 직후, Pass3 총량은 Pass1/2가 끝난 직후)."""
     if not segments:
+        if progress_callback:
+            progress_callback("pass1", 0, 0)
+            progress_callback("pass2", 0, 0)
+            progress_callback("pass3", 0, 0)
         return []
 
-    prepared = _prepare_pass3_jobs(segments, metadata, textualized_data, textualized_dir, use_pass2)
-    all_corrections = _run_pass3_jobs(prepared["pass3_jobs"])
+    prepared = _prepare_pass3_jobs(
+        segments, metadata, textualized_data, textualized_dir, use_pass2,
+        progress_callback=progress_callback,
+    )
+    pass3_callback = None
+    if progress_callback:
+        pass3_callback = lambda done, total: progress_callback("pass3", done, total)
+    all_corrections = _run_pass3_jobs(prepared["pass3_jobs"], progress_callback=pass3_callback)
     return _assemble_corrected_segments(
         segments,
         prepared["seg_scene"],
