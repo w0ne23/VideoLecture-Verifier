@@ -57,20 +57,20 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-# Ollama는 인증이 필요 없지만 OpenAI SDK가 빈 문자열 키를 거부하므로 더미 값을 쓴다.
+# Ollama는 인증이 필요 없지만 OpenAI SDK가 빈 문자열 키를 거부하므로 더미 값을 사용
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
 
 # ──────────────────────────────────────────────────────────────
 # API 클라이언트 (lazy init)
 #
-# import 시점에는 아무 클라이언트도 만들지 않는다. 실제 사용 시점에 생성하고,
+# import 시점에는 아무 클라이언트도 만들지 않음, 실제 사용 시점에 생성하고,
 # 필수 키(Gemini/Groq)가 없으면 그때 어떤 환경변수가 왜 필요한지 명시한
-# RuntimeError를 낸다. 기존 코드의 `from .config import gemini_client` 같은
-# 접근은 아래 모듈 __getattr__(PEP 562)이 받아서 처리한다.
+# RuntimeError를 발생, 기존 코드의 `from .config import gemini_client` 같은
+# 접근은 아래 모듈 __getattr__(PEP 562)이 받아서 처리
 # ──────────────────────────────────────────────────────────────
 
-# name -> (생성에 쓴 키 조합, 클라이언트). 키가 바뀌면 재생성한다.
+# name -> (생성에 쓴 키 조합, 클라이언트), 키가 바뀌면 재생성
 _client_cache: dict[str, tuple[str, object | None]] = {}
 
 
@@ -89,13 +89,13 @@ def _gemini_env_keys() -> tuple[str, str]:
     return key_1, key_2
 
 
-# 응답이 오지 않고 무한정 걸리는 요청을 잡아내기 위한 요청 타임아웃(ms).
-# 미설정 시 SDK/httpx 기본값에 맡겨져 한 요청이 스레드를 영구히 붙잡을 수 있다.
+# 응답이 오지 않고 무한정 걸리는 요청을 잡아내기 위한 요청 타임아웃(ms)
+# 미설정 시 SDK/httpx 기본값에 맡겨져 한 요청이 스레드를 영구히 붙잡을 수 있음
 GEMINI_REQUEST_TIMEOUT_MS = int(os.getenv("VLVERIFIER_GEMINI_TIMEOUT_MS", "120000"))
 
 
 def get_gemini_client():
-    """비디오 파이프라인용 Gemini 클라이언트. 키가 없으면 명확한 에러."""
+    """비디오 파이프라인용 Gemini 클라이언트, 키가 없으면 명확한 에러"""
     key_1, _ = _gemini_env_keys()
     if not key_1:
         raise RuntimeError(
@@ -112,7 +112,7 @@ def get_gemini_client():
 
 
 def get_gemini_client_2():
-    """오디오 파이프라인용 Gemini 클라이언트. 키가 없으면 명확한 에러."""
+    """오디오 파이프라인용 Gemini 클라이언트, 키가 없으면 명확한 에러"""
     _, key_2 = _gemini_env_keys()
     if not key_2:
         raise RuntimeError(
@@ -129,7 +129,7 @@ def get_gemini_client_2():
 
 
 def get_groq_client():
-    """Groq(Whisper 전사) 클라이언트. 키가 없으면 명확한 에러."""
+    """Groq(Whisper 전사) 클라이언트, 키가 없으면 명확한 에러"""
     key = os.getenv("GROQ_API_KEY") or ""
     if not key:
         raise RuntimeError(
@@ -158,7 +158,7 @@ DEFAULT_OUTPUT_DIR = Path("output")          # 모든 분석 결과
 
 def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Path]:
     """
-    영상 stem과 디렉토리로 모든 출력 경로를 한 번에 반환.
+    영상 stem과 디렉토리로 모든 출력 경로를 한 번에 반환
 
     사용 예:
         paths = output_paths("lecture", Path("output"), Path("output_slides"))
@@ -179,6 +179,7 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
     }
 
 
+# LiteLLM 게이트웨이 사용 여부, LITELLM_ENABLED 환경변수로 제어
 def is_litellm_enabled() -> bool:
     return (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
         "1", "true", "yes", "on"
@@ -186,11 +187,11 @@ def is_litellm_enabled() -> bool:
 
 
 def get_openai_api_config() -> tuple[str, str]:
-    """Return the active OpenAI-compatible key and base URL.
+    """현재 활성화된 OpenAI 호환 키와 base URL 반환
 
-    LiteLLM is deliberately opt-in.  When enabled, the existing OpenAI
-    client callers use the gateway without needing a second SDK or provider-
-    specific branch.  Native Anthropic/Gemini/xAI callers remain unchanged.
+    LiteLLM은 명시적 opt-in 방식, 활성화하면 기존 OpenAI 클라이언트 호출부가
+    별도 SDK나 provider별 분기 없이 게이트웨이를 그대로 사용, 네이티브
+    Anthropic/Gemini/xAI 호출부는 그대로 유지
     """
     if is_litellm_enabled():
         return (
@@ -203,6 +204,7 @@ def get_openai_api_config() -> tuple[str, str]:
     )
 
 
+# OpenAI(또는 LiteLLM 게이트웨이) 클라이언트, 키/base_url 조합이 바뀌면 재생성
 def get_openai_client():
     current_key, current_base_url = get_openai_api_config()
     cache_key = f"{current_key}|{current_base_url}"
@@ -220,6 +222,7 @@ def get_openai_client():
     )
 
 
+# xAI(Grok) 클라이언트, OpenAI 호환 SDK 사용
 def get_xai_client():
     current_key = os.getenv("XAI_API_KEY") or ""
     current_base_url = os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1"
@@ -233,6 +236,7 @@ def get_xai_client():
     )
 
 
+# DeepSeek 클라이언트, OpenAI 호환 SDK 사용
 def get_deepseek_client():
     current_key = os.getenv("DEEPSEEK_API_KEY") or ""
     current_base_url = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
@@ -246,6 +250,7 @@ def get_deepseek_client():
     )
 
 
+# Ollama 클라이언트, OpenAI 호환 SDK 사용
 def get_ollama_client():
     current_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
     current_base_url = os.getenv("OLLAMA_BASE_URL") or "http://ollama:11434/v1"
@@ -261,10 +266,10 @@ def get_ollama_client():
 
 def get_anthropic_client():
     current_key = os.getenv("ANTHROPIC_API_KEY") or ""
-    # .env documents "empty = SDK default", but os.getenv's default only kicks in
-    # when the var is unset — a set-but-empty ANTHROPIC_BASE_URL (as env_file
-    # produces from `ANTHROPIC_BASE_URL=`) silently built an empty base_url and
-    # broke every Anthropic call with a generic connection error.
+    # .env 문서상 "비어있으면 SDK 기본값"이지만, os.getenv의 default는 변수 자체가
+    # 없을 때만 적용됨 — env_file이 `ANTHROPIC_BASE_URL=`처럼 값은 있지만 빈 문자열로
+    # 설정하면 조용히 빈 base_url이 만들어져 모든 Anthropic 호출이 일반적인 연결
+    # 오류로 실패하던 문제가 있었음
     current_base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
     return _cached_client(
         "anthropic", f"{current_key}|{current_base_url}",
@@ -276,6 +281,7 @@ def get_anthropic_client():
     )
 
 
+# 사용 가능한 Gemini 클라이언트를 (이름, 클라이언트) 순서 목록으로 반환, key_2 우선
 def get_gemini_client_sequence():
     key_1, key_2 = _gemini_env_keys()
     seq = []
@@ -290,9 +296,9 @@ def get_gemini_client_sequence():
     return seq
 
 
-# 기존 모듈 전역 클라이언트 이름 호환 (PEP 562).
+# 기존 모듈 전역 클라이언트 이름 호환 (PEP 562)
 # `from .config import gemini_client` / `config.groq_client` 접근 시 이 함수가 호출되어
-# 그 시점에 클라이언트를 생성한다. 값을 모듈에 저장하지 않으므로 매 접근마다 캐시를 거친다.
+# 그 시점에 클라이언트를 생성, 값을 모듈에 저장하지 않으므로 매 접근마다 캐시를 거침
 _LAZY_CLIENT_GETTERS = {
     "gemini_client": get_gemini_client,
     "gemini_client_2": get_gemini_client_2,
@@ -304,6 +310,7 @@ _LAZY_CLIENT_GETTERS = {
 }
 
 
+# 위 _LAZY_CLIENT_GETTERS에 등록된 이름에 한해 lazy client getter 호출
 def __getattr__(name: str):
     getter = _LAZY_CLIENT_GETTERS.get(name)
     if getter is None:
@@ -311,6 +318,7 @@ def __getattr__(name: str):
     return getter()
 
 
+# 축약/별칭 형태의 모델명을 실제 Anthropic 모델 ID로 변환, 매칭 없으면 원본 반환
 def resolve_anthropic_model(model_name: str) -> str:
     aliases = {
         "haiku-4.5": "claude-haiku-4-5-20251001",

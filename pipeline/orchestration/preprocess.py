@@ -1,3 +1,4 @@
+# 슬라이드 추출/오디오 품질 분석/전사/context 후처리 등 전처리 단계 실행 흐름
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,13 +8,13 @@ from pathlib import Path
 class _AudioTranscribeBandProgress:
     """"음성 전사" 노드(preprocess_audio_transcribe) 하나에 전사(P2B) + 텍스트 교정
     Pass1/2/3(P3) + 컨텍스트 그룹화(P3)까지 묶여 있어서, 각 band의 총량을 이 노드
-    시작 시점에 한 번에 알 수 없다 — 예를 들어 Pass1/2 job 개수는 전사가 다 끝나
-    segments가 나와야 알고, Pass3 후보 개수는 Pass1/2가 다 끝나야 안다.
+    시작 시점에 한 번에 알 수 없음 — 예를 들어 Pass1/2 job 개수는 전사가 다 끝나
+    segments가 나와야 알고, Pass3 후보 개수는 Pass1/2가 다 끝나야 앎
 
     그래서 5개 band(전사/Pass1/Pass2/Pass3/컨텍스트 그룹화)에 20%씩 고정 배분해두고,
-    각 band는 자기 band가 시작되는 시점에만 총량을 알면 되게 한다. 고정 칸이라 다음
-    band의 총량이 나중에 밝혀져도 이미 채워진 앞 band의 %가 줄어들지 않는다 — 항상
-    위로만 채워진다.
+    각 band는 자기 band가 시작되는 시점에만 총량을 알면 되도록 함, 고정 칸이라 다음
+    band의 총량이 나중에 밝혀져도 이미 채워진 앞 band의 %가 줄어들지 않음 — 항상
+    위로만 채워짐
     """
 
     BANDS = ("transcribe", "pass1", "pass2", "pass3", "context_group")
@@ -23,6 +24,7 @@ class _AudioTranscribeBandProgress:
         self._notify_stage = notify_stage
         self._stage_key = stage_key
 
+    # 지정 band 내 진행률을 5band 고정 배분 스킴 기준 전체 %로 환산해 notify
     def report(self, band: str, done: int, total: int) -> None:
         if not self._notify_stage:
             return
@@ -43,7 +45,7 @@ def run_preprocess_pipeline(
     notify_stage,
     helpers,
 ) -> dict:
-    """Run shared preprocessing stages used by verifier and graph workflows."""
+    """verifier/graph 워크플로가 공유하는 전처리 단계 실행"""
     helpers._banner("P1 extract_media — 슬라이드 추출 + 오디오 품질 분석")
     t_parallel = time.time()
     audio_analyze_result: dict = {}
@@ -51,8 +53,8 @@ def run_preprocess_pipeline(
     # 영상 레인(슬라이드 추출→텍스트화)과 오디오 레인(품질 분석→전사)은 실제로 서로
     # 독립된 ThreadPoolExecutor 작업이라, 각 future가 끝나는 시점에 그 레인만 개별
     # notify하면 두 레인이 진짜 따로 진행되다가 통합 텍스트(P3) 앞에서 자연히 합류하는
-    # 모습을 프론트가 그대로 보여줄 수 있다. 예전에는 두 레인을 "preprocess_extract_media"
-    # 하나로 묶어 보고해서 둘 중 하나만 끝나도 둘 다 끝난 것처럼 보였다.
+    # 모습을 프론트가 그대로 보여줄 수 있음 — 예전에는 두 레인을 "preprocess_extract_media"
+    # 하나로 묶어 보고해서 둘 중 하나만 끝나도 둘 다 끝난 것처럼 보였음
     notify_stage("preprocess_slide_extract", "run")
     notify_stage("preprocess_audio_quality", "run")
 
@@ -92,10 +94,10 @@ def run_preprocess_pipeline(
     # 다이어그램은 영상/오디오 레인 각각 2단계(슬라이드 추출→분석, 오디오 품질 분석→
     # 음성 전사)만 갖고 있어서, 슬라이드 쪽은 textualize_slides 하나로 "슬라이드 분석"이
     # 끝나지만 오디오 쪽은 transcribe_audio(P2B)에 이어 P3 process_audio(오디오 맥락
-    # 후처리)까지 마쳐야 "음성 전사"가 끝난 것으로 본다 — process_audio는 원래도 오디오
+    # 후처리)까지 마쳐야 "음성 전사"가 끝난 것으로 봄 — process_audio는 원래도 오디오
     # 세그먼트/장면 구조를 만드는 오디오 전용 후처리라 별도 노드를 새로 두지 않고 음성
-    # 전사 단계에 그대로 묶었다. 그래서 preprocess_audio_transcribe는 P2B가 끝나도 바로
-    # done 처리하지 않고 P3까지 끝난 뒤에 done을 보고한다.
+    # 전사 단계에 그대로 묶음, 그래서 preprocess_audio_transcribe는 P2B가 끝나도 바로
+    # done 처리하지 않고 P3까지 끝난 뒤에 done을 보고
     notify_stage("preprocess_slide_analyze", "run")
     notify_stage("preprocess_audio_transcribe", "run")
     audio_progress = _AudioTranscribeBandProgress(notify_stage)
@@ -155,7 +157,7 @@ def run_preprocess_pipeline(
 
 
 def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dict, *, helpers) -> Path:
-    """Persist the in-memory preprocess payload so graph_upload can resume later."""
+    """graph_upload이 나중에 재개할 수 있도록 메모리 상의 preprocess 결과를 파일로 저장"""
     audio_result = preprocess_result.get("audio_result") or {}
     transcript_result = preprocess_result.get("transcript_result") or {}
     manifest = {
@@ -181,7 +183,7 @@ def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dic
 
 
 def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict) -> dict:
-    """Restore preprocess_result from the manifest written by run_preprocess_pipeline."""
+    """run_preprocess_pipeline이 저장한 manifest에서 preprocess_result 복원"""
     manifest_path = output_dir / f"{stem}_preprocess_result.json"
     if not manifest_path.exists() or manifest_path.stat().st_size <= 0:
         raise FileNotFoundError(

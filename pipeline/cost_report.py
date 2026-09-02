@@ -1,9 +1,9 @@
 """
-Pipeline API usage and estimated cost reporting.
+파이프라인 API 사용량과 예상 비용 리포트
 
-This module intentionally records estimates, not billing-authoritative values.
-Provider invoices can differ because of free tier, cached tokens, regional pricing,
-batch mode, rounding, or model-specific image tokenization.
+이 모듈은 의도적으로 확정 청구액이 아닌 추정치만 기록
+provider 실제 청구액은 free tier, 캐시된 토큰, 지역별 가격, batch mode, 반올림,
+모델별 이미지 토큰화 방식 등에 따라 달라질 수 있음
 """
 
 from __future__ import annotations
@@ -38,11 +38,13 @@ _events: list[dict[str, Any]] = []
 _configured: dict[str, Any] = {}
 
 
+# 기록된 이벤트 전체 초기화
 def reset() -> None:
     with _lock:
         _events.clear()
 
 
+# 리포트 대상 stem/output_dir 등 실행 컨텍스트 설정
 def configure(*, stem: str, output_dir: Path | str) -> None:
     with _lock:
         _configured.clear()
@@ -55,6 +57,7 @@ def configure(*, stem: str, output_dir: Path | str) -> None:
         )
 
 
+# 값을 int로 안전 변환, 실패/None이면 0
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -62,6 +65,7 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+# Gemini 응답의 usage_metadata에서 토큰 사용량 추출 (snake_case/camelCase 필드명 모두 대응)
 def _usage_from_gemini_response(response: Any) -> dict[str, int]:
     usage = getattr(response, "usage_metadata", None) or getattr(response, "usageMetadata", None)
     if usage is None:
@@ -90,6 +94,7 @@ def _usage_from_gemini_response(response: Any) -> dict[str, int]:
     }
 
 
+# OpenAI 호환 응답의 usage에서 토큰 사용량 추출
 def _usage_from_openai_response(response: Any) -> dict[str, int]:
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -106,6 +111,7 @@ def _usage_from_openai_response(response: Any) -> dict[str, int]:
     }
 
 
+# 모델별 단가표 기준 토큰 사용량으로 예상 비용(USD) 계산, 단가 미등록 모델은 0
 def _estimate_token_cost_usd(model: str, usage: dict[str, int]) -> float:
     price = TOKEN_PRICES_USD_PER_1M.get(model)
     if not price:
@@ -120,6 +126,7 @@ def _estimate_token_cost_usd(model: str, usage: dict[str, int]) -> float:
     ) / 1_000_000
 
 
+# LLM 호출 1건을 비용 이벤트로 기록, usage 미제공 시 response에서 자동 추출
 def record_model_call(
     *,
     stage: str,
@@ -140,8 +147,8 @@ def record_model_call(
     usage = usage or {}
     usage_estimated = False
     if not _safe_int(usage.get("input_tokens")) and prompt_chars:
-        # Some APIs, notably embeddings in a few SDK versions, may not expose
-        # usage metadata. Keep the report useful with a rough chars/4 estimate.
+        # 일부 API(특히 몇몇 SDK 버전의 embeddings)는 usage metadata를 제공하지 않을 수 있음,
+        # 리포트가 무의미해지지 않도록 chars/4 어림값으로 대체 추정
         usage = dict(usage)
         usage["input_tokens"] = max(int(prompt_chars / 4), 1)
         usage["total_tokens"] = max(_safe_int(usage.get("total_tokens")), usage["input_tokens"])
@@ -172,6 +179,7 @@ def record_model_call(
         _events.append(event)
 
 
+# 오디오 처리(전사 등) 호출 1건을 비용 이벤트로 기록, 초 단위 시간을 시간당 단가로 환산
 def record_audio_call(
     *,
     stage: str,
@@ -197,6 +205,7 @@ def record_audio_call(
         _events.append(event)
 
 
+# 이벤트 1건의 수치를 집계 버킷에 누적
 def _add_event_to_bucket(bucket: dict[str, Any], event: dict[str, Any]) -> None:
     bucket["calls"] += 1
     bucket["estimated_cost_usd"] += float(event.get("estimated_cost_usd", 0.0) or 0.0)
@@ -216,6 +225,7 @@ def _add_event_to_bucket(bucket: dict[str, Any], event: dict[str, Any]) -> None:
     bucket["audio_seconds"] += float(event.get("audio_seconds", 0.0) or 0.0)
 
 
+# 집계 버킷 초기값 생성
 def _new_bucket() -> dict[str, Any]:
     return {
         "calls": 0,
@@ -234,6 +244,7 @@ def _new_bucket() -> dict[str, Any]:
     }
 
 
+# 파이프라인 밖(예: analyzer 서브프로세스)에서 집계된 토큰 사용량으로 예상 비용 계산
 def _estimate_external_token_usage(token_usage: dict[str, Any], model_hint: str) -> dict[str, Any]:
     total = token_usage.get("total", {}) if isinstance(token_usage, dict) else {}
     usage = {
@@ -252,6 +263,8 @@ def _estimate_external_token_usage(token_usage: dict[str, Any], model_hint: str)
     }
 
 
+# 기록된 이벤트를 stage별/model별로 집계하고, analyzer 외부 산출물의 토큰 사용량까지
+# 합쳐 최종 리포트 dict 생성
 def build_report(
     *,
     stem: str,
@@ -323,6 +336,7 @@ def build_report(
     }
 
 
+# build_report 결과를 {stem}_cost_report.json 파일로 저장
 def write_report(
     *,
     stem: str,
