@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 기존 review_slides 산출물에서 LocalVLM 이후 슬라이드 처리 단계만 재실행하는 스크립트
 from __future__ import annotations
 
 import argparse
@@ -21,6 +22,7 @@ from pipeline.preprocess.slide_extractor import (
 )
 
 
+# run_dir에서 강의 stem(파일명 접두어)을 metadata.json 파일명으로부터 추론
 def _find_stem(run_dir: Path) -> str:
     matches = sorted(
         path.name[:-len("_metadata.json")]
@@ -34,6 +36,7 @@ def _find_stem(run_dir: Path) -> str:
     return matches[0]
 
 
+# 입력 영상 경로 결정, 명시된 경로가 없으면 run_dir 기준 후보 경로들을 순회 탐색
 def _resolve_input_path(run_dir: Path, explicit_input: str | None) -> Path:
     if explicit_input:
         path = Path(explicit_input)
@@ -55,6 +58,7 @@ def _resolve_input_path(run_dir: Path, explicit_input: str | None) -> Path:
     )
 
 
+# review_slides/metadata.json 로드
 def _load_review_metadata(review_dir: Path) -> list[dict]:
     metadata_path = review_dir / "metadata.json"
     if not metadata_path.exists():
@@ -66,6 +70,9 @@ def _load_review_metadata(review_dir: Path) -> list[dict]:
     return payload
 
 
+# review_slides 메타데이터를 기준으로 VLM 재검토 이후 단계(슬라이드 병합, 시간 구간
+# 재계산, 최종 프레임 확정, 산출물 저장)를 다시 실행 — 전처리 전체를 재실행하지 않고
+# 이미 만들어진 review 산출물만 재사용
 def rerun_local_vlm_from_review(run_dir: Path, input_path: Path) -> dict[str, object]:
     slides_dir = run_dir / "slides"
     staged_dir = run_dir / "slides_staged"
@@ -113,9 +120,10 @@ def rerun_local_vlm_from_review(run_dir: Path, input_path: Path) -> dict[str, ob
     }
 
 
+# CLI 인자 정의: --run-dir(필수), --input(선택, 미지정 시 자동 탐색)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="기존 slides_staged/review_slides에서 LocalVLM 이후 단계를 다시 실행한다."
+        description="기존 slides_staged/review_slides에서 LocalVLM 이후 단계를 다시 실행"
     )
     parser.add_argument(
         "--run-dir",
@@ -130,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# run_dir/입력 영상을 확인한 뒤 재실행하고 결과 요약을 JSON으로 출력
 def main() -> int:
     args = build_parser().parse_args()
     run_dir = Path(args.run_dir).resolve()

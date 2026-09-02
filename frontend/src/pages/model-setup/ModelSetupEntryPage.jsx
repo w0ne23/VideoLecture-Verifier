@@ -1,3 +1,5 @@
+// Multi-LLM 설정 진입 화면 — 모델 등록 / 조합 구성 두 갈래
+
 import { useNavigate } from 'react-router-dom'
 import brainIcon from '../../assets/brain-icon-teal.png'
 import llmSetsIcon from '../../assets/group1-icon-teal.png'

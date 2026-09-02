@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 인접 슬라이드 전환 구간의 OCR 유사도를 비교하는 디버그 스크립트
 from __future__ import annotations
 
 import argparse
@@ -14,10 +15,12 @@ if str(REPO_ROOT) not in sys.path:
 from pipeline.preprocess.ocr_hint import compare_slide_ocr, ocr_similarity_threshold
 
 
+# 기본 검사 대상 씬 범위와 슬라이드 디렉터리
 DEFAULT_SCENES = list(range(18, 32))
 DEFAULT_SLIDES_DIR = REPO_ROOT / "storage" / "형법_full_run" / "slides_staged" / "review_slides"
 
 
+# 씬의 마지막 주석(annot) 프레임 경로 조회, 없으면 예외
 def last_annot_path(slides_dir: Path, scene: int) -> Path:
     annots = sorted(slides_dir.glob(f"scene_{scene:03d}_annot_*.jpg"))
     if not annots:
@@ -25,6 +28,7 @@ def last_annot_path(slides_dir: Path, scene: int) -> Path:
     return annots[-1]
 
 
+# 이전 씬의 마지막 주석 프레임과 다음 씬의 base 프레임 OCR 결과를 비교해 출력
 def compare_transition(base_url: str, slides_dir: Path, prev_scene: int, next_scene: int) -> int:
     prev_base = slides_dir / f"scene_{prev_scene:03d}_base.jpg"
     next_base = slides_dir / f"scene_{next_scene:03d}_base.jpg"
@@ -71,8 +75,9 @@ def compare_transition(base_url: str, slides_dir: Path, prev_scene: int, next_sc
     return 0
 
 
+# 인접한 씬 쌍을 순회하며 전환 판정을 비교, 실패한 씬이 있으면 0이 아닌 코드 반환
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare OCR text for previous scene last annot vs next scene base.")
+    parser = argparse.ArgumentParser(description="이전 씬의 마지막 annot과 다음 씬의 base 프레임 OCR 텍스트 비교")
     parser.add_argument("scenes", nargs="*", type=int, default=DEFAULT_SCENES)
     parser.add_argument("--slides-dir", default=str(DEFAULT_SLIDES_DIR))
     parser.add_argument("--base-url", default="http://localhost:8010")

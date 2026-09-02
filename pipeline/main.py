@@ -94,34 +94,39 @@ logging.getLogger("google.genai").setLevel(logging.WARNING)
 # 출력 헬퍼
 # ──────────────────────────────────────────────────────────────
 
+# 단계 시작을 알리는 배너 출력
 def _banner(title: str):
     print("\n" + "═" * 70)
     print(f"  {title}")
     print("═" * 70)
 
 
+# job_type 별칭을 정규 값으로 변환, 매칭 없으면 legacy_full
 def _normalize_pipeline_job_type(value: str | None) -> str:
     job_type = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
     return PIPELINE_JOB_TYPE_ALIASES.get(job_type, JOB_TYPE_LEGACY_FULL)
 
 
+# 단계 완료 메시지 출력
 def _done(label: str, elapsed: float):
     print(f"\n  ✓ {label}  ({elapsed:.1f}초)")
     print("─" * 70)
 
 
+# dict를 보기 좋은 JSON 파일로 저장
 def _save_json(path: Path, data: Any):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# 초 단위 시간을 mm:ss 형식 문자열로 변환
 def _fmt_ts(sec: float) -> str:
     m, s = int(sec) // 60, int(sec) % 60
     return f"{m:02d}:{s:02d}"
 
 
 def _is_done(path: Path, label: str, force: bool) -> bool:
-    """출력 파일이 이미 존재하면 True 반환 (force=True면 항상 False)."""
+    """출력 파일이 이미 존재하면 True 반환 (force=True면 항상 False)"""
     if not force and path.exists() and path.stat().st_size > 0:
         print(f"\n  ⏭  {label} — 출력 파일 존재, 스킵")
         print(f"     {path}")
@@ -130,6 +135,7 @@ def _is_done(path: Path, label: str, force: bool) -> bool:
     return False
 
 
+# 값을 float로 안전 변환, 실패 시 default
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
         return float(v)
@@ -150,7 +156,7 @@ def _transcribe_by_scene(
     progress_callback=None,
 ) -> dict:
     """
-    전역 전사 후 scene 시간축에 매핑하기 위한 세그먼트를 생성한다.
+    전역 전사 후 scene 시간축에 매핑하기 위한 세그먼트를 생성
 
     Returns:
         {
@@ -173,6 +179,7 @@ def _transcribe_by_scene(
 # 파이프라인 스테이지
 # ──────────────────────────────────────────────────────────────
 
+# P1A: 영상에서 슬라이드 프레임 추출, 캐시(meta_path 존재) 있으면 스킵
 def extract_slides(args, slides_dir: Path, output_dir: Path, notify_stage=None) -> dict:
     from .slide_extractor import (
         build_canonical_slide_annotations,
@@ -229,11 +236,11 @@ def extract_slides(args, slides_dir: Path, output_dir: Path, notify_stage=None) 
 
 
 def analyze_audio_quality(args, output_dir: Path, notify_stage=None) -> dict:
-    """P1B analyze_audio_quality: 오디오 품질 분석 (slide_extractor와 병렬).
+    """P1B analyze_audio_quality: 오디오 품질 분석 (slide_extractor와 병렬)
 
     내부에 배치/아이템 단위가 없는 단일 파이프라인(오디오 추출 → 특성 분석 → 품질
-    채점)이라, 이 세 경계를 진행도 1/3씩으로 보고한다 — 각 경계가 실제 작업
-    구간이라 시간 기반으로 흉내 내는 게 아니라 진짜 진행 상태다.
+    채점)이라, 이 세 경계를 진행도 1/3씩으로 보고 — 각 경계가 실제 작업
+    구간이라 시간 기반으로 흉내 내는 게 아니라 진짜 진행 상태
     """
     from .audio_analyzer import extract_audio_from_video, analyze_audio_features, evaluate_audio_quality
     from .utils import get_video_duration
@@ -281,6 +288,7 @@ def analyze_audio_quality(args, output_dir: Path, notify_stage=None) -> dict:
     return {"duration": duration, "elapsed": elapsed}
 
 
+# P2A: 슬라이드 이미지에서 텍스트/제목 추출 및 구조화
 def textualize_slides(args, slides_dir: Path, output_dir: Path, notify_stage=None) -> dict:
     from .slide_textualizer import TextualizationPipeline, Config as TextConfig
 
@@ -309,6 +317,7 @@ def textualize_slides(args, slides_dir: Path, output_dir: Path, notify_stage=Non
     return {"textualized_path": str(textualized_path), "elapsed": elapsed}
 
 
+# P2B: 영상 전체를 Whisper로 전사
 def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path, band_progress=None) -> dict:
     from .segment_grouper import load_slide_ranges
 
@@ -355,6 +364,7 @@ def process_audio(
     on_contexts_ready: Optional[Callable[[dict], None]] = None,
     band_progress=None,
 ) -> dict:
+    # P3: 전사 결과를 3-pass 교정하고 scene/context 단위로 그룹화
     from .text_processor import correct_segments_three_pass
     from .segment_grouper import (
         load_slide_ranges,
@@ -419,8 +429,8 @@ def process_audio(
     print(f"    ✓ 교정 완료  ({time.time()-t0:.1f}초)")
 
     # [3B-3] scene/context 그룹화 — verifier 입력(merged_clean.json)의 slides[].contexts로
-    # 그대로 이어지므로 유지한다. slide_ranges가 없으면(메타데이터 없이 폴백 전사한 경우)
-    # scene 단위로 묶을 기준이 없어 scenes_structure는 None으로 남는다.
+    # 그대로 이어지므로 유지, slide_ranges가 없으면(메타데이터 없이 폴백 전사한 경우)
+    # scene 단위로 묶을 기준이 없어 scenes_structure는 None으로 남음
     print("  [3B-3] scene/context 그룹화...")
     t0 = time.time()
     scenes_structure = None
@@ -433,7 +443,7 @@ def process_audio(
             progress_callback=group_progress_callback,
         )
     elif band_progress is not None:
-        # slide_ranges가 없으면 그룹화 자체를 안 하니 band를 즉시 완료 처리한다.
+        # slide_ranges가 없으면 그룹화 자체를 안 하니 band를 즉시 완료 처리
         band_progress.report("context_group", 0, 0)
     print(f"    ✓ context {sum(len(s.get('contexts', [])) for s in scenes_structure or [])}개  ({time.time()-t0:.1f}초)")
 
@@ -468,6 +478,9 @@ def build_analyzer_input(
     duration: float,
     slides_structure: Optional[list[dict]] = None,
 ) -> dict:
+    # V1: 슬라이드 텍스트화 결과, 전사 세그먼트, scene/context 그룹화 결과, slide_ranges를
+    # 논리 슬라이드 번호(slide_number) 기준으로 병합해 verifier 입력(merged_clean.json) 생성
+    # context가 비어 있으면(그룹화 실패 등) 아래에서 segment를 그대로 context 단위로 폴백
     from .segment_grouper import load_slide_ranges
     from .text_processor import classify_lecture_domain
 
@@ -713,6 +726,7 @@ def build_analyzer_input(
     return {"merged_clean_path": str(merged_clean_path), "elapsed": elapsed}
 
 
+# claim 출력 파일이 최종 verifier 결과(mode=classified_issue_verifier)인지 확인
 def _claim_output_is_final_verification(claim_output_path: Path) -> bool:
     if not claim_output_path.exists():
         return False
@@ -724,6 +738,7 @@ def _claim_output_is_final_verification(claim_output_path: Path) -> bool:
     return payload.get("mode") == "classified_issue_verifier"
 
 
+# V2A: merged_clean.json에서 claim 후보 추출, 캐시(batch_mode/context_window/mtime) 일치 시 스킵
 def extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
     from .analyzer.claim_extractor import (
         _claim_extract_batch_mode,
@@ -733,6 +748,7 @@ def extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
     from .analyzer.claim_pipeline import prepare_verification
     from .analyzer.verifier_utils import _write_claims_jsonl
 
+    # 캐시된 claims.json이 현재 batch_mode/context_window 설정과 일치하는지 확인
     def _claim_cache_matches(path: Path, batch_mode: str, context_window: tuple[int, int]) -> bool:
         if not path.exists() or path.stat().st_size <= 0:
             return False
@@ -745,6 +761,7 @@ def extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
             and tuple(payload.get("claim_context_window", [])) == context_window
         )
 
+    # claim 객체에서 빈 값 필드를 제거한 최소 payload 구성
     def _claim_output_payload(claim: dict) -> dict:
         context_id = str(claim.get("context_id") or "").strip()
         payload = {
@@ -826,6 +843,7 @@ def extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
     }
 
 
+# V2B: 추출된 claim에 대해 1차 issue 판단 실행
 def judge_issues(args, merged_clean_path: str, output_dir: Path, claims_jsonl: str) -> dict:
     from .analyzer.run_all import run_issue_judge_only
 
@@ -845,6 +863,7 @@ def judge_issues(args, merged_clean_path: str, output_dir: Path, claims_jsonl: s
     return {"elapsed": elapsed, **result}
 
 
+# V2: verifier를 별도 프로세스로 백그라운드 실행(subprocess), 캐시 있으면 스킵
 def start_verifier_background(args, merged_clean_path: str, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
@@ -925,7 +944,7 @@ def run_verifier(
     output_dir: Path,
     notify_stage: Callable[..., None] | None = None,
 ) -> dict:
-    """Run the verifier synchronously for approval-gated uploads."""
+    """승인 대기가 필요한 업로드용으로 verifier를 동기 실행"""
     from .analyzer.run_all import run_classified_issue_pipeline
 
     stem = Path(args.input).stem
@@ -989,7 +1008,11 @@ def run_preprocess_pipeline(
     timings: dict[str, float],
     notify_stage,
 ) -> dict:
-    """Run shared preprocessing stages used by verifier and graph workflows."""
+    """verifier/graph 워크플로가 공유하는 전처리 단계 실행
+
+    실제 구현은 orchestration.preprocess.run_preprocess_pipeline에 위임, 이 모듈
+    자체를 helpers로 주입해 위에서 정의한 스테이지 함수들(extract_slides 등)을 재사용
+    """
     from .orchestration.preprocess import run_preprocess_pipeline as _run_preprocess_pipeline
 
     return _run_preprocess_pipeline(
@@ -1004,7 +1027,8 @@ def run_preprocess_pipeline(
     )
 
 def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dict) -> Path:
-    """Persist the in-memory preprocess payload so graph_upload can resume later."""
+    """graph_upload이 나중에 재개할 수 있도록 메모리 상의 preprocess 결과를 파일로 저장
+    (orchestration.preprocess에 위임)"""
     from .orchestration.preprocess import save_preprocess_manifest as _save_preprocess_manifest
 
     return _save_preprocess_manifest(
@@ -1015,7 +1039,8 @@ def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dic
     )
 
 def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict) -> dict:
-    """Restore preprocess_result from the manifest written by run_preprocess_pipeline."""
+    """run_preprocess_pipeline이 저장한 manifest에서 preprocess_result 복원
+    (orchestration.preprocess에 위임)"""
     from .orchestration.preprocess import load_preprocess_result_from_outputs as _load_preprocess_result_from_outputs
 
     return _load_preprocess_result_from_outputs(stem, output_dir, paths)
@@ -1030,7 +1055,7 @@ def run_verifier_pipeline(
     background: bool = True,
     notify_stage=lambda _stage, _status, _progress=None: None,
 ) -> dict:
-    """Build verifier input and run the verifier path."""
+    """검증 입력을 구성하고 verifier 경로를 실행 (orchestration.verifier에 위임)"""
     from .orchestration.verifier import run_verifier_pipeline as _run_verifier_pipeline
 
     return _run_verifier_pipeline(
@@ -1044,6 +1069,7 @@ def run_verifier_pipeline(
         helpers=sys.modules[__name__],
     )
 
+# 생성된 산출물 파일 경로와 존재 여부를 출력
 def _print_generated_files(output_files: list[str]) -> None:
     print("\n  생성된 파일:")
     for path_str in output_files:
@@ -1053,6 +1079,7 @@ def _print_generated_files(output_files: list[str]) -> None:
         print(f"    {'✓' if p.exists() else '✗'}  {p}")
 
 
+# 전처리+검증 전체 파이프라인 실행 (orchestration.workflows에 위임)
 def run_pipeline(args, progress_callback=None):
     from .orchestration.workflows import run_pipeline as _run_pipeline
 
@@ -1062,6 +1089,7 @@ def run_pipeline(args, progress_callback=None):
 # CLI
 # ──────────────────────────────────────────────────────────────
 
+# CLI 인자 파서 구성
 def get_parser():
     
     from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
@@ -1125,6 +1153,7 @@ def get_parser():
     
     return parser
 
+# CLI 진입점, 입력 영상 존재 확인 후 파이프라인 실행
 def main():
     args = get_parser().parse_args()
 

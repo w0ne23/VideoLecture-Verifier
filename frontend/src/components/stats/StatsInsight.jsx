@@ -1,4 +1,6 @@
-// 불릿 문장 안에서 **강조할 부분**(오류 유형/출처/개수 등)만 색을 입혀 보여준다.
+// 인사이트 카드 — buildInsight / buildDomainInsight 가 만든 { title, bullets[] } 렌더
+
+// bullet 문자열에서 **강조** 로 감싼 부분(오류 유형·출처·개수 등)만 색을 입힘
 function renderBullet(text) {
   return text.split('**').map((part, index) => (
     index % 2 === 1

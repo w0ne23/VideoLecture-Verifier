@@ -1,3 +1,6 @@
+// LLM 모델 등록 화면 — LiteLLM 카탈로그에서 provider/model 선택 + API 키 등록/수정/삭제
+// 등록 목록은 localStorage(llmRegistry), API 키 원본은 서버에만 저장하고 마스킹 값만 보관
+
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getLlmCatalog } from '../../api/llmCatalog'
@@ -24,7 +27,6 @@ export default function ModelRegistryPage() {
   const [keyValue, setKeyValue] = useState('')
   const [version, setVersion] = useState('')
   const [customVersion, setCustomVersion] = useState('')
-  // const [showHelp, setShowHelp] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editProviderSelect, setEditProviderSelect] = useState('')
   const [editKeyValue, setEditKeyValue] = useState('')
@@ -35,6 +37,7 @@ export default function ModelRegistryPage() {
   const [catalogError, setCatalogError] = useState('')
   const [credentialSaving, setCredentialSaving] = useState(false)
 
+  // 마운트 시 LiteLLM 카탈로그(선택 가능한 provider/model 목록) 로드
   useEffect(() => {
     let cancelled = false
     getLlmCatalog()
@@ -90,6 +93,7 @@ export default function ModelRegistryPage() {
     : true
   const versionOptions = resolvedType ? modelOptionsFor(resolvedType) : []
 
+  // provider 변경 시 모델 선택값을 그 provider 의 첫 모델로 재설정 (직접 입력·유효 선택은 유지)
   useEffect(() => {
     if (!resolvedType) {
       setVersion(current => (current ? '' : current))
@@ -118,11 +122,13 @@ export default function ModelRegistryPage() {
     ))
   }, [editingId, editResolvedType, catalogStatus, catalog])
 
+  // 등록 목록 갱신 + localStorage 저장
   const persist = next => {
     setLlms(next)
     saveRegisteredLlms(next)
   }
 
+  // 새 모델 등록 — 키 필요 시 서버에 저장(credentialRef 받음), 중복(같은 provider·model·키) 방지
   const handleAdd = async () => {
     if (credentialSaving) return
     const key = keyValue.trim()
@@ -200,11 +206,10 @@ export default function ModelRegistryPage() {
     persist(llms.filter(llm => llm.id !== id))
   }
 
+  // 수정 시작 — 마스킹된 키는 입력 필드에 넣지 않음 (빈 값 = 기존 자격증명 유지)
   const handleEditStart = llm => {
     setEditingId(llm.id)
     setEditProviderSelect(llm.type)
-    // The masked value is intentionally never copied into the editable secret
-    // field. An empty value means “keep the existing credential”.
     setEditKeyValue('')
     const meta = metaFor(llm.type)
     const isPresetVersion = meta?.versions.includes(llm.version)
@@ -220,6 +225,7 @@ export default function ModelRegistryPage() {
     setEditCustomVersion('')
   }
 
+  // 수정 저장 — provider 변경 시 새 키 필수, 키 변경 시에만 서버 재저장
   const handleEditSave = async () => {
     if (credentialSaving) return
     const current = llms.find(llm => llm.id === editingId)

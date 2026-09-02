@@ -1,3 +1,4 @@
+# 강의 context에서 claim(검증 가능한 사실 주장) 원문을 추출하는 로직 (extract 단계)
 from __future__ import annotations
 
 import json
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 
+# 정규화된 claim 유형 목록
 _CANONICAL_CLAIM_TYPES = {
     "definition",
     "numeric",
@@ -17,6 +19,7 @@ _CANONICAL_CLAIM_TYPES = {
 }
 
 
+# claim 추출 프롬프트에 쓸 context 구성 모드(compact/card_lite/cards) 선택, 환경변수로 제어
 def _claim_extract_context_mode() -> str:
     mode = str(os.getenv("VERIFIER_CLAIM_EXTRACT_CONTEXT_MODE", "cards") or "cards").strip().lower()
     if mode in {"compact", "batch", "transcript"}:
@@ -26,6 +29,7 @@ def _claim_extract_context_mode() -> str:
     return "cards"
 
 
+# claim 추출 배치 단위(slide/context) 선택, 환경변수로 제어
 def _claim_extract_batch_mode() -> str:
     mode = str(os.getenv("VERIFIER_CLAIM_EXTRACT_BATCH_MODE", "context") or "context").strip().lower()
     if mode in {"slide", "slides", "slide_batch", "slide-batch", "by_slide", "by-slide"}:
@@ -33,6 +37,7 @@ def _claim_extract_batch_mode() -> str:
     return "context"
 
 
+# 배치 앞뒤로 참고용으로 포함할 context 개수(prev, next)
 def _claim_extract_context_window() -> tuple[int, int]:
     return (
         _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 1, minimum=0),
@@ -40,10 +45,12 @@ def _claim_extract_context_window() -> tuple[int, int]:
     )
 
 
+# context 배치 모드에서 한 배치에 묶을 context 개수
 def _claim_extract_context_group_size() -> int:
     return _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE", 3, minimum=1)
 
 
+# 환경변수를 int로 읽되 최솟값 이상으로 clamp, 실패 시 default
 def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
     raw = str(os.getenv(name, str(default)) or str(default)).strip()
     try:
@@ -52,6 +59,7 @@ def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
         return default
 
 
+# claim 추출 배치 크기, default 인자 우선, 없으면 환경변수
 def _claim_extract_batch_size(default: int | None = None) -> int:
     if default is not None:
         return max(1, int(default))
@@ -59,12 +67,14 @@ def _claim_extract_batch_size(default: int | None = None) -> int:
     return _read_int_env("VERIFIER_CLAIM_EXTRACT_BATCH_SIZE", fallback, minimum=1)
 
 
+# claim 추출 병렬 worker 수, default 인자 우선, 없으면 환경변수
 def _claim_extract_max_workers(default: int | None = None) -> int:
     if default is not None:
         return max(1, int(default))
     return _read_int_env("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 20, minimum=1)
 
 
+# 모델별 추가 규칙 사용 여부(generic/default) 선택, 환경변수로 제어
 def _claim_extract_prompt_profile() -> str:
     raw = str(os.getenv("VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE", "auto") or "auto").strip().lower()
     if raw in {"generic", "portable", "free"}:
@@ -74,6 +84,7 @@ def _claim_extract_prompt_profile() -> str:
     return "generic"
 
 
+# 프롬프트 프로필이 generic이면 빠뜨림 방지 관련 추가 규칙 텍스트 반환, 아니면 빈 문자열
 def _model_specific_extract_rules() -> str:
     profile = _claim_extract_prompt_profile()
     if profile != "generic":
@@ -108,6 +119,7 @@ def _model_specific_extract_rules() -> str:
 """
 
 
+# claim 추출 대상 슬라이드들의 제목/시간범위/텍스트를 프롬프트용 참조 블록으로 구성
 def _build_slide_references(slide_numbers: list[int], slide_ctx: dict) -> str:
     refs = []
     mode = _claim_extract_context_mode()
@@ -131,7 +143,13 @@ def _build_slide_and_context_blocks(
     slide_ctx: dict,
     target_context_ids: set[str] | None = None,
 ) -> tuple[str, str]:
-    """슬라이드 참조와 context 문맥을 한 번의 순회로 생성."""
+    """슬라이드 참조와 context 문맥을 한 번의 순회로 생성
+
+    context_mode(compact/card_lite/context-window/기본 cards)에 따라 프롬프트에 넣을
+    문맥 범위와 검사 대상 표시 방식이 달라짐 — compact는 배치 전체를 통짜로,
+    card_lite는 대상에 '*' 표시, target_context_ids가 있으면(context-window) 대상/참고
+    구간을 분리, 그 외(cards)는 context별로 앞뒤/같은 슬라이드 문맥을 개별 카드로 구성
+    """
     from . import claim_common as cv
 
     total = len(contexts)
@@ -250,6 +268,7 @@ def _build_slide_and_context_blocks(
     return _build_slide_references(list(seen_slides.keys()), slide_ctx), "\n\n".join(cards)
 
 
+# 슬라이드 참조+context 문맥 블록을 넣어 claim 추출 LLM 프롬프트 전체 구성
 def _build_extract_prompt(
     contexts: list[dict],
     current_date: str,
@@ -377,6 +396,7 @@ def _build_extract_prompt(
 """
 
 
+# LLM이 반환한 claim_type 문자열을 5개 정규 유형 중 하나로 정규화, no_claim이면 None
 def _normalize_claim_type(value: str) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -413,7 +433,7 @@ def _normalize_claim_type(value: str) -> str | None:
 
 
 def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
-    """최종 추출 순서 기준으로 사람이 읽는 claim_id를 부여한다."""
+    """최종 추출 순서 기준으로 사람이 읽는 claim_id 부여"""
     sequence = 1
     for _batch, claims in claims_by_batch:
         for claim in claims:
@@ -422,6 +442,7 @@ def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
             sequence += 1
 
 
+# claim dict의 키 순서를 보기 좋게 재배열
 def _order_claim_fields(claim: dict) -> None:
     preferred_keys = (
         "claim_id",
@@ -436,10 +457,12 @@ def _order_claim_fields(claim: dict) -> None:
     claim.update(ordered)
 
 
+# 공백 기준으로 텍스트를 토큰 집합으로 분리
 def _text_tokens(value: str) -> set[str]:
     return {token for token in re.split(r"\s+", str(value or "").strip()) if token}
 
 
+# 두 claim의 텍스트가 포함 관계이거나 토큰 유사도 65% 이상이면 유사한 것으로 판단
 def _similar_claim_text(a: dict, b: dict) -> bool:
     a_text = str(a.get("claim_text") or "")
     b_text = str(b.get("claim_text") or "")
@@ -456,6 +479,7 @@ def _similar_claim_text(a: dict, b: dict) -> bool:
     return len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens))) >= 0.65
 
 
+# 같은 context/유형에서 유사한 claim 중 더 긴(정보량 많은) 것만 남기고 중복 제거
 def _dedupe_overlapping_claims(claims: list[dict]) -> list[dict]:
     deduped: list[dict] = []
     for claim in claims:
@@ -479,6 +503,7 @@ def _dedupe_overlapping_claims(claims: list[dict]) -> list[dict]:
     return deduped
 
 
+# context를 슬라이드 번호가 바뀌는 지점마다 나눠 배치 목록 생성
 def _context_batches_by_slide(contexts: list[dict]) -> list[list[dict]]:
     batches: list[list[dict]] = []
     current_slide = None
@@ -495,6 +520,7 @@ def _context_batches_by_slide(contexts: list[dict]) -> list[list[dict]]:
     return batches
 
 
+# claim 추출 LLM 호출 1회, JSON 파싱 실패 시 재시도, 결과 claim 정제(중복 제거/필드 제한)
 def _extract_claims(
     contexts: list[dict],
     current_date: str,
@@ -581,6 +607,7 @@ def _extract_claims(
     return [], True, api_calls, token_usage
 
 
+# _extract_claims를 배치 복구 재시도만큼 재시도, 그래도 실패하면 배치를 반으로 쪼개 재귀적으로 복구 시도
 def recover_claim_extraction(
     contexts: list[dict],
     current_date: str,
@@ -642,6 +669,7 @@ def recover_claim_extraction(
     return last_claims, True, total_api_calls, total_token_usage, False
 
 
+# 복구용으로 context 목록을 절반씩 나눠 재귀 재시도용 (chunk, target_ids) 쌍 생성
 def _split_context_recovery_items(
     contexts: list[dict],
     target_context_ids: set[str] | None,
@@ -674,7 +702,11 @@ def extract_claims_only(
     max_workers: int | None = None,
     progress_notify: Callable[[int, int], None] | None = None,
 ) -> tuple[list[tuple], int, dict]:
-    """1단계만 실행: claim 추출. (batch_list, total_claims) 반환."""
+    """1단계만 실행: claim 추출
+
+    배치 모드(slide/context)에 따라 context를 배치로 나누고, 배치별로 병렬 LLM 호출해
+    claim을 추출, 결과를 (context_batch, claims) 쌍의 리스트로 반환
+    """
     from . import claim_common as cv
 
     batch_size = _claim_extract_batch_size(batch_size)

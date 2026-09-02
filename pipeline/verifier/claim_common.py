@@ -1,4 +1,4 @@
-"""Claim verification common helpers."""
+"""Claim 검증 공통 헬퍼"""
 
 import json
 import os
@@ -23,8 +23,7 @@ except ImportError:
 
 
 def _resolve_stage_model(stage: str) -> str:
-    # Detector workers explicitly set their concrete model because several
-    # models execute the same stage in parallel.
+    # detector worker는 여러 모델이 같은 stage를 병렬 실행하므로 구체적인 모델을 명시적으로 지정
     if stage == "judge":
         model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "").strip()
         if model:
@@ -48,16 +47,19 @@ TOKEN_USAGE_FIELDS = (
 )
 
 
+# 필드가 모두 0인 토큰 사용량 버킷 생성
 def _new_token_bucket() -> dict:
     return {field: 0 for field in TOKEN_USAGE_FIELDS}
 
 
+# stage별 + 합계 토큰 사용량 구조 초기화
 def _empty_token_usage() -> dict:
     usage = {stage: _new_token_bucket() for stage in TOKEN_USAGE_STAGES}
     usage["total"] = _new_token_bucket()
     return usage
 
 
+# 값을 int로 안전 변환, 실패/None이면 0
 def _safe_int(value) -> int:
     try:
         if value is None:
@@ -89,6 +91,7 @@ def _merge_token_usage(*usages: dict) -> dict:
     return merged
 
 
+# 호출 1건의 usage를 stage별 누적 및 총합에 반영
 def _add_call_usage(token_usage: dict, call_usage: dict) -> dict:
     if not isinstance(token_usage, dict):
         token_usage = _empty_token_usage()
@@ -120,7 +123,7 @@ def _call_llm(
     response_format: dict = None,
     stage: str = "default",
 ) -> tuple[str, dict]:
-    """Call the selected model through the single LiteLLM runtime gateway."""
+    """선택된 모델을 단일 LiteLLM 런타임 게이트웨이로 호출"""
     temp = temperature if temperature is not None else VERIFIER_TEMPERATURE
     model_spec = _resolve_stage_model(stage)
     runtime_binding = resolve_runtime_binding(stage, model_spec)
@@ -171,14 +174,17 @@ VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES
 VERIFIER_REQUIRE_COMPLETE = os.getenv("VERIFIER_REQUIRE_COMPLETE", "1") != "0"
 
 
+# issue_type 문자열 정규화(trim + lowercase)
 def normalize_issue_type(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+# issue_type에 대응하는 한글 라벨 조회
 def issue_type_label(issue_type: str) -> str:
     return ISSUE_TYPE_LABELS.get(normalize_issue_type(issue_type), str(issue_type or "unknown"))
 
 
+# 코드펜스(```json ... ```) 제거
 def _strip_json_fence(text: str) -> str:
     text = (text or "").strip()
     if "```json" in text:
@@ -192,7 +198,7 @@ def _strip_json_fence(text: str) -> str:
 
 
 def build_verification_question(claim: dict) -> str:
-    """후속 판정에서 살아남은 claim에만 짧은 검증 질문을 생성."""
+    """후속 판정에서 살아남은 claim에만 짧은 검증 질문 생성"""
     text = str(
         claim.get("resolved_claim")
         or claim.get("claim_text")
@@ -221,10 +227,12 @@ def build_verification_question(claim: dict) -> str:
 # ── 도메인 힌트 ──────────────────────────────────────────
 
 
+# sub_domain 값 정규화(trim)
 def _normalize_sub_domain(value: str) -> str:
     return str(value or "").strip()
 
 
+# domain/sub_domain을 프롬프트용 라벨 문자열로 구성
 def _get_domain_hint(domain: str, sub_domain: str) -> dict:
     domain_value = str(domain or "").strip()
     sub_domain_value = _normalize_sub_domain(sub_domain)
@@ -233,7 +241,7 @@ def _get_domain_hint(domain: str, sub_domain: str) -> dict:
 
 
 def _resolve_domain_fields(merged: dict) -> tuple[str, str]:
-    """merged.json에서 domain/sub_domain을 읽고 정규화."""
+    """merged.json에서 domain/sub_domain을 읽고 정규화"""
     domain = str(
         merged.get("domain")
         or merged.get("primary_domain")
@@ -251,10 +259,12 @@ def _resolve_domain_fields(merged: dict) -> tuple[str, str]:
 
 # ── 유틸리티 ──────────────────────────────────────────────
 
+# 공백 제거 후 소문자화
 def _compact_text(value: str) -> str:
     return re.sub(r"\s+", "", (value or "")).lower()
 
 
+# issue 중복 판정용 키 생성(유형+슬라이드+시간+본문 앞부분)
 def _issue_key(issue: dict) -> tuple:
     return (
         issue.get("type", ""),
@@ -264,6 +274,7 @@ def _issue_key(issue: dict) -> tuple:
     )
 
 
+# 같은 키의 issue 중 confidence가 더 높은 것만 남기고 중복 제거
 def _dedupe_issues(issues: list[dict]) -> list[dict]:
     dedup = {}
     for issue in issues:
@@ -274,6 +285,7 @@ def _dedupe_issues(issues: list[dict]) -> list[dict]:
     return sorted(dedup.values(), key=lambda x: float(x.get("start_time", 0) or 0))
 
 
+# severity 값 검증/보정, critical인데 confidence가 낮으면 major로 하향
 def _normalize_severity(issue: dict) -> None:
     severity = str(issue.get("severity", "")).lower()
     if severity not in {"critical", "major", "minor"}:
@@ -283,6 +295,7 @@ def _normalize_severity(issue: dict) -> None:
     issue["severity"] = severity
 
 
+# issue의 문제 구간이 ASR(음성 인식) 교정 전 원문에만 있고 교정본에는 없으면 인식 오류로 판단
 def _is_asr_artifact(issue: dict, context_map: dict) -> bool:
     cid = issue.get("context_id", "")
     ref = context_map.get(cid)
@@ -302,6 +315,7 @@ def _is_asr_artifact(issue: dict, context_map: dict) -> bool:
     return False
 
 
+# issue 목록을 판정 결과 payload 형식(요약 통계 포함)으로 구성
 def _make_result(
     issues: list[dict],
     api_calls: int,
@@ -328,6 +342,7 @@ def _make_result(
     }
 
 
+# 여러 번 실행한 판정 결과를 issue 단위로 합쳐 합의(consensus) 기준으로 최종 채택 여부 결정
 def merge_multiple_runs(
     run_results: list[dict],
     num_runs: int,
@@ -397,6 +412,7 @@ def merge_multiple_runs(
 
 # ── context 수집 + 슬라이드 맥락 ────────────────────────────
 
+# 슬라이드에서 context(또는 레거시 transcript_segments)를 모아 정렬된 context 목록 생성
 def _collect_contexts(slides: list[dict]) -> list[dict]:
     contexts = []
     has_contexts = any(slide.get("contexts") for slide in slides)
@@ -462,7 +478,7 @@ def _collect_contexts(slides: list[dict]) -> list[dict]:
 
 
 def _build_slide_context_map(slides: list[dict]) -> dict:
-    """slides 데이터에서 slide_number → {title, time_range, slide_text} 매핑."""
+    """slides 데이터에서 slide_number → {title, time_range, slide_text} 매핑"""
     ctx = {}
     for slide in slides:
         sn = int(slide.get("slide_number") or slide.get("slide_index") or 0)
@@ -476,6 +492,7 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
     return ctx
 
 
+# context 1건을 프롬프트용 한 줄 텍스트로 포맷 (교정본/원문 차이가 있으면 둘 다 표시)
 def _format_context_for_prompt(u: dict) -> str:
     cid = u["context_id"]
     ts = f"{u['start_time']:.1f}s"

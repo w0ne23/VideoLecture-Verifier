@@ -1,3 +1,4 @@
+# RapidOCR 엔진 래퍼, 슬라이드 이미지 텍스트 인식에 사용
 from __future__ import annotations
 
 import threading
@@ -5,12 +6,13 @@ from pathlib import Path
 
 
 class RapidOCRRuntime:
-    """Lazily load one shared RapidOCR instance inside the backend process."""
+    """백엔드 프로세스 내에서 공유하는 RapidOCR 인스턴스를 지연 로딩"""
 
     def __init__(self) -> None:
         self._ocr = None
         self._lock = threading.Lock()
 
+    # RapidOCR 인스턴스 지연 초기화, 최초 1회만 모델 로드
     def _load(self):
         if self._ocr is not None:
             return self._ocr
@@ -34,6 +36,7 @@ class RapidOCRRuntime:
                 })
         return self._ocr
 
+    # 인식된 텍스트 라인 중복 제거 및 길이 제한
     @staticmethod
     def _compact_lines(lines: object, *, max_lines: int = 80, max_chars: int = 6000) -> list[str]:
         compact: list[str] = []
@@ -50,6 +53,7 @@ class RapidOCRRuntime:
         text = "\n".join(compact)
         return [text[:max_chars].rstrip() + "..."] if len(text) > max_chars else compact
 
+    # 이미지 OCR 실행, 결과 텍스트/라인/소요 시간 반환
     def infer(self, image_path: Path, *, lang: str | None = None) -> dict:
         if not image_path.exists():
             raise FileNotFoundError(str(image_path))

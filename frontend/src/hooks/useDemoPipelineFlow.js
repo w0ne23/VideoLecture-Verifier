@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { PHASES, PIPELINE_NODES, VERIFY_STAGE_KEYS, normalizePipelineStages } from '../components/verifier/verifierConstants'
 
-// 파이프라인 진행 UI만 반복해서 확인하기 위한 데모 전용 훅.
-// 실제 업로드/작업 API를 호출하지 않고, 로컬 타이머와 수동 버튼으로 stage를 넘긴다.
+// 파이프라인 진행 UI 만 반복 확인하는 데모 전용 훅
+// 실제 업로드/작업 API 없이 로컬 타이머 + 수동 버튼으로 stage 전환
 const STAGE_DELAY_MS = 1500
 const LAST_STAGE_INDEX = VERIFY_STAGE_KEYS.length - 1
 
+// 데모 전용 phase — 실제 흐름에는 없는 UPLOAD/DONE 을 추가
 export const DEMO_PHASES = {
   UPLOAD: 'upload',
   PIPELINE: PHASES.PIPELINE,
@@ -13,6 +14,7 @@ export const DEMO_PHASES = {
   DONE: 'done',
 }
 
+// stageIndex 기준 각 스테이지 상태 배열 — 이전은 done, 현재는 run(또는 error), 이후는 wait
 function stagesAt(stageIndex, { errorAtCurrent = false } = {}) {
   return normalizePipelineStages(
     VERIFY_STAGE_KEYS.map((stage, index) => {
@@ -25,10 +27,12 @@ function stagesAt(stageIndex, { errorAtCurrent = false } = {}) {
 
 const ALL_DONE_STAGES = normalizePipelineStages(VERIFY_STAGE_KEYS.map(stage => ({ stage, status: 'done' })))
 
+// 파일명에서 확장자를 뗀 문자열
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
 }
 
+// 업로드 → 진행 → 완료 흐름 + 수동 제어(next/prev/자동재생/에러 시뮬레이션) 제공
 export function useDemoPipelineFlow() {
   const [phase, setPhase] = useState(DEMO_PHASES.UPLOAD)
   const [file, setFile] = useState(null)
@@ -58,7 +62,7 @@ export function useDemoPipelineFlow() {
   function selectFile(nextFile) {
     if (!nextFile) return
     setFile(nextFile)
-    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
+    // 사용자가 제목을 직접 수정한 적 없을 때만 파일명으로 자동 갱신
     setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
   }
 

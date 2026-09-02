@@ -1,8 +1,13 @@
+// 검증 과정 보기 화면 — 상단 흐름 패널(5단계 탭 + 요약 수치) + 선택 단계의 항목 카드 목록
+// 각 단계의 중간 산출물(raw JSON)을 GET /lectures/{id}/artifacts/{stage} 로 받아 렌더
+
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getLectureArtifact, getLectureResult } from '../api/pipeline'
 import { PIPELINE_NODES } from '../components/verifier/verifierConstants'
+
+// --- 라벨/색 매핑 -----------------------------------------------------------
 
 const STAGE_IDS = ['claim_extraction', 'issue_judge', 'issue_classification', 'web_grounding', 'final_verification']
 const STAGE_TABS = STAGE_IDS.map(id => PIPELINE_NODES.find(node => node.id === id)).filter(Boolean)
@@ -16,7 +21,7 @@ const GROUNDING_STATUS_LABELS = {
   not_applicable: '대상 아님',
 }
 
-// claim_extractor 가 부여하는 5개 claim_type (없어도 0으로 항상 표시).
+// claim_extractor 가 부여하는 5개 claim_type (없어도 0 으로 항상 표시)
 const CLAIM_TYPE_ORDER = ['definition', 'numeric', 'causal', 'relationship', 'currentness']
 const BASIS_CODE_LABELS = {
   // claim 유형
@@ -72,10 +77,10 @@ function issueTypeLabel(key) {
   return FLOW_ISSUE_TYPE_LABELS[key] || key || ''
 }
 
-// 분류 칩은 단계별 taxonomy 마다 색 "계열"이 다르고, 계열 안에서 값별로 색이 다르다.
-//  - 오류 유형(오류 유형 분류·필터링·최종 판단): 파랑 계열 (하늘·파랑·남색·보라·청록)
-//  - basis code(오류 탐지): 붉은 계열 (분홍·빨강·주황빨강·자주)
-//  - claim 유형(claim 추출): 초록 계열 (연두·초록·청록·진초록)
+// 분류 칩 색 — 단계별 taxonomy 마다 색 "계열"이 다르고, 계열 안에서도 값별로 다름
+//  - 오류 유형(유형 분류·필터링·최종 판단): 파랑 계열
+//  - basis code(오류 탐지): 붉은 계열
+//  - claim 유형(claim 추출): 초록 계열
 const CAT_FAMILIES = {
   errtype: {
     factual_error: '#38bdf8', temporal_error: '#2563eb', scope_overclaim: '#1e40af',
@@ -96,6 +101,7 @@ const CAT_FAMILIES = {
   },
 }
 
+// (분류 키, 단계) → 칩 색 — 매핑에 없으면 문자열 해시로 계열 폴백 색 선택
 function chipColor(key, stage) {
   const fam = stage === 'claim_extraction'
     ? CAT_FAMILIES.claim
@@ -135,7 +141,9 @@ function formatPercent(value) {
   return `${percent.toFixed(percent >= 10 ? 0 : 1)}%`
 }
 
-// 가중 점수: 오류 유형 키를 한국어로, 값은 % (합산 1 → 100%).
+// --- 흐름 패널 컬럼 빌더 (단계별 요약 수치) --------------------------------
+
+// 가중 점수 맵 → "사실 오류 60% · 오래된 내용 40%" 문자열 (유형 키 한국어화, 합산 1 → 100%)
 function formatWeightedScores(map) {
   if (!map || typeof map !== 'object') return ''
   return Object.entries(map)
@@ -144,6 +152,7 @@ function formatWeightedScores(map) {
     .join(' · ')
 }
 
+// 항목들을 고정 4개 오류 유형으로 집계 (그 외 유형은 무시)
 function countByFixedTypes(items, typeFn) {
   const counts = new Map(FLOW_ISSUE_TYPE_KEYS.map(key => [key, 0]))
   asArray(items).forEach(item => {
@@ -153,6 +162,7 @@ function countByFixedTypes(items, typeFn) {
   return FLOW_ISSUE_TYPE_KEYS.map(key => ({ key, label: FLOW_ISSUE_TYPE_LABELS[key], value: counts.get(key) }))
 }
 
+// claim 추출 단계 요약 — 추출된 claim 수 + 유형별 분포(5종 고정)
 function buildClaimColumn(data) {
   const ready = Boolean(data)
   const claims = asArray(data?.claims)
@@ -161,7 +171,7 @@ function buildClaimColumn(data) {
     const key = claim.claim_type || 'unknown'
     typeCounts.set(key, (typeCounts.get(key) || 0) + 1)
   })
-  // 5개 claim_type 을 항상 고정 순서로, 없으면 0 으로 표시.
+  // 5개 claim_type 을 항상 고정 순서로, 없으면 0
   const detailRows = CLAIM_TYPE_ORDER.map(key => ({
     key,
     label: BASIS_CODE_LABELS[key],
@@ -180,13 +190,13 @@ function buildClaimColumn(data) {
   }
 }
 
+// 오류 탐지 단계 요약 — 탐지된 오류 후보 수 + 모델별 후보 수
 function buildIssueJudgeColumn(judgeData, summaryData) {
   const ready = Boolean(judgeData)
   const issues = asArray(judgeData?.issues)
   const s = summaryData?.summary || {}
   const counts = s.issue_counts_by_model || {}
-  // 검증 시점에 실제 적용된 오류 후보 판단 모델 목록. 파이프라인이 사용한 셋을
-  // 그대로 기록한 것이라 프론트에서 고정하지 않는다 (issue_judge.json.models).
+  // 검증 시점에 실제 적용된 모델 목록 (파이프라인이 쓴 셋을 그대로 기록 — 프론트에서 고정 안 함)
   const models = asArray(judgeData?.models || summaryData?.models)
   const modelList = models.length ? models : Object.keys(counts)
   return {
@@ -200,6 +210,7 @@ function buildIssueJudgeColumn(judgeData, summaryData) {
   }
 }
 
+// 오류 유형 분류 단계 요약 — 최종 유형별 분류 결과
 function buildIssueTypeColumn(data) {
   const ready = Boolean(data)
   const branchRows = countByFixedTypes(data?.classifications, item => item.final_issue_type)
@@ -211,11 +222,11 @@ function buildIssueTypeColumn(data) {
   }
 }
 
+// 오류 필터링(웹 근거) 단계 요약 — 검색 대상 + 결과 분류(각 대상은 셋 중 하나로 종료)
 function buildWebGroundingColumn(data) {
   const ready = Boolean(data)
   const s = data?.summary || {}
   const target = asArray(data?.evidence_items).length || Number(s.target_count) || 0
-  // 검색 대상 = 근거 확인 + 근거 부족 + 검색 실패 (각 대상이 셋 중 하나로 끝남).
   return {
     key: 'web_grounding',
     title: '웹 근거 수',
@@ -231,18 +242,18 @@ function buildWebGroundingColumn(data) {
   }
 }
 
-// 최종 오류 수 = 결과 페이지·통계와 동일 기준: 확정 + 교수확인 피드백 (기각 제외).
-// 원본은 verification_final.json (GET /result) 이며, classified_issue_verifier
-// 아티팩트에는 최종 확정/기각 판정이 없다.
+// 최종 오류 수 기준 = 결과 페이지·통계와 동일: 확정 + 교수확인 (기각 제외)
+// 원본은 verification_final.json(GET /result) — classified_issue_verifier 아티팩트엔 확정/기각 판정이 없음
 const FINAL_ERROR_STATUSES = new Set(['confirmed', 'professor_check'])
 
+// 최종 판단 단계 요약 — 최종 오류 수 + 모델별 valid_issue 수 + 기각 수
 function buildFinalColumn(resultData, finalData) {
   const ready = Boolean(resultData)
   const items = asArray(resultData?.feedback_items)
   const kept = items.filter(it => FINAL_ERROR_STATUSES.has(it.status))
   const rejected = resultData?.summary?.rejected_feedback_count
     ?? items.filter(it => it.status === 'rejected').length
-  // 각 모델이 최종 검증에서 "오류다"(valid_issue)로 판단한 건수.
+  // 각 모델이 최종 검증에서 "오류다"(valid_issue)로 판단한 건수
   const modelRows = Object.values(finalData?.model_results || {}).map(r => {
     const name = r.resolved_model || asArray(r.judgments)[0]?.model || '모델'
     return {
@@ -263,6 +274,7 @@ function buildFinalColumn(resultData, finalData) {
   }
 }
 
+// 흐름 패널의 단계 요약 노드 — mainValue / 분기 행 / 상세 행을 순서대로 렌더 (ready 아니면 '-')
 function FlowNode({ ready, mainLabel, mainValue, branchRows, detailRows, mainDivider = false }) {
   const detail = asArray(detailRows)
   return (
@@ -307,7 +319,10 @@ function useArtifact(lectureId, stage) {
   })
 }
 
-// 단계 탭 + 각 단계 요약을 한 패널로. 탭 아래에 그 단계의 흐름 요약이 붙는다.
+// --- 화면 컴포넌트 -------------------------------------------------------------
+
+// 상단 흐름 패널 — 5단계 탭 + 각 단계 요약 노드 한 줄
+// 모든 단계 아티팩트를 한 번에 조회해 요약 수치 계산
 function StageFlowPanel({ lectureId, activeStage, onSelect }) {
   const claimQ = useArtifact(lectureId, 'claim_extraction')
   const judgeQ = useArtifact(lectureId, 'issue_judge')
@@ -365,6 +380,7 @@ function DetailRow({ label, value }) {
   )
 }
 
+// 카드 펼침 영역의 "모델별 판단" 목록 — tag(판정) 볼드 + 이유 본문
 function ModelBreakdown({ rows }) {
   const items = asArray(rows).filter(row => row?.text)
   if (!items.length) return null
@@ -388,6 +404,7 @@ function ModelBreakdown({ rows }) {
   )
 }
 
+// 항목 카드 (claim/오류) — 요약 행(카테고리 칩 + 부가 칩 + 제목) + 펼침 상세(상세 행 + 모델별 판단)
 function ArtifactCard({ index, title, categoryChip, chips, detailRows, modelRows }) {
   const [open, setOpen] = useState(false)
   const toggle = () => setOpen(prev => !prev)
@@ -442,6 +459,7 @@ function ArtifactCard({ index, title, categoryChip, chips, detailRows, modelRows
   )
 }
 
+// 슬라이드 검사 항목 카드 — 원문→수정문 요약 + 펼침 상세(슬라이드 이미지 포함)
 function SlideReviewCard({ index, item }) {
   const [open, setOpen] = useState(false)
   const toggle = () => setOpen(prev => !prev)
@@ -480,6 +498,8 @@ function SlideReviewCard({ index, item }) {
     </article>
   )
 }
+
+// --- 단계별 항목 카드 행 빌더 (아티팩트 JSON → ArtifactCard props) -----------
 
 function buildClaimExtractionRows(data) {
   return asArray(data?.claims).map(claim => ({
@@ -539,8 +559,7 @@ function buildIssueClassificationRows(data) {
   }))
 }
 
-// 최종 판단에서 각 후보가 어떤 모델 합의로 걸러졌는지(=기각 사유)를 칩 하나로.
-// 판정 사유 칩은 의미색(빨강=기각 / 초록=인정 / 앰버=애매) 한 묶음.
+// 각 후보가 어떤 모델 합의로 걸러졌는지(=기각 사유)를 칩 하나로 — 의미색(빨강=기각 / 초록=인정 / 앰버=애매)
 function verdictChip(issue, judgments) {
   const j = asArray(judgments)
   const valid = j.filter(x => x.judgment === 'valid_issue').length
@@ -556,6 +575,7 @@ function verdictChip(issue, judgments) {
 }
 
 function buildFinalVerificationRows(data) {
+  // issue id 별로 모델 판단을 모음
   const judgmentsByIssue = new Map()
   Object.entries(data?.model_results || {}).forEach(([model, result]) => {
     asArray(result?.judgments).forEach(judgment => {
@@ -625,6 +645,7 @@ function buildSlideReviewRows(data) {
   }))
 }
 
+// 선택된 단계의 항목 카드 목록 — 단계별 행 빌더로 아티팩트를 변환해 렌더
 function StageSection({ stage }) {
   const { lectureId } = useParams()
   const { data, isLoading, error } = useQuery({

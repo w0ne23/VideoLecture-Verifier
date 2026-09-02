@@ -1,1 +1,1 @@
-# This file makes the directory a Python package.
+# 이 디렉터리를 Python 패키지로 인식시키기 위한 파일

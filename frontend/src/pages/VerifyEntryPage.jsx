@@ -1,3 +1,5 @@
+// 강의 검증 진입 화면 — 업로드 / 강의 목록 두 갈래
+
 import { useNavigate } from 'react-router-dom'
 import uploadIcon from '../assets/upload-icon-teal.png'
 import listIcon from '../assets/list-icon-teal.png'

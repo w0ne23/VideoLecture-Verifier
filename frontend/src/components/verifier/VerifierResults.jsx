@@ -1,4 +1,9 @@
+// 검증 결과 화면 — 총 오류 개수 + 유형 필터/정렬 + 지식 오류·슬라이드 오류 카드 목록
+// verifier: GET /lectures/{id}/result 응답 (final_confirmed_claims / needs_review_claims / slide_errors)
+
 import { useMemo, useState } from 'react'
+
+// --- 라벨 매핑 (백엔드 enum → 한글) ---------------------------------------------
 
 const TYPE_LABELS = {
   factual_error: '사실 오류',
@@ -27,31 +32,11 @@ const STATUS_LABELS = {
   not_applicable: '대상 아님',
 }
 
-const RELATION_LABELS = {
-  supports_claim: '강의 주장 뒷받침',
-  contradicts_claim: '강의 주장 반박',
-  irrelevant: '직접 관련 없음',
-}
-
-const VERDICT_LABELS = {
-  claim_false: '주장 틀림',
-  claim_true: '주장 맞음',
-  unclear: '불명확',
-}
-
-const SOURCE_PRIORITY_LABELS = {
-  official_docs: '공식 문서',
-  standards_or_government: '표준/정부 자료',
-  academic: '학술 자료',
-  educational: '교육 자료',
-  encyclopedia: '백과사전',
-}
-
-// 파이프라인이 웹 근거 검색을 수행하는 유형 (classified_issue_grounder.GROUNDABLE_CATEGORIES).
-// 나머지 유형(과도한 일반화·혼동 설명 등)은 웹 검색 대상이 아니다.
+// 파이프라인이 웹 근거 검색을 수행하는 유형 (classified_issue_grounder.GROUNDABLE_CATEGORIES)
+// 나머지 유형(과도한 일반화·혼동 설명 등)은 웹 검색 대상 아님
 const GROUNDABLE_TYPES = new Set(['factual_error', 'temporal_error'])
 
-// 지식 오류로 분류되는 4개 카테고리 + 슬라이드 오류를 합쳐 5개 필터 버튼을 구성한다.
+// 지식 오류 4개 카테고리 + 슬라이드 오류 = 5개 필터 버튼
 const KNOWLEDGE_CATEGORY_KEYS = ['factual_error', 'temporal_error', 'scope_overclaim', 'confusing_explanation']
 const CATEGORY_DEFS = [
   { key: 'factual_error', label: '사실 오류' },
@@ -72,19 +57,20 @@ const SORT_OPTIONS = [
   { key: 'severity', label: '심각도순' },
 ]
 
+// --- 범용 유틸 ----------------------------------------------------------------
+
+// 조건부 클래스명 결합 (falsy 제거)
 function cx(...classNames) {
   return classNames.filter(Boolean).join(' ')
 }
 
+// 값을 항상 배열로 (단일 값은 1개짜리 배열, falsy 는 빈 배열)
 function asArray(value) {
   if (!value) return []
   return Array.isArray(value) ? value : [value]
 }
 
-function isObject(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-}
-
+// keys 를 순서대로 보고 처음 만나는 비어있지 않은 문자열 반환
 function pick(item, keys) {
   for (const key of keys) {
     const value = item?.[key]
@@ -93,6 +79,7 @@ function pick(item, keys) {
   return ''
 }
 
+// keys 를 순서대로 보고 처음 만나는 유한수 반환
 function pickNumber(item, keys) {
   for (const key of keys) {
     const value = Number(item?.[key])
@@ -116,6 +103,7 @@ function formatTime(seconds) {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
 }
 
+// 점수 값(0~1 또는 0~100) → 백분율 문자열 (10 이상은 소수 1자리, 미만은 2자리)
 function formatScore(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return ''
@@ -144,14 +132,16 @@ function normalizeCandidateKey(candidate) {
   return candidate?.category || candidate?.issue_type || candidate?.type || candidate?.key || ''
 }
 
+// --- 항목 해석 헬퍼 (백엔드 응답 형태가 유형마다 달라 필드 후보를 넓게 훑음) --------
+
+// 복합 오류(여러 유형이 얽힌 오류) 여부
 function isCompositeItem(item) {
   const type = item.feedback_type || item.category || item.issue_type || item.type
   return type === 'composite_issue' || item.scored_as_composite || item.classified_issue_verifier?.scored_as_composite
 }
 
-// 지식 오류 항목이 속하는 카테고리 목록을 반환한다.
-// 단일 유형이면 그 유형 하나, 복합 오류면 구성 후보 카테고리 전부를 반환해
-// 태그로도, 필터 버튼 매칭에도 그대로 쓸 수 있게 한다.
+// 항목이 속하는 카테고리 목록
+// 단일 유형이면 그 유형 하나, 복합 오류면 구성 후보 카테고리 전부 (태그·필터 매칭에 공용)
 function itemCategories(item) {
   const type = item.feedback_type || item.category || item.issue_type || item.type
   if (!isCompositeItem(item)) {
@@ -173,6 +163,7 @@ function itemCategories(item) {
   return known.length ? known : ['composite_issue']
 }
 
+// 지식 오류 최종 심각도 (%) — percent 필드 우선, 없으면 score(0~1)에 100 곱함
 function getSeverity(item) {
   const verifier = item.classified_issue_verifier || {}
   const percent = pickNumber(
@@ -194,12 +185,14 @@ function getSeverity(item) {
   return score == null ? null : score * 100
 }
 
+// 슬라이드 오류 심각도 (%)
 function getSlideSeverity(item) {
   const num = Number(item.severity_score)
   if (!Number.isFinite(num)) return null
   return num <= 1 ? num * 100 : num
 }
 
+// 웹 근거 객체 추출 — 응답 위치가 여러 곳이라 후보를 순서대로 확인
 function getGrounding(item) {
   const evidence = item.evidence || {}
   const verifier = item.classified_issue_verifier || {}
@@ -224,6 +217,7 @@ function sourceLabel(source, index) {
   return source?.title || source?.domain || source?.url || source?.source_url || `근거 ${index + 1}`
 }
 
+// 백엔드 storage 경로 → nginx 가 서빙하는 /files/ URL
 function fileUrlFromStoragePath(path) {
   if (!path) return ''
   const value = String(path).replace(/\\/g, '/')
@@ -235,6 +229,7 @@ function fileUrlFromStoragePath(path) {
   return ''
 }
 
+// 항목의 위치 정보 (슬라이드 번호 + 영상 재생 시각)
 function locationOf(item) {
   const location = item.location || {}
   return {
@@ -250,6 +245,9 @@ function timeRangeLabel(startTime, endTime) {
   return `${formatTime(startTime)} - ${formatTime(endTime)}`
 }
 
+// --- 표시용 하위 컴포넌트 ----------------------------------------------------
+
+// 정의 목록 한 행 — value 가 비면 렌더 안 함
 function DetailRow({ label, value, wide = false }) {
   if (value === undefined || value === null || value === '') return null
   return (
@@ -260,12 +258,7 @@ function DetailRow({ label, value, wide = false }) {
   )
 }
 
-function TextBlock({ children }) {
-  if (!children) return null
-  return <p className="claim-detail-text">{children}</p>
-}
-
-// 모델별 판단·웹 검색 결과의 근거 문단은 몇 문장씩 이어지는 긴 글이라, 1~2줄만 잘라서 보여준다.
+// 긴 근거 문단(모델별 판단·웹 검색 결과)을 1~2줄로 자르고, 클릭하면 펼침
 function ClampedText({ children, lines = 2 }) {
   const [expanded, setExpanded] = useState(false)
   if (!children) return null
@@ -293,34 +286,14 @@ function DetailGroup({ title, children, noDivider = false }) {
   )
 }
 
-// LLM이 "원문 → 수정문" 형태로 쓰는 경우가 있는데, 원문은 바로 위 '원 발화' 행에 이미 있으므로
-// 화살표 뒤 수정문만 남긴다.
+// LLM 이 "원문 → 수정문" 형태로 쓰면 화살표 뒤 수정문만 남김 (원문은 '원 발화' 행에 이미 있음)
 function stripArrowPrefix(text) {
   if (!text) return text
   const idx = text.indexOf('→')
   return idx === -1 ? text : text.slice(idx + 1).trim()
 }
 
-function ScoreGrid({ item }) {
-  const verifier = item.classified_issue_verifier || {}
-  const rows = [
-    ['최종 심각도', formatPoint(getSeverity(item))],
-    ['유효 이슈 평균', formatRatio(verifier.average_is_valid_issue)],
-    ['유형 심각도 평균', formatRatio(verifier.average_category_severity)],
-    ['문맥 해소', formatRatio(verifier.average_context_resolution)],
-    ['문맥 미해소', formatRatio(verifier.average_context_unresolved)],
-    ['모델 불일치', formatRatio(verifier.model_disagreement)],
-  ].filter(([, value]) => value)
-
-  if (!rows.length) return null
-  return (
-    <details className="claim-score-details">
-      <summary>점수</summary>
-      <p className="claim-detail-text">{rows.map(([label, value]) => `${label} ${value}`).join(' · ')}</p>
-    </details>
-  )
-}
-
+// 복합 오류의 세부 유형별 확률·점수·기여도 표
 function CompositeScoringPanel({ item }) {
   const verifier = item.classified_issue_verifier || {}
   const scoring = item.composite_scoring || verifier.composite_scoring
@@ -362,79 +335,19 @@ function CompositeScoringPanel({ item }) {
   )
 }
 
-function PassageList({ passages }) {
-  const items = asArray(passages)
-  if (!items.length) return null
-  return (
-    <div className="grounding-subblock">
-      <strong>근거 문단</strong>
-      <div className="grounding-passage-list">
-        {items.map((passage, index) => {
-          const url = sourceUrl(passage)
-          return (
-            <div className="grounding-passage" key={`${url || passage.id || 'passage'}-${index}`}>
-              <div className="grounding-passage-head">
-                {passage.stance && <span>{STATUS_LABELS[passage.stance] || passage.stance}</span>}
-                {passage.relation_to_claim && (
-                  <span>{RELATION_LABELS[passage.relation_to_claim] || passage.relation_to_claim}</span>
-                )}
-                {passage.match_status && <span>match: {passage.match_status}</span>}
-                {passage.match_score !== undefined && <span>{formatRatio(passage.match_score)}</span>}
-                {passage.relation_confidence !== undefined && (
-                  <span>관계 {formatRatio(passage.relation_confidence)}</span>
-                )}
-              </div>
-              {url && <a href={url} target="_blank" rel="noreferrer">{url}</a>}
-              <TextBlock>{passage.key_sentence || passage.quote_or_paragraph || passage.matched_text}</TextBlock>
-              {(passage.why_relevant || passage.relation_reason) && (
-                <p className="grounding-relevance">{passage.why_relevant || passage.relation_reason}</p>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function VerifiedSources({ trials }) {
-  const verifiedSources = asArray(trials).flatMap(trial => asArray(trial.verified_sources))
-  if (!verifiedSources.length) return null
-  return (
-    <details className="grounding-diagnostics">
-      <summary>출처 fetch/match 진단 {verifiedSources.length}건</summary>
-      <div className="grounding-diagnostic-list">
-        {verifiedSources.map((source, index) => (
-          <div className="grounding-diagnostic" key={`${source.url || 'source'}-${index}`}>
-            <div className="grounding-diagnostic-head">
-              <strong>{source.domain || source.url || `source ${index + 1}`}</strong>
-              {source.fetch_status && <span>{source.fetch_status}</span>}
-              {source.source_priority_label && <span>{SOURCE_PRIORITY_LABELS[source.source_priority_label] || source.source_priority_label}</span>}
-              {source.trust_score !== undefined && <span>trust {formatRatio(source.trust_score)}</span>}
-            </div>
-            {source.url && <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>}
-            {source.error && <p>{source.error}</p>}
-            <PassageList passages={source.matched_passages || source.verified_model_passages} />
-          </div>
-        ))}
-      </div>
-    </details>
-  )
-}
-
-// 웹 근거로 실제 판정이 난 상태들. 나머지(근거 부족·검증 실패·빈 객체)는
-// 읽는 사람 입장에서 모두 "웹으로는 판정 못 함" 이라 하나로 합친다.
+// 웹 근거로 실제 판정이 난 상태 — 나머지(근거 부족·검증 실패·빈 객체)는 모두 "판정 못 함" 하나로 합침
 const GROUNDING_CONCLUSIVE = new Set(['verified', 'supports_issue', 'refutes_issue'])
 
+// 웹 검색 결과 패널 — 3상태: 판정 남 / 판정 못 함(대상 유형) / 대상 아님(비대상 유형)
 function WebGroundingPanel({ item }) {
   const grounding = getGrounding(item)
   const evidence = item.evidence || {}
   const verifier = item.classified_issue_verifier || {}
 
+  // 웹 근거 수집 단계 자체가 안 돈 경우(파이프라인 비활성 등)만 섹션을 숨김
   const evidenceRan =
     Object.keys(grounding).length > 0 ||
     'web_evidence' in evidence || 'web_evidence' in item || 'web_evidence' in verifier
-  // 웹 근거 수집 단계 자체가 안 돈 경우(파이프라인 비활성 등)만 섹션을 숨긴다.
   if (!evidenceRan) return null
 
   const sources = grounding.evidence_sources?.length ? grounding.evidence_sources : evidence.web_sources
@@ -470,7 +383,7 @@ function WebGroundingPanel({ item }) {
     )
   }
 
-  // 판정 못 난 경우: 대상 유형이면 "판정 불가", 대상 유형이 아니면 "대상 아님".
+  // 판정 못 난 경우 — 대상 유형이면 "판정 불가", 비대상 유형이면 "대상 아님"
   const groundable = itemCategories(item).some(cat => GROUNDABLE_TYPES.has(cat))
   return (
     <DetailGroup title="웹 검색 결과" noDivider>
@@ -485,6 +398,7 @@ function WebGroundingPanel({ item }) {
   )
 }
 
+// 모델별 판단 목록 (model_judgments 우선, 없으면 severity 체크의 model_results 사용)
 function ModelJudgments({ item }) {
   const verifier = item.classified_issue_verifier || {}
   const judgments = asArray(verifier.model_judgments || item.model_judgments)
@@ -515,6 +429,7 @@ function ModelJudgments({ item }) {
   )
 }
 
+// 지식 오류 카드 펼침 영역 — 문제 요약 + 복합 점수 + 모델별 판단 + 웹 검색 결과
 function ClaimDetail({ item }) {
   const problem = item.problem || {}
   const correctInfo = problem.correct_info
@@ -536,6 +451,8 @@ function ClaimDetail({ item }) {
   )
 }
 
+// 지식 오류 카드 — 요약 행(유형 칩·슬라이드·시각·심각도) + 펼침 상세
+// onSeek(startTime): 시각 버튼 클릭 시 영상 해당 지점으로 이동
 function ClaimCard({ item, index, categories, onSeek }) {
   const [open, setOpen] = useState(false)
   const claimText = pick(item, ['resolved_claim', 'claim_text', 'claim', 'statement', 'text', 'content'])
@@ -603,6 +520,7 @@ function ClaimCard({ item, index, categories, onSeek }) {
   )
 }
 
+// 슬라이드 오류 카드 — 요약 행(오류 유형·슬라이드·원문→수정문) + 펼침 상세(슬라이드 이미지 포함)
 function SlideErrorCard({ item, index }) {
   const [open, setOpen] = useState(false)
   const imageUrl = item.slide_image_url || item.image_url || fileUrlFromStoragePath(item.slide_image_path || item.image_path)
@@ -664,6 +582,9 @@ function SlideErrorCard({ item, index }) {
   )
 }
 
+// --- 목록 정렬 --------------------------------------------------------------
+
+// 지식 오류 + 슬라이드 오류를 정렬용 공통 엔트리로 변환
 function buildEntries(knowledgeItems, slideErrors) {
   const claimEntries = knowledgeItems.map((item, sourceIndex) => ({
     kind: 'claim',
@@ -671,7 +592,7 @@ function buildEntries(knowledgeItems, slideErrors) {
     sourceIndex,
     categories: itemCategories(item),
     severity: getSeverity(item),
-    // 지식 오류는 실제 영상 재생 시간(초)을 정렬 키로 쓴다.
+    // 지식 오류의 정렬 키 = 영상 재생 시각(초)
     time: locationOf(item).startTime,
   }))
   const slideEntries = slideErrors.map((item, sourceIndex) => ({
@@ -680,14 +601,14 @@ function buildEntries(knowledgeItems, slideErrors) {
     sourceIndex,
     categories: ['slide'],
     severity: getSlideSeverity(item),
-    // 슬라이드 오류에는 초 단위 재생 시간이 없고 슬라이드 번호만 있다(스케일이 다름).
+    // 슬라이드 오류의 정렬 키 = 슬라이드 번호 (초 단위 시각 없음, 척도 다름)
     time: item.slide_number != null ? Number(item.slide_number) : null,
   }))
   return [...claimEntries, ...slideEntries]
 }
 
-// 지식 오류(초)와 슬라이드 오류(슬라이드 번호)는 척도가 달라 값을 그대로 비교할 수 없다.
-// 각자의 그룹 안에서 0~1 사이 상대적 위치로 정규화한 뒤 섞어야 하나의 시간순 목록처럼 보인다.
+// 지식 오류(초)와 슬라이드 오류(슬라이드 번호)는 척도가 달라 직접 비교 불가
+// 각 그룹 안에서 0~1 상대 위치로 정규화한 뒤 섞어야 하나의 시간순 목록처럼 보임
 function buildTimeRank(entries) {
   const claimTimes = entries.filter(entry => entry.kind === 'claim' && entry.time != null).map(entry => entry.time)
   const slideTimes = entries.filter(entry => entry.kind === 'slide' && entry.time != null).map(entry => entry.time)
@@ -703,6 +624,7 @@ function buildTimeRank(entries) {
   }
 }
 
+// mode: 'severity'(심각도 내림차순) | 'time'(정규화 시간순) — 값 없는 항목은 뒤로
 function sortEntries(entries, mode) {
   const sorted = [...entries]
   if (mode === 'severity') {
@@ -726,6 +648,9 @@ function sortEntries(entries, mode) {
   return sorted
 }
 
+// --- 화면 컴포넌트 ---------------------------------------------------------
+
+// 유형 필터 버튼 + 정렬 토글 + 카드 목록
 function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
   const [activeCategory, setActiveCategory] = useState(null)
   const [sortMode, setSortMode] = useState('time')
@@ -823,7 +748,7 @@ export default function VerifierResults({ verifier, onSeek }) {
   const needsReview = verifier.needs_review_claims || []
   const slideErrors = verifier.slide_errors || []
 
-  // 기각된 주장은 오류가 아니므로 총 개수·필터·목록 어디에도 포함하지 않는다.
+  // 기각된 주장은 오류가 아니므로 총 개수·필터·목록 어디에도 미포함
   const knowledgeItems = [...confirmed, ...needsReview]
   const totalCount = knowledgeItems.length + slideErrors.length
 

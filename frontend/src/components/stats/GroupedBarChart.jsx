@@ -1,10 +1,15 @@
+// 출처/도메인별 오류 유형 묶음 막대 그래프 (그룹 하나 = 출처 또는 도메인 한 개)
+
 import { ISSUE_TYPES } from '../../config/statsConfig'
 
+// viewBox 크기 + 안쪽 여백
 const W = 720
 const H = 380
 const PAD = { top: 36, right: 16, bottom: 56, left: 44 }
 
+// rows: [{ key, label, typeDist, total }] — animKey 가 바뀌면 막대 자라는 애니메이션 재생
 export default function GroupedBarChart({ rows, animKey }) {
+  // 전체 막대 중 최댓값 (0 나눗셈 방지 위해 최소 1)
   const maxValue = Math.max(
     1,
     ...rows.flatMap(row => ISSUE_TYPES.map(t => row.typeDist[t.key] || 0)),
@@ -14,6 +19,7 @@ export default function GroupedBarChart({ rows, animKey }) {
   const groupW = plotW / rows.length
   const barGap = 2
   const barW = Math.min(16, (groupW - 16) / ISSUE_TYPES.length - barGap)
+  // y축 눈금 0/25/50/75/100%
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(t => Math.round(maxValue * t))
 
   return (
@@ -35,6 +41,7 @@ export default function GroupedBarChart({ rows, animKey }) {
       })}
 
       {rows.map((row, groupIndex) => {
+        // 그룹 중앙 x, 그 안에서 유형 막대들을 좌우 대칭으로 배치
         const groupX = PAD.left + groupIndex * groupW + groupW / 2
         const startX = groupX - (ISSUE_TYPES.length * (barW + barGap)) / 2
         return (

@@ -1,16 +1,15 @@
 """
-Detect stabilized scene/base frames from a sampled frame cache.
+샘플 프레임 캐시에서 안정화된 씬/base 프레임 감지
 
-Input is a cache directory produced by:
+입력은 다음으로 생성한 캐시 디렉터리:
     python -m pipeline.sample_cache --input lecture.mp4 --output sample_cache/
 
-This pass reads sampled_frames.avi + sampled_manifest.json, detects scene
-transitions on cached frames, and writes small preview base images plus
-scene_transitions.json containing original frame_no/timestamp mappings.
+이 단계는 sampled_frames.avi + sampled_manifest.json을 읽어 캐시된 프레임에서
+씬 전환을 감지하고, 작은 미리보기 base 이미지와 원본 frame_no/timestamp 매핑을
+담은 scene_transitions.json을 기록
 
-If --regions is given, only segments with type=slide are processed. Video and
-other non-slide regions are hard boundaries: pending transitions are discarded
-and the scene detector state is reset when the next slide region starts.
+--regions가 주어지면 type=slide인 구간만 처리, video 등 non-slide 구간은 경계로
+취급: 대기 중인 전환은 버려지고 다음 slide 구간이 시작될 때 씬 감지기 상태가 리셋됨
 """
 
 from __future__ import annotations
@@ -60,6 +59,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
+# region 타임라인에서 slide 타입 구간만 골라, 인접 non-slide 구간과의 경계에 guard_samples만큼 여유를 둠
 def _load_slide_regions(regions_path: str | None, guard_samples: int = 0) -> list[dict]:
     if not regions_path:
         return []
@@ -98,6 +98,7 @@ def _load_slide_regions(regions_path: str | None, guard_samples: int = 0) -> lis
     return sorted(regions, key=lambda item: item["start_sample_index"])
 
 
+# sample_index가 속한 region 조회, current_pos부터 순방향 탐색(정렬된 region 순회 최적화)
 def _region_for_sample(
     sample_index: int,
     regions: list[dict],
@@ -116,6 +117,7 @@ def _region_for_sample(
     return None, pos
 
 
+# 씬 프레임을 저장하고 캐시 고유 필드(sample_index, 사람 마스크 정보)를 레코드에 추가
 def _save_cache_scene(
     out_dir: Path,
     scene_index: int,
@@ -145,6 +147,7 @@ def _save_cache_scene(
     return record
 
 
+# 사람 마스크 영역을 검게 칠한 미리보기 이미지 저장, 마스크 없으면 None
 def _save_scene_mask_preview(
     out_dir: Path,
     scene_index: int,
@@ -170,6 +173,7 @@ def _save_scene_mask_preview(
     return f"person_mask_previews/{filename}"
 
 
+# 레코드의 대표 타임스탬프 조회(scene_start_sec 우선)
 def _scene_time(record: dict) -> float:
     return float(
         record.get(
@@ -180,10 +184,12 @@ def _scene_time(record: dict) -> float:
     )
 
 
+# 두 레코드가 같은 region_segment_index에 속하는지 확인
 def _same_region(a: dict, b: dict) -> bool:
     return a.get("region_segment_index") == b.get("region_segment_index")
 
 
+# 제거된 레코드들의 이미지 파일 삭제
 def _remove_pruned_scene_previews(out_dir: Path, pruned_records: list[dict]) -> None:
     for record in pruned_records:
         filename = record.get("filename")
@@ -191,6 +197,7 @@ def _remove_pruned_scene_previews(out_dir: Path, pruned_records: list[dict]) -> 
             (out_dir / str(filename)).unlink(missing_ok=True)
 
 
+# 사람 마스크를 제외한 두 프레임의 MSE와 hash 거리 계산
 def _masked_mse_and_hash(
     frame_a,
     mask_a,
@@ -201,6 +208,7 @@ def _masked_mse_and_hash(
     return compute_mse(masked_a, masked_b), int(compute_phash(masked_a) - compute_phash(masked_b))
 
 
+# frame_info에서 사람 존재 비율 값 안전 추출
 def _presence_ratio(frame_info: dict | None) -> float:
     if not frame_info:
         return 0.0
@@ -210,6 +218,9 @@ def _presence_ratio(frame_info: dict | None) -> float:
         return 0.0
 
 
+# base 대비 사람 존재 비율 변화가 실제 슬라이드 콘텐츠 변화가 아니라 사람이 화면을
+# 가리거나 비켜서 생긴 변화인지 판정, 마스크 제외 비교로는 콘텐츠가 그대로인데
+# 원본 비교에서는 크게 달라 보일 때만 person_reveal/person_cover 사유를 반환
 def _person_presence_change_reason(
     base_frame,
     current_frame,
@@ -270,15 +281,15 @@ def prune_transition_middle_frames(
     min_cluster_scenes: int = 3,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Detect rapid transition clusters without removing frames.
+    프레임을 제거하지 않고 빠른 전환 클러스터만 감지
 
-    A real fast slide change often looks like:
+    실제 빠른 슬라이드 전환은 흔히 이런 모양:
 
-      clean slide A -> transition frames -> clean slide B
+      깨끗한 슬라이드 A -> 전환 중 프레임들 -> 깨끗한 슬라이드 B
 
-    Older versions removed the middle candidates here. We now keep all records
-    and pass the middle candidates to LocalVLM so transition/noise decisions are
-    made with visual context instead of a fixed time-gap rule.
+    예전 버전은 여기서 중간 후보들을 제거했음, 지금은 모든 레코드를 유지하고
+    중간 후보를 LocalVLM에 넘겨, 고정된 시간 간격 규칙 대신 시각적 맥락으로
+    전환/노이즈 여부를 판단
     """
     if len(records) < min_cluster_scenes:
         return records, [], []
@@ -350,11 +361,11 @@ def _iter_sample_cache_range(
     start_pos: int,
     end_pos: int,
 ):
-    """Yield sampled cache frames by 0-based video positions [start_pos, end_pos).
+    """0-based 비디오 위치 [start_pos, end_pos) 기준으로 샘플 캐시 프레임 yield
 
-    sampled_manifest.json keeps sample_index as 1-based, while OpenCV frame
-    seeking is 0-based. Keep that convention explicit here to avoid off-by-one
-    errors in the overlap probe.
+    sampled_manifest.json은 sample_index를 1-based로 유지하는 반면 OpenCV 프레임
+    탐색은 0-based, overlap probe에서 off-by-one 오류를 막기 위해 이 관례를
+    여기서 명시적으로 유지
     """
     manifest = load_sample_cache(cache_dir)
     frames = list(manifest.get("frames", []))
@@ -367,7 +378,7 @@ def _iter_sample_cache_range(
 
 
 def _probe_ranges(sample_count: int, chunk_samples: int, guard_samples: int) -> list[dict]:
-    """Build 1-based core sample ranges with 0-based/exclusive read ranges."""
+    """1-based core sample 구간과 0-based/exclusive read 구간을 함께 생성"""
     sample_count = max(0, int(sample_count))
     chunk_samples = max(1, int(chunk_samples))
     guard_samples = max(0, int(guard_samples))
@@ -392,6 +403,7 @@ def _probe_ranges(sample_count: int, chunk_samples: int, guard_samples: int) -> 
     return ranges
 
 
+# 레코드에서 sample_index 안전 추출
 def _record_sample_index(record: dict) -> int:
     try:
         return int(record.get("sample_index", 0) or 0)
@@ -399,6 +411,7 @@ def _record_sample_index(record: dict) -> int:
         return 0
 
 
+# 레코드에서 frame_no를 우선순위 키 목록 순으로 안전 추출
 def _record_frame_no(record: dict) -> int:
     for key in ("base_frame_no", "frame_no", "scene_start_frame_no"):
         try:
@@ -410,11 +423,13 @@ def _record_frame_no(record: dict) -> int:
     return 0
 
 
+# 레코드의 sample_index가 core 구간에 속하는지 확인
 def _record_in_core(record: dict, core_start: int, core_end: int) -> bool:
     sample_index = _record_sample_index(record)
     return int(core_start) <= sample_index <= int(core_end)
 
 
+# 레코드 정렬용 키(타임스탬프, frame_no, sample_index)
 def _record_sort_key(record: dict) -> tuple[float, int, int]:
     timestamp = float(
         record.get(
@@ -426,6 +441,7 @@ def _record_sort_key(record: dict) -> tuple[float, int, int]:
     return timestamp, _record_frame_no(record), _record_sample_index(record)
 
 
+# 이전 실행이 남긴 씬 이미지와 사람 마스크 미리보기 삭제
 def _clear_scene_probe_output(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("scene_*.jpg"):
@@ -436,6 +452,7 @@ def _clear_scene_probe_output(out_dir: Path) -> None:
             stale.unlink(missing_ok=True)
 
 
+# 병렬 청크 worker가 만든 씬 이미지/미리보기를 최종 출력 디렉터리로 복사하고 scene_index를 재부여
 def _copy_record_scene_assets(record: dict, new_index: int, final_out_dir: Path) -> dict | None:
     source_dir_raw = record.get("_parallel_source_output_dir")
     old_filename = record.get("filename")
@@ -474,7 +491,7 @@ def _copy_record_scene_assets(record: dict, new_index: int, final_out_dir: Path)
 
 
 def _dedupe_parallel_records(records: list[dict]) -> list[dict]:
-    """Suppress exact or near-exact duplicates introduced by overlap reads."""
+    """overlap read로 생긴 정확히 같거나 거의 같은 중복 레코드를 억제"""
     deduped: list[dict] = []
     seen_frame_nos: set[int] = set()
     seen_samples: set[int] = set()
@@ -506,6 +523,15 @@ def _dedupe_parallel_records(records: list[dict]) -> list[dict]:
     return deduped
 
 
+# 프레임 이터레이터를 순회하며 씬 전환을 감지하는 핵심 루프
+#
+# scene_transition_probe.run_probe와 같은 STABLE/pending 상태 흐름에 추가로:
+# - slide_regions가 주어지면 region 밖(예: video)으로 나가거나 다음 region으로
+#   들어올 때 씬 감지 상태(base/prev/pending)를 완전히 리셋
+# - 사람 마스크를 반영한 비교(_masked_mse_and_hash)로 필기자가 화면을 가리는
+#   경우를 오탐하지 않도록 함
+# - 병렬 실행(chunk worker)에서도 재사용되므로 write_json/clear_output 등을
+#   옵션으로 제어
 def _run_cache_probe_iter(
     cache_dir: str,
     output_dir: str,
@@ -764,10 +790,10 @@ def _run_cache_probe_iter(
             prev_mask=prev_mask,
             current_mask=person_mask,
         )
-        # A lecturer entering, leaving, or moving inside a person mask is not
-        # a slide transition.  The masked comparison above is the sole scene
-        # boundary authority; do not force a new base from presence-ratio
-        # changes after it has declared the printed content unchanged.
+        # 강사가 화면 안으로 들어오거나 나가거나 사람 마스크 안에서 움직이는 것은
+        # 슬라이드 전환이 아님, 위의 마스크 반영 비교가 씬 경계 판정의 유일한 근거이고,
+        # 인쇄된 콘텐츠가 그대로라고 판정된 뒤에는 presence-ratio 변화만으로 새 base를
+        # 강제하지 않음
         if reason is not None:
             pending = {
                 "start_frame_info": dict(frame_info),
@@ -897,6 +923,7 @@ def _run_cache_probe_iter(
     }
 
 
+# 단일 프로세스로 캐시 전체를 순회하며 씬 전환 감지 (region 필터 적용)
 def run_cache_probe(
     cache_dir: str,
     output_dir: str,
@@ -931,6 +958,7 @@ def run_cache_probe(
     return result["records"]
 
 
+# 프로세스 풀 worker용 함수, 지정 구간(guard 포함)만 처리해 core 구간에 속하는 레코드만 반환
 def _run_cache_probe_range_worker(
     cache_dir: str,
     output_dir: str,
@@ -996,6 +1024,7 @@ def _run_cache_probe_range_worker(
     }
 
 
+# 캐시를 여러 청크로 나눠 병렬로 씬 전환 감지, 청크 경계의 중복은 dedupe 후 최종 scene_index 재부여
 def run_cache_probe_parallel(
     cache_dir: str,
     output_dir: str,
@@ -1210,16 +1239,17 @@ def run_cache_probe_parallel(
     )
     return final_records
 
+# CLI 인자 파싱
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Detect scene transitions from a sampled frame cache.")
-    parser.add_argument("--cache", required=True, help="Sample cache directory")
-    parser.add_argument("--output", "-o", required=True, help="Output scene probe directory")
-    parser.add_argument("--regions", help="timeline_segments.json from Step 1; only type=slide regions are processed")
-    parser.add_argument("--region-guard-sec", type=float, default=1.0, help="Shrink slide regions next to non-slide regions by this many seconds")
-    parser.add_argument("--no-prune-transient-bursts", action="store_true", help="Legacy name: disable rapid transition-cluster VLM candidate generation")
-    parser.add_argument("--transient-burst-gap-sec", type=float, default=3.0, help="Max gap between adjacent scene candidates in one transition cluster")
-    parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="Legacy option: default 2 means review clusters with 3+ candidates")
-    parser.add_argument("--save-person-mask-previews", action="store_true", help="Save one masked preview per saved scene/base frame")
+    parser = argparse.ArgumentParser(description="샘플 프레임 캐시에서 씬 전환 감지")
+    parser.add_argument("--cache", required=True, help="샘플 캐시 디렉터리")
+    parser.add_argument("--output", "-o", required=True, help="출력 씬 probe 디렉터리")
+    parser.add_argument("--regions", help="Step 1에서 생성된 timeline_segments.json, type=slide 구간만 처리")
+    parser.add_argument("--region-guard-sec", type=float, default=1.0, help="non-slide 구간과 인접한 slide 구간을 이 초만큼 줄임")
+    parser.add_argument("--no-prune-transient-bursts", action="store_true", help="레거시 이름: 빠른 전환 클러스터 VLM 후보 생성 비활성화")
+    parser.add_argument("--transient-burst-gap-sec", type=float, default=3.0, help="하나의 전환 클러스터 안에서 인접 씬 후보 간 최대 간격")
+    parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="레거시 옵션: 기본값 2는 후보 3개 이상인 클러스터를 검토 대상으로 함")
+    parser.add_argument("--save-person-mask-previews", action="store_true", help="저장된 씬/base 프레임마다 마스크 미리보기 1장씩 저장")
     parser.add_argument("--resize-width", type=int, default=ProbeConfig.resize_width)
     parser.add_argument("--delay-sec", type=float, default=ProbeConfig.delay_sec)
     parser.add_argument("--max-pending-sec", type=float, default=ProbeConfig.max_pending_sec)
@@ -1235,6 +1265,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# CLI 진입점, 인자로 ProbeConfig 구성 후 run_cache_probe_parallel 실행
 def main():
     args = parse_args()
     if args.debug:

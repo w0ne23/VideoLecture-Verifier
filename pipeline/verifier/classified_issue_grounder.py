@@ -1,8 +1,8 @@
-"""Web evidence helpers for classified lecture issues.
+"""분류된 강의 issue를 위한 웹 근거 유틸리티
 
-The primary pipeline retrieves compact, source-verified evidence *before* the final
-verifier.  The verifier receives source passages, not a precomputed web verdict or
-score.  Legacy post-verifier grounding helpers remain for artifact compatibility.
+기본 파이프라인은 최종 verifier *이전에* 출처가 검증된 압축 근거를 수집한다.
+verifier는 미리 계산된 웹 판정이나 점수가 아니라 출처 원문(passage)을 받는다.
+verifier 이후 grounding을 수행하던 레거시 유틸리티는 산출물 호환성을 위해 남겨둔다
 """
 
 from __future__ import annotations
@@ -106,10 +106,12 @@ TOKEN_USAGE_FIELDS = (
 )
 
 
+# 현재 시각을 ISO 8601 문자열로 반환
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+# 코드펜스(```json ... ```) 제거
 def _strip_json_fence(text: str) -> str:
     stripped = (text or "").strip()
     if stripped.startswith("```"):
@@ -118,6 +120,7 @@ def _strip_json_fence(text: str) -> str:
     return stripped.strip()
 
 
+# 값을 int로 안전 변환, 실패 시 0
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -125,6 +128,7 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+# 값을 float로 안전 변환, 실패/NaN/inf는 default
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -135,26 +139,32 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return number
 
 
+# 값을 0~1 범위로 clamp
 def _clamp01(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, _safe_float(value, default))), 6)
 
 
+# rejected 판정 임계값 조회
 def _rejected_threshold() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_REJECTED_THRESHOLD"), 0.20)
 
 
+# confirmed 판정 임계값 조회
 def _confirmed_threshold() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.80)
 
 
+# 근거가 issue를 지지할 때 점수에 더할 delta 값 조회
 def _supports_issue_delta() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_SUPPORTS_DELTA"), 0.10)
 
 
+# 근거가 issue를 반박할 때 점수에 더할 delta 값(음수) 조회
 def _refutes_issue_delta() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_REFUTES_DELTA"), -0.10)
 
 
+# 점수를 confirmed/rejected/professor_check 상태로 변환
 def _status_from_score(score: float) -> str:
     if score >= _confirmed_threshold():
         return "confirmed"
@@ -163,6 +173,7 @@ def _status_from_score(score: float) -> str:
     return "professor_check"
 
 
+# grounding 스테이지에 설정된 모델 목록 조회
 def _grounding_model_specs() -> list[str]:
     try:
         from .runtime_llm import configured_stage_models
@@ -171,11 +182,13 @@ def _grounding_model_specs() -> list[str]:
     return configured_stage_models("grounding")
 
 
+# pre-verifier 근거 수집에 사용할 첫 번째 grounding 모델 조회
 def _pre_verifier_evidence_model() -> str:
     configured = _grounding_model_specs()
     return configured[0] if configured else ""
 
 
+# pre-verifier 근거 수집의 최대 tool call 횟수 조회
 def _pre_verifier_evidence_max_tool_calls() -> int:
     try:
         return max(1, int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MAX_TOOL_CALLS", "1")))
@@ -183,11 +196,13 @@ def _pre_verifier_evidence_max_tool_calls() -> int:
         return 1
 
 
+# 웹 검색 컨텍스트 크기(low/medium/high) 조회
 def _pre_verifier_evidence_search_context_size() -> str:
     configured = os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEARCH_CONTEXT_SIZE", "medium").strip().lower()
     return configured if configured in {"low", "medium", "high"} else "medium"
 
 
+# 검색 쿼리 계획 LLM 호출의 최대 토큰 수 조회
 def _pre_verifier_query_plan_max_tokens() -> int:
     try:
         return max(
@@ -203,6 +218,7 @@ def _pre_verifier_query_plan_max_tokens() -> int:
         return 1200
 
 
+# pre-verifier 근거 수집 시 issue당 최대 소스 수 조회
 def _pre_verifier_evidence_max_sources() -> int:
     try:
         return max(1, int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MAX_SOURCES", "2")))
@@ -210,6 +226,7 @@ def _pre_verifier_evidence_max_sources() -> int:
         return 2
 
 
+# 검증 단계에서 확인할 최대 소스 수 조회
 def _pre_verifier_evidence_verify_max_sources() -> int:
     try:
         return max(1, int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_VERIFY_MAX_SOURCES", "3")))
@@ -217,6 +234,7 @@ def _pre_verifier_evidence_verify_max_sources() -> int:
         return 3
 
 
+# 근거 수집 시 최대 URL fetch 시도 횟수 조회
 def _pre_verifier_evidence_max_fetch_attempts() -> int:
     try:
         return max(
@@ -232,10 +250,12 @@ def _pre_verifier_evidence_max_fetch_attempts() -> int:
         return 10
 
 
+# 의미 유사도 판정에 사용할 모델 조회
 def _pre_verifier_evidence_semantic_model() -> str:
     return _pre_verifier_evidence_model()
 
 
+# 의미 유사도 판정 LLM 호출의 최대 토큰 수 조회
 def _pre_verifier_evidence_semantic_max_tokens() -> int:
     try:
         return max(128, int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEMANTIC_MAX_TOKENS", "800")))
@@ -243,6 +263,7 @@ def _pre_verifier_evidence_semantic_max_tokens() -> int:
         return 800
 
 
+# 의미 유사도 판정 최소 confidence 임계값 조회
 def _pre_verifier_evidence_semantic_min_confidence() -> float:
     return _clamp01(
         os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEMANTIC_MIN_CONFIDENCE", "0.75"),
@@ -250,6 +271,7 @@ def _pre_verifier_evidence_semantic_min_confidence() -> float:
     )
 
 
+# 문서 관련성 판정 LLM 호출의 최대 토큰 수 조회
 def _pre_verifier_document_relevance_max_tokens() -> int:
     try:
         return max(
@@ -260,6 +282,7 @@ def _pre_verifier_document_relevance_max_tokens() -> int:
         return 600
 
 
+# 문서 관련성 판정 최소 confidence 임계값 조회
 def _pre_verifier_document_relevance_min_confidence() -> float:
     return _clamp01(
         os.getenv("CLASSIFIED_ISSUE_EVIDENCE_DOCUMENT_RELEVANCE_MIN_CONFIDENCE", "0.75"),
@@ -267,6 +290,7 @@ def _pre_verifier_document_relevance_min_confidence() -> float:
     )
 
 
+# 출처 신뢰도 판정 LLM 호출의 최대 토큰 수 조회
 def _pre_verifier_source_trust_max_tokens() -> int:
     try:
         return max(
@@ -277,6 +301,7 @@ def _pre_verifier_source_trust_max_tokens() -> int:
         return 700
 
 
+# 출처 신뢰도 판정 최소 confidence 임계값 조회
 def _pre_verifier_source_trust_min_confidence() -> float:
     return _clamp01(
         os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SOURCE_TRUST_MIN_CONFIDENCE", "0.75"),
@@ -284,6 +309,7 @@ def _pre_verifier_source_trust_min_confidence() -> float:
     )
 
 
+# 근거 passage 최대 글자 수 조회
 def _pre_verifier_evidence_passage_chars() -> int:
     try:
         return max(120, int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_PASSAGE_MAX_CHARS", "450")))
@@ -291,6 +317,7 @@ def _pre_verifier_evidence_passage_chars() -> int:
         return 450
 
 
+# 레거시 grounding 시도(trial)당 최대 소스 수 조회
 def _max_sources_per_trial() -> int:
     try:
         return max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_SOURCES", "4")))
@@ -298,6 +325,7 @@ def _max_sources_per_trial() -> int:
         return 4
 
 
+# passage 추출 기능 활성화 여부 조회
 def _passage_extraction_enabled() -> bool:
     return os.getenv("CLASSIFIED_ISSUE_GROUNDING_PASSAGE_EXTRACTION_ENABLED", "1").strip().lower() not in {
         "0",
@@ -307,6 +335,7 @@ def _passage_extraction_enabled() -> bool:
     }
 
 
+# 깨진 출처 URL 복구 기능 활성화 여부 조회
 def _source_repair_enabled() -> bool:
     return os.getenv("CLASSIFIED_ISSUE_GROUNDING_SOURCE_REPAIR_ENABLED", "1").strip().lower() not in {
         "0",
@@ -316,6 +345,7 @@ def _source_repair_enabled() -> bool:
     }
 
 
+# 출처 URL 복구 시도 최대 개수 조회
 def _max_source_repair_urls() -> int:
     try:
         return max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_SOURCE_REPAIR_MAX_URLS", "3")))
@@ -323,10 +353,12 @@ def _max_source_repair_urls() -> int:
         return 3
 
 
+# URL fetch 타임아웃(초) 조회
 def _fetch_timeout_sec() -> float:
     return max(1.0, _safe_float(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_TIMEOUT_SEC"), 8.0))
 
 
+# URL fetch 최대 바이트 수 조회
 def _fetch_max_bytes() -> int:
     try:
         return max(32_768, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_FETCH_MAX_BYTES", "1200000")))
@@ -334,6 +366,7 @@ def _fetch_max_bytes() -> int:
         return 1_200_000
 
 
+# Gemini 응답에서 토큰 사용량 추출
 def _usage_from_gemini(resp: Any, model: str) -> dict[str, Any]:
     usage = getattr(resp, "usage_metadata", None)
     return {
@@ -363,22 +396,26 @@ def _usage_from_gemini(resp: Any, model: str) -> dict[str, Any]:
     }
 
 
+# 모든 필드가 0인 빈 토큰 사용량 dict 생성
 def _empty_token_usage() -> dict[str, int]:
     return {field: 0 for field in TOKEN_USAGE_FIELDS}
 
 
+# 토큰 사용량을 필드별로 누적 합산
 def _merge_token_usage(total: dict[str, int], usage: dict[str, Any]) -> dict[str, int]:
     for field in TOKEN_USAGE_FIELDS:
         total[field] = int(total.get(field, 0) or 0) + _safe_int(usage.get(field))
     return total
 
 
+# issue에서 슬라이드 텍스트 추출(최대 1200자)
 def _slide_text(issue: dict[str, Any]) -> str:
     judge_context = issue.get("judge_context") if isinstance(issue.get("judge_context"), dict) else {}
     slide = judge_context.get("slide") if isinstance(judge_context.get("slide"), dict) else {}
     return str(slide.get("slide_text") or slide.get("t1") or "")[:1200]
 
 
+# issue에서 target/neighbor context 텍스트를 합쳐 추출(최대 2500자)
 def _context_text(issue: dict[str, Any]) -> str:
     judge_context = issue.get("judge_context") if isinstance(issue.get("judge_context"), dict) else {}
     bundle = judge_context.get("context_bundle") if isinstance(judge_context.get("context_bundle"), dict) else {}
@@ -395,6 +432,7 @@ def _context_text(issue: dict[str, Any]) -> str:
     return "\n".join(dict.fromkeys(rows))[:2500]
 
 
+# issue의 모델별 판정 근거를 요약 문자열로 결합(최대 2500자)
 def _model_reason_summary(issue: dict[str, Any]) -> str:
     rows = []
     for verdict in issue.get("model_judgments", []) or []:
@@ -407,6 +445,7 @@ def _model_reason_summary(issue: dict[str, Any]) -> str:
     return "\n".join(rows)[:2500]
 
 
+# 레거시(verifier 이후) grounding용 LLM 프롬프트 생성
 def _build_grounding_prompt(issue: dict[str, Any], current_date: str) -> str:
     return f"""You are the web grounding stage for a lecture issue verifier.
 Current date: {current_date}
@@ -463,6 +502,7 @@ Consistency requirements:
 """
 
 
+# 레거시 grounding 프롬프트의 응답 형식을 JSON 계약으로 치환
 def _build_grounding_json_prompt(issue: dict[str, Any], current_date: str) -> str:
     prompt = _build_grounding_prompt(issue, current_date)
     json_contract = """Return JSON only:
@@ -495,11 +535,13 @@ For insufficient_evidence or grounding_unavailable, keep only status fields: use
     )
 
 
+# 값을 정규 GROUNDING_STATUSES 중 하나로 정규화
 def _normalize_status(value: Any) -> str:
     status = str(value or "").strip().lower()
     return status if status in GROUNDING_STATUSES else "insufficient_evidence"
 
 
+# evidence_passages 값(문자열/dict/list 등 다양한 형태)을 표준 passage 레코드 목록으로 정규화
 def _normalize_evidence_passages(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, str):
         try:
@@ -537,6 +579,8 @@ def _normalize_evidence_passages(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
+# 레거시 grounding LLM 응답(JSON 또는 key=value 라인)을 파싱해 표준 판정 dict로 정규화,
+# claim_verdict과 status/issue_supported 간 일관성 강제
 def _parse_response(text: str, *, require_sources: bool = True) -> dict[str, Any]:
     raw = _strip_json_fence(text)
     try:
@@ -634,6 +678,7 @@ def _parse_response(text: str, *, require_sources: bool = True) -> dict[str, Any
     }
 
 
+# KEY=value 형식(JSON 아닌) 레거시 grounding 응답 파싱
 def _parse_line_response(text: str) -> dict[str, Any]:
     fields = {
         "search_queries": [],
@@ -684,6 +729,7 @@ def _parse_line_response(text: str) -> dict[str, Any]:
     return fields
 
 
+# HTML에서 script/style 등을 제외한 화면에 보이는 텍스트만 추출하는 파서
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -711,14 +757,17 @@ class _VisibleTextParser(HTMLParser):
             self.parts.append(text)
 
 
+# URL에서 www. 접두어를 제거한 도메인 추출
 def _domain_from_url(url: str) -> str:
     return (urlparse(url).netloc or "").lower().removeprefix("www.")
 
 
+# 도메인이 기대 도메인과 정확히 일치하거나 그 서브도메인인지 확인
 def _domain_matches(domain: str, expected: str) -> bool:
     return bool(domain == expected or domain.endswith(f".{expected}"))
 
 
+# URL이 개인 블로그/포럼/튜토리얼 등 하드 제외 도메인 목록에 속하는지 확인
 def _hard_source_exclusion(url: str) -> dict[str, str] | None:
     domain = _domain_from_url(url)
     if not domain:
@@ -739,6 +788,7 @@ def _hard_source_exclusion(url: str) -> dict[str, str] | None:
     return None
 
 
+# URL 후보 목록에서 중복/무효/하드 제외 도메인을 걸러 accepted/excluded로 분리
 def _prefilter_source_candidates(
     values: list[Any],
 ) -> tuple[list[str], list[dict[str, str]]]:
@@ -766,6 +816,7 @@ def _prefilter_source_candidates(
     return accepted, excluded
 
 
+# 도메인 패턴으로 출처 신뢰 등급(official_docs/standards/academic/...)과 점수 판정
 def _source_trust(url: str) -> dict[str, Any]:
     domain = _domain_from_url(url)
     trust_level = "secondary"
@@ -885,6 +936,7 @@ def _source_trust(url: str) -> dict[str, Any]:
     }
 
 
+# 응답 바이트를 content-type의 charset 또는 폴백 인코딩들로 디코딩
 def _decode_bytes(data: bytes, content_type: str) -> str:
     charset_match = re.search(r"charset=([^;\s]+)", content_type or "", flags=re.IGNORECASE)
     encodings = [charset_match.group(1)] if charset_match else []
@@ -897,6 +949,7 @@ def _decode_bytes(data: bytes, content_type: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# HTML을 파싱해 화면에 보이는 텍스트만 추출, 공백/개행 정리
 def _html_to_text(html: str) -> str:
     parser = _VisibleTextParser()
     parser.feed(html or "")
@@ -906,6 +959,8 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
+# URL을 fetch해 본문 텍스트와 출처 신뢰 정보를 담은 표준 레코드로 반환,
+# 리다이렉트 미해석/제외 도메인/오류 상태를 모두 fetch_status로 구분
 def _fetch_url_text(url: str) -> dict[str, Any]:
     row = {
         "url": url,
@@ -990,6 +1045,7 @@ def _fetch_url_text(url: str) -> dict[str, Any]:
     return row
 
 
+# issue의 claim 텍스트에서 핵심 검색어 토큰 추출(불용어 제외)
 def _claim_terms(issue: dict[str, Any]) -> list[str]:
     text = " ".join(
         str(issue.get(key) or "")
@@ -1011,6 +1067,7 @@ def _claim_terms(issue: dict[str, Any]) -> list[str]:
     return terms[:24]
 
 
+# claim 핵심 토큰 + match_terms + 검색 쿼리 토큰을 합쳐 passage 매칭용 용어 목록 구성
 def _verification_terms(issue: dict[str, Any], payload: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     terms: list[str] = []
@@ -1041,6 +1098,7 @@ def _verification_terms(issue: dict[str, Any], payload: dict[str, Any]) -> list[
     return terms[:64]
 
 
+# 텍스트를 문단 단위로 분리 후 max_chars 이하로 합쳐 passage 목록 생성
 def _split_passages(text: str, max_chars: int = 900) -> list[str]:
     paragraphs = [part.strip() for part in re.split(r"\n{1,}", text or "") if part.strip()]
     passages: list[str] = []
@@ -1058,6 +1116,7 @@ def _split_passages(text: str, max_chars: int = 900) -> list[str]:
     return passages
 
 
+# 텍스트를 passage로 나눠 검색어와 겹치는 정도로 점수를 매겨 상위 passage 반환(키워드 폴백용)
 def _match_passages(text: str, terms: list[str], *, limit: int = 3) -> list[dict[str, Any]]:
     if not text or not terms:
         return []
@@ -1082,6 +1141,7 @@ def _match_passages(text: str, terms: list[str], *, limit: int = 3) -> list[dict
     ]
 
 
+# 텍스트를 소문자화+공백/특수문자 정리해 fuzzy 매칭용으로 정규화
 def _normalize_match_text(text: str) -> str:
     lowered = (text or "").lower()
     lowered = re.sub(r"\s+", " ", lowered)
@@ -1089,6 +1149,8 @@ def _normalize_match_text(text: str) -> str:
     return re.sub(r"\s+", " ", lowered).strip()
 
 
+# needle 텍스트가 haystack 안에 정확히 있으면 exact, 없으면 SequenceMatcher로
+# 가장 유사한 passage를 찾아 fuzzy/not_found 상태와 함께 반환
 def _best_fuzzy_match(needle: str, haystack: str) -> tuple[str, float, str]:
     needle_norm = _normalize_match_text(needle)
     haystack_norm = _normalize_match_text(haystack)
@@ -1109,6 +1171,7 @@ def _best_fuzzy_match(needle: str, haystack: str) -> tuple[str, float, str]:
     return best_text, round(best_score, 4), status
 
 
+# 모델이 보고한 passage 목록 중 해당 URL(또는 같은 도메인)에 속하는 것만 필터링
 def _reported_passages_for_url(passages: list[dict[str, Any]], url: str) -> list[dict[str, Any]]:
     target_domain = _domain_from_url(url)
     rows = []
@@ -1123,6 +1186,7 @@ def _reported_passages_for_url(passages: list[dict[str, Any]], url: str) -> list
     return rows
 
 
+# 모델이 보고한 passage(quote/key_sentence)가 실제 페이지 본문에 존재하는지 fuzzy 매칭으로 검증
 def _verify_reported_passages(text: str, passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     verified = []
     for passage in passages:
@@ -1159,6 +1223,7 @@ def _verify_reported_passages(text: str, passages: list[dict[str, Any]]) -> list
     return verified
 
 
+# passage 매칭 상태가 exact이거나, fuzzy이면서 최소 점수 이상인지 확인(신뢰할 수 있는 매칭인지)
 def _passage_match_usable(status: str, score: Any) -> bool:
     if status == "exact":
         return True
@@ -1172,6 +1237,7 @@ def _passage_match_usable(status: str, score: Any) -> bool:
     )
 
 
+# URL 1개를 fetch하고, 모델이 보고한 passage를 검증한 뒤 안 되면 키워드 폴백으로 매칭 passage 결정
 def _verify_source_url(url: str, reported_passages: list[dict[str, Any]], terms: list[str]) -> dict[str, Any]:
     row = _fetch_url_text(str(url))
     text = str(row.pop("text", "") or "")
@@ -1200,6 +1266,8 @@ def _verify_source_url(url: str, reported_passages: list[dict[str, Any]], terms:
     return row
 
 
+# 레거시 grounding 응답의 evidence_sources를 실제로 fetch/검증, 직접 매칭된 근거가
+# 없으면 supports/refutes 판정을 insufficient_evidence로 강등
 def _verify_payload_sources(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -1256,6 +1324,7 @@ def _verify_payload_sources(
     return payload
 
 
+# verified_sources 목록 기반으로 source_verification_status/direct_evidence_count 재계산
 def _refresh_source_verification_status(payload: dict[str, Any]) -> None:
     verified_sources = payload.get("verified_sources") if isinstance(payload.get("verified_sources"), list) else []
     matched_sources = [row for row in verified_sources if isinstance(row, dict) and row.get("direct_match")]
@@ -1269,6 +1338,7 @@ def _refresh_source_verification_status(payload: dict[str, Any]) -> None:
     payload["direct_evidence_count"] = sum(len(row.get("matched_passages") or []) for row in matched_sources)
 
 
+# 소스 복구 이전에 기록된 supports/refutes 방향성 상태를 여러 후보 필드에서 조회
 def _directional_status_before_repair(payload: dict[str, Any]) -> str:
     for key in ("status", "pre_source_verification_status", "pre_evidence_recheck_status"):
         status = str(payload.get(key) or "")
@@ -1277,6 +1347,7 @@ def _directional_status_before_repair(payload: dict[str, Any]) -> str:
     return ""
 
 
+# 직접 매칭되고 auto_decision_eligible한 소스들 중 최고 우선순위(가장 낮은 숫자) 조회
 def _best_eligible_priority(payload: dict[str, Any]) -> int | None:
     priorities = [
         source.get("source_priority")
@@ -1289,6 +1360,7 @@ def _best_eligible_priority(payload: dict[str, Any]) -> int | None:
     return min(priorities) if priorities else None
 
 
+# supports_issue/refutes_issue 상태를 claim_verdict/issue_supported와 함께 복원
 def _restore_directional_status(payload: dict[str, Any], status: str) -> None:
     if status not in {"supports_issue", "refutes_issue"}:
         return
@@ -1301,6 +1373,7 @@ def _restore_directional_status(payload: dict[str, Any], status: str) -> None:
         payload["issue_supported"] = False
 
 
+# 기존 소스가 신뢰 등급이 낮거나, 직접 매칭이 없거나, fetch에 실패해 소스 복구가 필요한지 판단
 def _needs_source_repair(payload: dict[str, Any]) -> bool:
     best_priority = _best_eligible_priority(payload)
     if best_priority is not None and best_priority <= SOURCE_PRIORITY_ORDER["government"]:
@@ -1317,6 +1390,7 @@ def _needs_source_repair(payload: dict[str, Any]) -> bool:
     return payload.get("source_verification_status") in {"no_sources", "no_direct_passage"}
 
 
+# 기존 소스가 신뢰도 낮거나 실패했을 때, 더 권위 있는 대체 URL을 찾기 위한 복구용 LLM 프롬프트 생성
 def _build_source_repair_prompt(issue: dict[str, Any], payload: dict[str, Any], current_date: str) -> str:
     existing_sources = []
     for source in payload.get("verified_sources", []) or []:
@@ -1378,6 +1452,8 @@ Return JSON only:
 """
 
 
+# 소스 복구가 필요하면 LLM으로 대체 URL을 받아 검증 후 기존 verified_sources에 추가,
+# 복구 후에도 검증되면 이전 방향성 상태(supports/refutes)를 복원
 def _call_source_repair_fallback(
     *,
     model_spec: str,
@@ -1461,6 +1537,7 @@ def _call_source_repair_fallback(
     return payload, usage
 
 
+# 본문에서 검색어와 겹치는 passage를 우선 골라 max_chars 이내 샘플 텍스트로 압축
 def _source_text_sample(text: str, terms: list[str], max_chars: int = 5000) -> str:
     if not text:
         return ""
@@ -1484,6 +1561,8 @@ def _source_text_sample(text: str, terms: list[str], max_chars: int = 5000) -> s
     return text[:max_chars]
 
 
+# 검증된 소스들의 본문 샘플을 모아, claim 검증에 direct/partial/irrelevant인지
+# 판정하는 LLM 프롬프트 생성, fetch 실패/빈 본문 소스는 프롬프트 없이 즉시 처리
 def _build_document_relevance_prompt(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -1549,6 +1628,7 @@ JSON만 반환하세요:
     return prompt, documents
 
 
+# 문서 관련성 판정 LLM 호출 실행 및 응답 파싱
 def _call_document_relevance_assessment(
     *,
     model_spec: str,
@@ -1644,6 +1724,8 @@ def _call_document_relevance_assessment(
     return payload, usage
 
 
+# 관련성 판정을 통과했지만 아직 검증된 passage가 없는 소스들에서, LLM으로 발췌할
+# passage 후보를 구성하는 프롬프트 생성
 def _build_passage_extraction_prompt(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -1706,6 +1788,7 @@ JSON만 반환하세요:
 """
 
 
+# 소스에 이미 검증(match_status usable)된 모델 보고 passage가 있는지 확인
 def _has_verified_model_passage(source: dict[str, Any]) -> bool:
     return any(
         isinstance(passage, dict)
@@ -1717,6 +1800,8 @@ def _has_verified_model_passage(source: dict[str, Any]) -> bool:
     )
 
 
+# LLM으로 소스 본문에서 claim 검증용 passage를 발췌하고, 발췌된 passage를 다시
+# 본문과 대조 검증한 뒤 matched_passages에 반영
 def _call_passage_extraction_fallback(
     *,
     model_spec: str,
@@ -1817,6 +1902,7 @@ def _call_passage_extraction_fallback(
     return payload, usage
 
 
+# 직접 매칭된 소스들의 출처 신뢰도(source_class)를 판정하는 LLM 프롬프트 생성
 def _build_source_trust_prompt(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -1900,6 +1986,7 @@ JSON만 반환하세요:
     return prompt, sources
 
 
+# source_class/authority_for_claim/confidence를 기준으로 strong/supporting/excluded 등급 결정
 def _source_strength_from_assessment(
     source_class: str,
     authority_for_claim: str,
@@ -1932,6 +2019,7 @@ def _source_strength_from_assessment(
     return "excluded"
 
 
+# 도메인 정책 override 적용, 위키백과는 원문 근거가 확인되면 encyclopedia로 격상
 def _apply_source_domain_policy(
     source: dict[str, Any],
     source_class: str,
@@ -1953,6 +2041,7 @@ def _apply_source_domain_policy(
     return source_class, authority_for_claim, confidence, reason
 
 
+# 출처 신뢰도 판정 LLM 호출 실행, 응답을 파싱해 각 소스에 source_class/strength 부여
 def _call_source_trust_assessment(
     *,
     model_spec: str,
@@ -2080,12 +2169,14 @@ def _call_source_trust_assessment(
     return payload, usage
 
 
+# 출력용 payload에서 내부 처리용 원문 텍스트 필드를 제거
 def _strip_internal_source_text(payload: dict[str, Any]) -> None:
     for source in payload.get("verified_sources", []) or []:
         if isinstance(source, dict):
             source.pop("_source_text", None)
 
 
+# fetch된 근거 발췌문만으로(웹검색 없이) claim을 재검증하는 최종 확인용 LLM 프롬프트 생성
 def _build_evidence_recheck_prompt(issue: dict[str, Any], payload: dict[str, Any], current_date: str) -> str:
     excerpts = []
     for source in payload.get("verified_sources", []) or []:
@@ -2132,6 +2223,7 @@ For insufficient_evidence, keep reason to one short Korean sentence and evidence
 """
 
 
+# 근거 재검증 단계 활성화 여부 조회
 def _evidence_recheck_enabled() -> bool:
     return os.getenv("CLASSIFIED_ISSUE_GROUNDING_EVIDENCE_RECHECK_ENABLED", "1").strip().lower() not in {
         "0",
@@ -2141,6 +2233,7 @@ def _evidence_recheck_enabled() -> bool:
     }
 
 
+# 소스 검증이 완료된 경우에만, 발췌문 기반 재검증 LLM 호출 실행
 def _call_evidence_recheck(
     *,
     model_spec: str,
@@ -2173,6 +2266,7 @@ def _call_evidence_recheck(
     return recheck, usage
 
 
+# dict 또는 속성 객체에서 여러 후보 이름 중 첫 유효값 조회
 def _obj_get(obj: Any, *names: str) -> Any:
     for name in names:
         if isinstance(obj, dict) and name in obj:
@@ -2183,6 +2277,7 @@ def _obj_get(obj: Any, *names: str) -> Any:
     return None
 
 
+# 값을 리스트로 정규화(None→빈 리스트, 단일 값→1개 리스트)
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -2193,6 +2288,7 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+# Gemini grounding chunk에서 웹 URL 추출
 def _gemini_web_chunk_url(chunk: Any) -> str:
     web = _obj_get(chunk, "web")
     uri = _obj_get(web, "uri", "url") if web is not None else None
@@ -2202,6 +2298,7 @@ def _gemini_web_chunk_url(chunk: Any) -> str:
     return uri if re.match(r"^https?://", uri, flags=re.IGNORECASE) else ""
 
 
+# Gemini grounding chunk에서 웹 문서 제목 추출
 def _gemini_web_chunk_title(chunk: Any) -> str:
     web = _obj_get(chunk, "web")
     title = _obj_get(web, "title") if web is not None else None
@@ -2210,8 +2307,9 @@ def _gemini_web_chunk_title(chunk: Any) -> str:
     return str(title or "").strip()
 
 
+# resp.text가 파싱 불가능해도 Google Search grounding 메타데이터(쿼리/소스/근거 문단)를 복구
 def _extract_gemini_grounding(resp: Any) -> dict[str, Any]:
-    """Recover Google Search grounding metadata even when resp.text is not parseable."""
+    """resp.text가 파싱되지 않아도 Google Search grounding 메타데이터 복구"""
     queries: list[str] = []
     sources: list[str] = []
     evidence_passages: list[dict[str, Any]] = []
@@ -2289,6 +2387,7 @@ def _extract_gemini_grounding(resp: Any) -> dict[str, Any]:
     }
 
 
+# Gemini grounding metadata를 기존 payload의 쿼리/소스/passage에 중복 없이 병합
 def _merge_gemini_metadata(payload: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     payload_queries = payload.get("search_queries") if isinstance(payload.get("search_queries"), list) else []
     for query in metadata.get("search_queries", []) or []:
@@ -2320,6 +2419,7 @@ def _merge_gemini_metadata(payload: dict[str, Any], metadata: dict[str, Any]) ->
     return payload
 
 
+# Gemini Google Search 도구를 사용해 검증 질문을 그대로 검색하도록 지시하는 프롬프트 생성
 def _build_gemini_pre_verifier_search_prompt(
     issue: dict[str, Any],
     current_date: str,
@@ -2358,13 +2458,13 @@ JSON이나 항목명을 사용하지 말고, 확인되는 내용 또는 INSUFFIC
 """
 
 
+# 이식 가능한 Gemini Google Search 요청 설정 생성
 def _gemini_google_search_config(max_tokens: int) -> types.GenerateContentConfig:
-    """Build a portable Gemini Google Search request configuration.
+    """이식 가능한 Gemini Google Search 요청 설정 생성
 
-    Search-tool requests intentionally avoid structured-output and thinking
-    controls because support for those fields differs across Gemini models and
-    compatible endpoints.  The prompt and existing parser enforce the response
-    contract instead.
+    search tool 요청은 structured-output과 thinking 제어를 의도적으로 사용하지 않는다,
+    Gemini 모델과 호환 엔드포인트마다 그 필드 지원 여부가 다르기 때문이다. 응답 형식은
+    대신 프롬프트와 기존 파서가 강제한다
     """
     del max_tokens
     return types.GenerateContentConfig(
@@ -2373,6 +2473,7 @@ def _gemini_google_search_config(max_tokens: int) -> types.GenerateContentConfig
     )
 
 
+# Gemini Google Search 비교를 1회 실행하고 grounding metadata를 정규화
 def _call_gemini_pre_verifier_search(
     *,
     issue: dict[str, Any],
@@ -2380,7 +2481,7 @@ def _call_gemini_pre_verifier_search(
     model_spec: str = "gemini",
     max_tokens: int = 700,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run one Gemini Google Search comparison and normalize its grounding metadata."""
+    """Gemini Google Search 비교를 1회 실행하고 grounding metadata 정규화"""
     resolved = _resolve_model_spec(model_spec)
     if resolved.get("provider") != "gemini":
         raise ValueError("Gemini pre-verifier search requires a Gemini model")
@@ -2516,6 +2617,7 @@ def _call_gemini_pre_verifier_search(
     }, _empty_token_usage()
 
 
+# provider(gemini/openai)에 맞는 네이티브 웹 검색을 호출하고 공통 계약으로 반환
 def _call_pre_verifier_web_search(
     *,
     issue: dict[str, Any],
@@ -2523,7 +2625,7 @@ def _call_pre_verifier_web_search(
     current_date: str,
     max_tokens: int,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str, str]:
-    """Dispatch native web search by provider and return one common contract."""
+    """provider별 네이티브 웹 검색을 호출하고 하나의 공통 계약으로 반환"""
     resolved = _resolve_model_spec(model_spec)
     provider = str(resolved.get("provider") or "")
     resolved_model = str(resolved.get("resolved_model") or model_spec)
@@ -2622,6 +2724,7 @@ def _call_pre_verifier_web_search(
     return payload, usage, resolved_model, parse_error, text or ""
 
 
+# 레거시(verifier 이후) Gemini Google Search grounding 호출 및 응답 병합
 def _call_gemini_search_grounding(
     *,
     model_spec: str,
@@ -2694,6 +2797,7 @@ def _call_gemini_search_grounding(
     }, _empty_token_usage()
 
 
+# 레거시(verifier 이후) 모델 자체 보고 소스 기반 grounding 호출(네이티브 검색 도구 없음)
 def _call_text_grounding(
     *,
     model_spec: str,
@@ -2711,11 +2815,13 @@ def _call_text_grounding(
     return payload, usage
 
 
+# temporal_error/factual_error 유형 issue만 골라 pre-verifier 근거 수집 대상 목록 구성
 def _pre_verifier_evidence_targets(payload: dict[str, Any]) -> list[dict[str, Any]]:
     issues_by_type = payload.get("issues_by_type") if isinstance(payload.get("issues_by_type"), dict) else {}
     targets: list[dict[str, Any]] = []
     seen: set[str] = set()
 
+    # issue 1건을 근거 수집 대상 레코드로 변환해 추가
     def add(issue: dict[str, Any], category: str, candidate_id: str) -> None:
         if candidate_id in seen:
             return
@@ -2750,6 +2856,7 @@ def _pre_verifier_evidence_targets(payload: dict[str, Any]) -> list[dict[str, An
     return targets
 
 
+# claim_id+정규화된 claim 텍스트로 근거 재사용 판단용 키 생성
 def _normalized_claim_retrieval_key(issue: dict[str, Any]) -> str:
     claim_id = str(issue.get("claim_id") or "").strip()
     claim = str(issue.get("resolved_claim") or issue.get("claim_text") or "").strip().lower()
@@ -2759,6 +2866,7 @@ def _normalized_claim_retrieval_key(issue: dict[str, Any]) -> str:
     return f"{claim_id}\x1f{claim}" if claim_id else claim
 
 
+# 동일한 claim을 가리키는 대상들을 묶어, 근거 수집을 claim 단위로 재사용 가능하게 그룹화
 def _group_pre_verifier_targets(
     targets: list[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
@@ -2775,6 +2883,7 @@ def _group_pre_verifier_targets(
     return [groups[key] for key in order]
 
 
+# 전사 텍스트를 문장 단위로 분리
 def _split_transcript_sentences(text: str) -> list[str]:
     return [
         match.group(0).strip()
@@ -2787,10 +2896,12 @@ def _split_transcript_sentences(text: str) -> list[str]:
     ]
 
 
+# 문장 매칭을 위해 영숫자/한글만 남기고 소문자로 정규화
 def _normalized_sentence_match_text(text: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", str(text or "").lower())
 
 
+# claim_text/resolved_claim과 가장 유사한 문장을 candidate_indices 중에서 찾음
 def _best_claim_sentence_index(
     sentence_records: list[dict[str, str]],
     candidate_indices: list[int],
@@ -2808,6 +2919,7 @@ def _best_claim_sentence_index(
     if not signals:
         return candidate_indices[0]
 
+    # 문장 인덱스의 claim 유사도 점수(포함 비율, SequenceMatcher 비율, 낮은 인덱스 우선) 계산
     def score(index: int) -> tuple[float, float, int]:
         sentence = _normalized_sentence_match_text(sentence_records[index]["text"])
         ratios = [
@@ -2827,6 +2939,8 @@ def _best_claim_sentence_index(
     return max(candidate_indices, key=score)
 
 
+# merged_clean에서 슬라이드/context를 읽어, 각 대상 claim과 가장 가까운 전사 문장을
+# 찾아 그 앞뒤 문맥과 슬라이드 텍스트를 target에 붙임
 def _attach_pre_verifier_transcript_context(
     targets: list[dict[str, Any]],
     merged_clean_path: str | Path | None,
@@ -2960,6 +3074,8 @@ def _attach_pre_verifier_transcript_context(
         target["reference_context"] = ""
 
 
+# 같은 슬라이드의 여러 candidate에 대해 웹검색 필요 여부와 한/영 검증 질문을
+# 생성하는 쿼리 계획 LLM 프롬프트 구성
 def _build_pre_verifier_query_plan_prompt(
     issues: list[dict[str, Any]],
     *,
@@ -3052,6 +3168,7 @@ verification_question 규칙:
     return prompt, candidate_ids
 
 
+# 쿼리 계획 LLM 응답을 파싱해 candidate_id 기준 계획 dict로 정규화
 def _normalize_pre_verifier_query_plans(
     text: str,
     *,
@@ -3119,6 +3236,8 @@ def _normalize_pre_verifier_query_plans(
     return plans, ""
 
 
+# 같은 슬라이드 issue 묶음에 대해 쿼리 계획 LLM을 호출, 누락된 candidate는
+# query_planner_unavailable로 안전하게 채움
 def _call_pre_verifier_query_plan(
     issues: list[dict[str, Any]],
     *,
@@ -3168,6 +3287,7 @@ def _call_pre_verifier_query_plan(
     }
 
 
+# 계획된 검증 질문 1개를 웹 검색해 후보 URL을 찾는 pre-verifier 검색 LLM 프롬프트 생성
 def _build_pre_verifier_search_prompt(
     issue: dict[str, Any],
     current_date: str,
@@ -3207,6 +3327,7 @@ JSON만 반환하세요:
 """
 
 
+# claim 검증을 위한 전체 자연어 검색 실행기 프롬프트 생성(계획 없이 직접 검색하는 legacy/direct 경로)
 def _build_pre_verifier_evidence_prompt(issue: dict[str, Any], current_date: str) -> str:
     return f"""당신은 틀릴 가능성이 있어 선별된 강의 claim 하나를 검증하는 웹 검색 실행기입니다.
 현재 날짜: {current_date}
@@ -3281,6 +3402,7 @@ JSON만 반환하세요:
 """
 
 
+# 슬라이드 텍스트에 적힌 URL 중 홈페이지/단축 URL을 제외한 문서 URL만 추출(최대 3개)
 def _slide_context_source_urls(issue: dict[str, Any]) -> list[str]:
     slide_context = (
         issue.get("slide_context")
@@ -3303,9 +3425,8 @@ def _slide_context_source_urls(issue: dict[str, Any]) -> list[str]:
         url = raw_url.rstrip(".,;:!?)]}〉》")
         parsed = urlparse(url)
         domain = str(parsed.hostname or "").lower().removeprefix("www.")
-        # Root homepages and short links are usually slide image/brand credits,
-        # not direct documents for the claim. They must not displace a searched
-        # evidence page from the three-source verification budget.
+        # 루트 홈페이지와 단축 링크는 대개 슬라이드 이미지/브랜드 출처 표기일 뿐 claim의
+        # 직접 문서가 아님, 검색된 근거 페이지를 3개 소스 검증 예산에서 밀어내면 안 됨
         if (
             not domain
             or domain in shortener_domains
@@ -3317,8 +3438,9 @@ def _slide_context_source_urls(issue: dict[str, Any]) -> list[str]:
     return urls[:3]
 
 
+# URL 검증 이전에, 모델이 작성한 검색 메타데이터의 길이/개수를 모두 제한
 def _limit_pre_verifier_retrieval_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Bound model-authored retrieval metadata before URL verification."""
+    """URL 검증 전에 모델이 작성한 검색 메타데이터 길이·개수를 제한"""
     payload.pop("search_queries", None)
     payload["verification_question"] = _trim_text(
         payload.get("verification_question") or "",
@@ -3369,6 +3491,7 @@ def _limit_pre_verifier_retrieval_payload(payload: dict[str, Any]) -> dict[str, 
     return payload
 
 
+# 신뢰도/관련성/직접매칭 조건을 모두 만족한 소스를 우선순위 정렬해 상위 N개의 핵심 문장 발췌
 def _pre_verifier_source_excerpts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     excerpts: list[dict[str, Any]] = []
     verified_sources = [
@@ -3427,6 +3550,8 @@ def _pre_verifier_source_excerpts(payload: dict[str, Any]) -> list[dict[str, Any
     return excerpts
 
 
+# 근거 문장이 claim을 supports/contradicts/irrelevant 중 어느 관계로 지지하는지
+# 판정하는 의미 유사도 LLM 프롬프트 생성
 def _build_pre_verifier_semantic_prompt(
     issue: dict[str, Any],
     excerpts: list[dict[str, Any]],
@@ -3480,6 +3605,7 @@ Return JSON only:
 """
 
 
+# 의미 유사도 판정 응답을 파싱, 누락된 source_id는 irrelevant로 채움
 def _normalize_semantic_assessments(
     text: str,
     excerpts: list[dict[str, Any]],
@@ -3520,6 +3646,7 @@ def _normalize_semantic_assessments(
     return normalized, ""
 
 
+# 의미 유사도 판정 LLM 호출, 파싱 실패 시 1회 재시도
 def _call_pre_verifier_semantic_assessment(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -3574,6 +3701,7 @@ def _call_pre_verifier_semantic_assessment(
     return excerpts, assessments, usage, metadata
 
 
+# passage에서 표시할 텍스트(matched_text 우선)를 최대 길이로 잘라 추출
 def _evidence_passage_text(passage: dict[str, Any]) -> str:
     return _trim_text(
         passage.get("matched_text")
@@ -3585,6 +3713,8 @@ def _evidence_passage_text(passage: dict[str, Any]) -> str:
     )
 
 
+# 의미 판정 결과와 발췌문을 결합해 verifier에 넘길 최종 압축 근거(evidence) 목록 구성,
+# irrelevant/저확신 후보는 제외하고 우선순위 정렬 후 상위 N개만 채택
 def _compact_pre_verifier_evidence(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -3654,8 +3784,8 @@ def _compact_pre_verifier_evidence(
             ),
         })
     evidence = []
-    # Up to VERIFY_MAX_SOURCES documents may be inspected, but only the
-    # highest-quality MAX_SOURCES evidence rows are handed to the verifier.
+    # 최대 VERIFY_MAX_SOURCES개의 문서까지 검사할 수 있지만, verifier에는 그 중
+    # 품질이 가장 높은 MAX_SOURCES개의 근거 행만 전달
     for row in evidence_candidates[: _pre_verifier_evidence_max_sources()]:
         evidence.append({
             **row,
@@ -3748,6 +3878,9 @@ def _compact_pre_verifier_evidence(
     }
 
 
+# 검색 응답을 소스 검증(fetch/prefilter)까지 처리, 파싱 완전 실패 시 즉시
+# grounding_unavailable 종료 결과를 반환, run_individual_assessments=True면
+# 문서 관련성/passage 추출/출처 신뢰도 판정까지 이어서 실행
 def _process_pre_verifier_retrieval_payload(
     issue: dict[str, Any],
     payload: dict[str, Any],
@@ -3818,9 +3951,8 @@ def _process_pre_verifier_retrieval_payload(
             retrieval_usage,
         )
     payload = _limit_pre_verifier_retrieval_payload(payload)
-    # The native search call already returned these URLs. Keep enough of that
-    # same result set to replace pages that fail to fetch without searching
-    # again.
+    # 네이티브 검색 호출이 이미 이 URL들을 반환했음, 다시 검색하지 않고도 fetch
+    # 실패한 페이지를 교체할 수 있도록 같은 결과 집합을 충분히 보관
     payload["evidence_sources"] = accepted_sources[
         : _pre_verifier_evidence_max_fetch_attempts()
     ]
@@ -3959,6 +4091,8 @@ def _process_pre_verifier_retrieval_payload(
     )
 
 
+# pre-verifier 근거 수집의 진입점, web_check가 false거나 질문이 없으면 즉시 종료 결과 반환,
+# 아니면 실제 웹 검색을 호출해 소스 처리 파이프라인으로 넘김
 def _retrieve_pre_verifier_evidence_material(
     issue: dict[str, Any],
     *,
@@ -4099,6 +4233,7 @@ def _retrieve_pre_verifier_evidence_material(
     )
 
 
+# 배치 판정 LLM 호출 최대 토큰 수 조회
 def _pre_verifier_batch_assessment_max_tokens() -> int:
     try:
         return max(
@@ -4114,6 +4249,7 @@ def _pre_verifier_batch_assessment_max_tokens() -> int:
         return 6000
 
 
+# 배치 판정 1회에 포함할 최대 candidate 수 조회
 def _pre_verifier_batch_max_candidates() -> int:
     try:
         return max(
@@ -4129,6 +4265,7 @@ def _pre_verifier_batch_max_candidates() -> int:
         return 3
 
 
+# 배치 판정 1회에 포함할 최대 소스 수 조회
 def _pre_verifier_batch_max_sources() -> int:
     try:
         return max(
@@ -4144,6 +4281,7 @@ def _pre_verifier_batch_max_sources() -> int:
         return 9
 
 
+# 배치 판정 프롬프트 최대 글자 수 조회
 def _pre_verifier_batch_max_prompt_chars() -> int:
     try:
         return max(
@@ -4159,6 +4297,8 @@ def _pre_verifier_batch_max_prompt_chars() -> int:
         return 24_000
 
 
+# 같은 슬라이드에 속한 여러 candidate와 각각의 소스를 한 번에 묶어 판정하는
+# 배치 평가 LLM 프롬프트 생성(소스 텍스트가 있는 candidate만 포함)
 def _build_pre_verifier_batch_assessment_prompt(
     entries: list[dict[str, Any]],
     *,
@@ -4319,12 +4459,13 @@ candidate별 claim_verdict:
     return prompt, source_lookup, candidate_ids
 
 
+# 슬라이드 1개의 근거들을 실제 판정 payload 크기(candidate/source/prompt 길이)에 맞춰 배치로 분할
 def _partition_pre_verifier_slide_entries(
     entries: list[dict[str, Any]],
     *,
     current_date: str,
 ) -> list[list[dict[str, Any]]]:
-    """Split one slide's evidence by the actual assessment payload size."""
+    """슬라이드 1개의 근거를 실제 판정 payload 크기에 맞춰 배치로 분할"""
     max_candidates = _pre_verifier_batch_max_candidates()
     max_sources = _pre_verifier_batch_max_sources()
     max_prompt_chars = _pre_verifier_batch_max_prompt_chars()
@@ -4355,6 +4496,8 @@ def _partition_pre_verifier_slide_entries(
     return batches
 
 
+# 배치 평가 LLM 응답을 파싱해 candidate_id 기준 판정 dict로 정규화, source는 소유자
+# candidate와 일치할 때만 반영
 def _normalize_pre_verifier_batch_assessment(
     text: str,
     *,
@@ -4462,6 +4605,7 @@ def _normalize_pre_verifier_batch_assessment(
     return normalized, ""
 
 
+# 정규화된 배치 판정 결과를 entry의 각 소스에 반영(관련성/passage 검증/신뢰도), 통계 카운트 갱신
 def _apply_pre_verifier_batch_assessment(
     entry: dict[str, Any],
     result: dict[str, Any],
@@ -4717,6 +4861,7 @@ def _apply_pre_verifier_batch_assessment(
     return evidence
 
 
+# 배치 판정 LLM을 호출해 파싱하고, 각 candidate에 대해 결과를 적용해 evidence dict 생성
 def _call_pre_verifier_batch_assessment(
     entries: list[dict[str, Any]],
     *,
@@ -4784,6 +4929,7 @@ def _call_pre_verifier_batch_assessment(
     return evidence_by_candidate, usage, metadata
 
 
+# material이 이미 종료(terminal) 상태면 그대로 반환, 아니면 개별 의미 판정을 실행해 최종 evidence 구성
 def _finalize_pre_verifier_evidence_material(
     issue: dict[str, Any],
     material: dict[str, Any],
@@ -4819,6 +4965,7 @@ def _finalize_pre_verifier_evidence_material(
     )
 
 
+# claim 1건에 대한 근거 수집과 개별 의미 판정을 순서대로 실행하는 비배치 경로
 def _retrieve_pre_verifier_evidence(
     issue: dict[str, Any],
     *,
@@ -4826,7 +4973,7 @@ def _retrieve_pre_verifier_evidence(
     current_date: str,
     max_tokens: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Retrieve and semantically assess evidence for one unique claim."""
+    """고유 claim 1건의 근거를 수집하고 의미적으로 판정"""
     material, usage = _retrieve_pre_verifier_evidence_material(
         issue,
         model_spec=model_spec,
@@ -4842,6 +4989,7 @@ def _retrieve_pre_verifier_evidence(
     )
 
 
+# 하나의 claim에 대해 수집한 evidence를 같은 claim을 공유하는 그룹의 모든 target에 복제 배포
 def _fan_out_shared_evidence(
     evidence: dict[str, Any],
     group: list[dict[str, Any]],
@@ -4868,6 +5016,8 @@ def _fan_out_shared_evidence(
     return rows
 
 
+# factual_error/temporal_error 후보들에 대해 병렬로 pre-verifier 근거를 수집하는
+# 비배치(개별 claim) 경로, 동일 claim은 그룹화해 1회만 검색하고 결과를 fan-out
 def collect_pre_verifier_evidence(
     payload: dict[str, Any],
     *,
@@ -4877,7 +5027,7 @@ def collect_pre_verifier_evidence(
     max_workers: int = 20,
     max_tokens: int = 600,
 ) -> dict[str, Any]:
-    """Retrieve compact native-search evidence for factual verifier candidates."""
+    """factual verifier 후보들을 위한 압축 native-search 근거 수집"""
     targets = _pre_verifier_evidence_targets(payload)
     _attach_pre_verifier_transcript_context(
         targets,
@@ -4903,6 +5053,7 @@ def collect_pre_verifier_evidence(
         flush=True,
     )
 
+    # claim 1건에 대한 근거 수집 워커
     def worker(issue: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         return _retrieve_pre_verifier_evidence(
             issue,
@@ -5041,6 +5192,8 @@ def collect_pre_verifier_evidence(
     }
 
 
+# claim은 개별적으로 검색하되, fetch된 근거는 슬라이드 단위로 묶어 배치 판정하는
+# 최적화 경로(실제 사용되는 메인 근거 수집 함수)
 def collect_pre_verifier_evidence_batched(
     payload: dict[str, Any],
     *,
@@ -5052,13 +5205,13 @@ def collect_pre_verifier_evidence_batched(
     unique_claim_limit: int | None = None,
     progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Retrieve claims independently, then assess fetched evidence per slide.
+    """claim은 독립적으로 검색한 뒤, fetch된 근거는 슬라이드 단위로 판정
 
-    Search remains claim-specific so the native tool records the actual query for
-    each claim. Post-search relevance, quotation, trust, and claim-relation checks
-    are grouped by slide. A missing/invalid slide-batch result falls back to the
-    existing per-claim path for that claim only. Claims without fetched source
-    text remain insufficient and continue without a redundant second search.
+    네이티브 검색 도구가 각 claim의 실제 검색어를 기록하도록 검색은 claim 단위를
+    유지한다. 검색 이후의 관련성/인용/신뢰도/claim-관계 판정은 슬라이드 단위로
+    묶는다. 슬라이드 배치 결과가 없거나 유효하지 않으면 해당 claim만 기존 개별
+    claim 경로로 폴백한다. fetch된 소스 본문이 없는 claim은 재검색 없이 계속
+    insufficient 상태로 남는다
     """
     all_targets = _pre_verifier_evidence_targets(payload)
     _attach_pre_verifier_transcript_context(
@@ -5130,6 +5283,7 @@ def collect_pre_verifier_evidence_batched(
 
     query_plan_metadata: list[dict[str, Any]] = []
 
+    # 슬라이드 배치 1개의 쿼리 계획 LLM 호출 워커
     def query_plan_worker(
         slide_key: str,
         batch_index: int,
@@ -5269,6 +5423,7 @@ def collect_pre_verifier_evidence_batched(
         flush=True,
     )
 
+    # claim 1건의 웹 검색+fetch 워커(개별 평가는 나중에 슬라이드 배치로 처리하므로 여기선 생략)
     def retrieval_worker(
         issue: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -5380,6 +5535,7 @@ def collect_pre_verifier_evidence_batched(
     batch_metadata_rows: list[dict[str, Any]] = []
     batch_assessment_call_count = 0
 
+    # 슬라이드 배치 1개의 근거 평가 LLM 호출 워커
     def batch_worker(
         slide_key: str,
         slide_batch_index: int,
@@ -5732,6 +5888,7 @@ def collect_pre_verifier_evidence_batched(
     }
 
 
+# 레거시(verifier 이후) grounding 시도 1회, provider에 맞게 gemini/text grounding 분기
 def _call_grounding_trial(
     *,
     model_spec: str,
@@ -5794,6 +5951,7 @@ def _call_grounding_trial(
     return payload, usage
 
 
+# trial에서 direct_match+auto_decision_eligible하고 우선순위가 매겨진 소스만 필터링
 def _eligible_sources_for_decision(trial: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for source in trial.get("verified_sources", []) or []:
@@ -5808,6 +5966,7 @@ def _eligible_sources_for_decision(trial: dict[str, Any]) -> list[dict[str, Any]
     return rows
 
 
+# trial에서 채택 가능한 소스들 중 최고 우선순위(가장 낮은 숫자) 조회
 def _trial_best_source_priority(trial: dict[str, Any]) -> int | None:
     priorities = [
         int(source["source_priority"])
@@ -5817,6 +5976,7 @@ def _trial_best_source_priority(trial: dict[str, Any]) -> int | None:
     return min(priorities) if priorities else None
 
 
+# trial에서 지정 우선순위와 정확히 일치하는 소스만 선택
 def _trial_selected_sources(trial: dict[str, Any], priority: int) -> list[dict[str, Any]]:
     return [
         source for source in _eligible_sources_for_decision(trial)
@@ -5824,6 +5984,7 @@ def _trial_selected_sources(trial: dict[str, Any], priority: int) -> list[dict[s
     ]
 
 
+# 텍스트를 최대 길이로 자르고 초과 시 "..." 추가
 def _trim_text(value: Any, max_chars: int) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
@@ -5831,6 +5992,7 @@ def _trim_text(value: Any, max_chars: int) -> str:
     return text[: max(0, max_chars - 1)].rstrip() + "..."
 
 
+# 선택된 소스들에서 중복 없는 근거 문장을 최대 limit개까지 수집
 def _selected_evidence_passages(selected_sources: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -5870,6 +6032,7 @@ def _selected_evidence_passages(selected_sources: list[dict[str, Any]], *, limit
     return rows
 
 
+# 레거시 grounding 여러 trial의 집계 결과를 최종 응답용 압축 payload로 구성
 def _compact_grounding_payload(
     *,
     status: str,
@@ -5906,6 +6069,8 @@ def _compact_grounding_payload(
     return base
 
 
+# 여러 레거시 grounding trial 결과를 소스 우선순위 기준으로 집계, 지지/반박이 충돌하면
+# 보수적으로 insufficient_evidence 처리
 def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, Any]]) -> dict[str, Any]:
     verified_trials = [
         trial for trial in trials
@@ -5971,6 +6136,7 @@ def _aggregate_grounding_trials(issue: dict[str, Any], trials: list[dict[str, An
     )
 
 
+# 설정된 모든 grounding 모델로 레거시 trial을 실행하고 결과를 집계
 def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -> tuple[dict[str, Any], dict[str, int]]:
     models = _grounding_model_specs()
     token_usage = _empty_token_usage()
@@ -6005,12 +6171,14 @@ def _call_grounding(issue: dict[str, Any], current_date: str, max_tokens: int) -
     return _aggregate_grounding_trials(issue, trials), token_usage
 
 
+# issue의 카테고리가 grounding 대상 카테고리 집합에 속하는지 확인
 def _should_ground(issue: dict[str, Any], categories: set[str]) -> bool:
     if str(issue.get("category") or "").strip() not in categories:
         return False
     return True
 
 
+# issue에서 이전 grounding 조정 관련 필드를 모두 제거
 def _clear_grounding_adjustment(issue: dict[str, Any]) -> None:
     for key in (
         "pre_grounding_final_severity_score",
@@ -6024,6 +6192,7 @@ def _clear_grounding_adjustment(issue: dict[str, Any]) -> None:
         issue.pop(key, None)
 
 
+# grounding 판정을 issue의 final_severity_score에 소프트 delta로 반영(급격한 override가 아님)
 def _apply_grounding_decision(issue: dict[str, Any], payload: dict[str, Any]) -> None:
     _clear_grounding_adjustment(issue)
     if payload.get("status") not in {"refutes_issue", "supports_issue"}:
@@ -6050,6 +6219,7 @@ def _apply_grounding_decision(issue: dict[str, Any], payload: dict[str, Any]) ->
     }
 
 
+# verifier 결과의 summary를 grounding 조정 이후 값 기준으로 재계산
 def _refresh_summary(verifier_result: dict[str, Any]) -> None:
     summary = verifier_result.get("summary")
     issues = verifier_result.get("all_issues", []) or []
@@ -6081,6 +6251,8 @@ def _refresh_summary(verifier_result: dict[str, Any]) -> None:
     summary.pop("web_grounding_resurrected_count", None)
 
 
+# 레거시(verifier 이후) grounding 전체 오케스트레이션, 대상 카테고리 issue마다
+# 여러 모델로 병렬 grounding trial을 실행하고 집계 결과를 severity 점수에 반영
 def ground_classified_issues(
     verifier_result: dict[str, Any],
     *,
@@ -6114,10 +6286,11 @@ def ground_classified_issues(
         flush=True,
     )
 
-    # 모델별로 독립된 pool을 사용한다. 따라서 여러 grounding 모델을 켜도
-    # ``max_workers``가 전체 한도가 아니라 모델당 동시 요청 한도가 된다.
+    # 모델별로 독립된 pool 사용, 따라서 여러 grounding 모델을 켜도
+    # ``max_workers``는 전체 한도가 아니라 모델당 동시 요청 한도
     trials_by_id: dict[str, list[dict[str, Any]]] = {}
 
+    # 모델 1개로 issue 1건에 대한 grounding trial 실행
     def worker(model_spec: str, issue: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, int]]:
         issue_id = str(issue.get("id") or issue.get("issue_id") or "")
         try:
@@ -6146,6 +6319,7 @@ def ground_classified_issues(
             usage = _empty_token_usage()
         return issue_id, payload, usage
 
+    # 모델 1개로 대상 issue 전체를 병렬 처리
     def run_model(model_spec: str) -> list[tuple[str, dict[str, Any], dict[str, int]]]:
         results: list[tuple[str, dict[str, Any], dict[str, int]]] = []
         with ThreadPoolExecutor(max_workers=min(max(1, max_workers), len(targets))) as executor:
@@ -6200,6 +6374,7 @@ def ground_classified_issues(
     return verifier_result
 
 
+# JSON 파일 로드, 최상위가 객체가 아니면 예외
 def _load_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -6207,8 +6382,9 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+# CLI 인자 파서 구성
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run web grounding over classified issue verifier output.")
+    parser = argparse.ArgumentParser(description="classified issue verifier 출력에 대해 웹 grounding 실행")
     parser.add_argument("verifier_json")
     parser.add_argument("-o", "--output")
     parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_GROUNDING_CURRENT_DATE", "2026-05-31"))
@@ -6217,11 +6393,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default="",
-        help="comma/space-separated grounding models. Defaults to CLASSIFIED_ISSUE_GROUNDING_MODELS or gpt.",
+        help="콤마/공백 구분 grounding 모델 목록, 기본값은 CLASSIFIED_ISSUE_GROUNDING_MODELS 또는 gpt",
     )
     return parser
 
 
+# CLI 진입점, verifier 출력 JSON에 레거시 grounding 실행 후 결과 저장
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     input_path = Path(args.verifier_json)

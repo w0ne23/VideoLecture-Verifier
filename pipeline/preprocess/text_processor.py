@@ -1,5 +1,5 @@
 """
-텍스트 교정 엔진.
+텍스트 교정 엔진
 
 Pass 1: Gemini로 슬라이드 제목 + 용어 사전 기반 ASR 오인식 후보 생성
 Pass 2: GPT로 슬라이드 전체 텍스트 컨텍스트 기반 후보 보강
@@ -41,9 +41,9 @@ IMAGE_MODEL = os.getenv("VLVERIFIER_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini")
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "12"))
 PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_PARALLEL_REQUESTS", "20")))
-# Ollama는 OLLAMA_NUM_PARALLEL(기본 4)개까지만 서버에서 동시 처리한다. 그보다
+# Ollama는 OLLAMA_NUM_PARALLEL(기본 4)개까지만 서버에서 동시 처리, 그보다
 # 많은 요청을 동시에 쏘면 대기열에 밀려 클라이언트 타임아웃(600초)을 넘겨버려서,
-# 로컬 모델을 쓸 때는 서버 동시 처리 한도에 맞춰 요청 수를 낮춘다.
+# 로컬 모델을 쓸 때는 서버 동시 처리 한도에 맞춰 요청 수를 낮춤
 OLLAMA_PARALLEL_REQUESTS = max(1, int(os.getenv("MERGE_CORRECTION_OLLAMA_PARALLEL_REQUESTS", "4")))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
 TRANSITION_TAIL_SEC = float(os.getenv("MERGE_TRANSITION_TAIL_SEC", "0.2"))
@@ -90,22 +90,26 @@ PASS3_REASON_CODES = {
     7: "proper_noun",
 }
 
+# 테스트/오버라이드용 Gemini 클라이언트 주입
 def set_client(client: genai.Client) -> None:
     global _override_client
     _override_client = client
 
 
+# 현재 설정된 Gemini 클라이언트 반환, 없으면 예외
 def _get_client() -> genai.Client:
     if _override_client is None:
         raise RuntimeError("Gemini client가 설정되지 않았습니다.")
     return _override_client
 
 
+# 스테이지별 카운터에 값 누적 (스레드 안전)
 def _add_stage_count(key: str, value: int) -> None:
     with _token_usage_lock:
         _stage_counts[key] = int(_stage_counts.get(key, 0) or 0) + int(value or 0)
 
 
+# Pass3 판정 감사 로그 레코드 누적
 def _add_pass3_candidate_audit(records: list[dict]) -> None:
     if not records:
         return
@@ -113,6 +117,7 @@ def _add_pass3_candidate_audit(records: list[dict]) -> None:
         _pass3_candidate_audit.extend(records)
 
 
+# Gemini 응답의 토큰 사용량을 전역/스테이지별 집계에 반영하고 cost_report에도 기록
 def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
     usage = getattr(response, "usage_metadata", None)
     with _token_usage_lock:
@@ -142,6 +147,7 @@ def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
         pass
 
 
+# OpenAI 호환 응답의 토큰 사용량을 전역/스테이지별 집계에 반영하고 cost_report에도 기록
 def _add_openai_usage(response, *, stage: str, model: str, prompt_chars: int = 0) -> None:
     usage = getattr(response, "usage", None)
     with _token_usage_lock:
@@ -172,6 +178,7 @@ def _add_openai_usage(response, *, stage: str, model: str, prompt_chars: int = 0
         pass
 
 
+# Ollama 모델 여부 판별
 def _is_ollama_model(model: str) -> bool:
     spec = str(model or "").strip().lower()
     return spec.startswith("ollama:") or spec.startswith("ollama/")
@@ -179,14 +186,15 @@ def _is_ollama_model(model: str) -> bool:
 
 def _effective_parallel_requests(*models: str) -> int:
     """models 중 하나라도 Ollama면 서버 동시 처리 한도(OLLAMA_PARALLEL_REQUESTS)를,
-    전부 상용 API면 기존 PARALLEL_REQUESTS를 반환한다."""
+    전부 상용 API면 기존 PARALLEL_REQUESTS를 반환
+    """
     if any(_is_ollama_model(model) for model in models):
         return OLLAMA_PARALLEL_REQUESTS
     return PARALLEL_REQUESTS
 
 
 def _resolve_ollama_model(model: str) -> tuple[str, Optional[bool]]:
-    """`ollama:` prefix를 떼어내고, `#think`/`#nothink` 접미사가 있으면 (모델, think여부)로 반환."""
+    """`ollama:` prefix를 떼어내고, `#think`/`#nothink` 접미사가 있으면 (모델, think여부)로 반환"""
     spec = str(model or "").strip()
     lowered = spec.lower()
     if lowered.startswith("ollama:"):
@@ -200,6 +208,7 @@ def _resolve_ollama_model(model: str) -> tuple[str, Optional[bool]]:
     return spec, None
 
 
+# OpenAI 호환(Ollama 포함) API로 텍스트 교정 프롬프트 호출, 서버가 특정 파라미터를 거부하면 그것만 제거하고 재시도
 def _call_openai_text_correction(
     prompt: str,
     *,
@@ -276,6 +285,7 @@ def _call_openai_text_correction(
     return response.choices[0].message.content or ""
 
 
+# 슬라이드 이미지를 첨부해 OpenAI Vision으로 텍스트 교정 후보 생성 (Pass2 이미지 참조 모드)
 def _call_openai_image_correction(prompt: str, image_bytes: bytes):
     from .config import get_openai_client
     from .utils import api_call_with_retry
@@ -322,6 +332,7 @@ def _call_openai_image_correction(prompt: str, image_bytes: bytes):
     return response.choices[0].message.content or ""
 
 
+# 재시도 가능한 오류 코드가 감지되면 지수적으로 대기하며 재시도, max_retries<=0이면 무한 재시도
 def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int | None = None):
     if max_retries is None:
         max_retries = int(os.getenv("VLVERIFIER_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
@@ -347,10 +358,12 @@ def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int 
     raise Exception("API 호출 실패")
 
 
+# 연속 공백을 하나로 정규화
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+# 적용 확정된 교정 결과 dict 생성
 def _applied(text: str, risk: str, reason: str) -> dict:
     return {
         "candidate_text": text,
@@ -361,6 +374,7 @@ def _applied(text: str, risk: str, reason: str) -> dict:
     }
 
 
+# 슬라이드 제목+전사 일부를 보고 강의 도메인/서브도메인 분류
 def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> dict:
     titles_block = "\n".join(f"- {title}" for title in slide_titles[:10] if title)
     transcript_block = transcript_sample[:1500]
@@ -415,6 +429,7 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
         return {"domain": "etc", "subdomain": ""}
 
 
+# scene별 occurrence를 시간순 평면 리스트로 변환
 def _build_occurrence_index(scene_occurrences: dict[int, list[dict]]) -> list[dict]:
     occ_index = []
     for scene_no, occs in scene_occurrences.items():
@@ -430,6 +445,9 @@ def _build_occurrence_index(scene_occurrences: dict[int, list[dict]]) -> list[di
     return occ_index
 
 
+# 전사 세그먼트를 겹치는 시간 구간(occurrence)에 배정, 겹치는 구간이 여러 개면 전환
+# 경계 근처(TRANSITION_LEAD_SEC/TAIL_SEC) 휴리스틱으로 다음 구간에 배정할지 판단,
+# 겹치는 구간이 없으면 세그먼트 65% 지점에 가장 가까운 구간을 ASSIGN_MAX_GAP_SEC 이내에서 선택
 def _assign_segment_occurrence(seg: dict, occ_index: list[dict]) -> Optional[int]:
     if not occ_index:
         return None
@@ -481,6 +499,7 @@ def _assign_segment_occurrence(seg: dict, occ_index: list[dict]) -> Optional[int
     return best_idx
 
 
+# Pass1/2 LLM 응답에서 corrections 배열을 {index: 교정정보} dict로 파싱
 def parse_batch_response(text: str) -> dict[int, dict]:
     if not text:
         return {}
@@ -515,6 +534,7 @@ def parse_batch_response(text: str) -> dict[int, dict]:
     return corrections
 
 
+# 슬라이드 텍스트에서 한글 용어/코드 식별자 후보를 추출해 용어 사전 목록 생성
 def extract_glossary_terms(slide_texts: dict[int, dict]) -> list[str]:
     ordered_terms: dict[str, None] = {}
 
@@ -569,6 +589,7 @@ def extract_glossary_terms(slide_texts: dict[int, dict]) -> list[str]:
     return list(ordered_terms.keys())[:max_terms]
 
 
+# 지정 슬라이드 및 인접 슬라이드(window)의 용어만 골라 프롬프트용 용어 사전 블록 생성
 def build_local_glossary(
     slide_texts: dict[int, dict],
     slide_no: Optional[int],
@@ -588,6 +609,7 @@ def build_local_glossary(
     return "## 현재/인접 슬라이드 용어 사전 (표기 참조용)\n" + ", ".join(terms)
 
 
+# metadata에서 scene별 시간 구간과 scene->논리 슬라이드 번호 매핑 추출
 def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[int, list[dict]], dict[int, int]]:
     scene_occurrences: dict[int, list[dict]] = {}
     scene_to_slide_no: dict[int, int] = {}
@@ -619,6 +641,7 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
     return scene_occurrences, scene_to_slide_no
 
 
+# metadata에서 scene_index별 슬라이드 번호/canonical/visit 정보 인덱스 생성
 def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     scene_meta: dict[int, dict] = {}
     for entry in metadata:
@@ -646,6 +669,7 @@ def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     return scene_meta
 
 
+# 텍스트화 결과에서 논리 슬라이드 번호별 대표 텍스트(가장 정보량 많은 scene) 선택
 def _load_integrated_slide_texts(
     integrated_data: dict,
     base_dir: Path,
@@ -694,6 +718,7 @@ def _load_integrated_slide_texts(
     return result
 
 
+# Pass1: 슬라이드 참고 없이 문맥+용어 사전만으로 ASR 오인식 교정 후보 생성
 def _correct_batch_pass1(
     batch: list[tuple[int, dict]],
     slide_title: str = "",
@@ -809,6 +834,7 @@ Pass1에서 후보를 놓치는 것(recall)이 후보를 과하게 내는 것보
     return result
 
 
+# Pass2: 슬라이드(텍스트 또는 이미지)를 참고해 Pass1 후보를 보강한 교정 후보 생성
 def _correct_batch_pass2(
     batch: list[tuple[int, dict]],
     slide_context: str,
@@ -923,6 +949,7 @@ ASR 오인식 가능성이 있는 후보는 Pass3가 검증할 수 있도록 출
     return result
 
 
+# Pass3 LLM 응답에서 broken 판정 + 채택된 변경(changes) 목록 파싱, broken에 없는 index는 무시
 def parse_pass3_response(text: str) -> dict[str, list[dict]]:
     if not text:
         return {"accepted_changes": []}
@@ -953,7 +980,7 @@ def parse_pass3_response(text: str) -> dict[str, list[dict]]:
             continue
         if isinstance(parsed.get("broken"), list) and idx not in broken_indices:
             # 1단계(원문 자체 판정)에서 broken으로 표시하지 않은 i는
-            # 2단계(후보 선택) 결과를 신뢰하지 않고 무시한다.
+            # 2단계(후보 선택) 결과를 신뢰하지 않고 무시
             continue
         candidate_number = item.get("c", item.get("candidate_number"))
         occurrence = item.get("occ", item.get("occurrence", 1))
@@ -977,6 +1004,7 @@ def parse_pass3_response(text: str) -> dict[str, list[dict]]:
     return {"accepted_changes": accepted_changes}
 
 
+# Pass1/2 후보가 있는 세그먼트만 모아 Pass3 검증용 item(원문+앞뒤 발화+후보 목록) 구성
 def _build_pass3_items(
     batch: list[tuple[int, dict]],
     pass1: dict[int, str],
@@ -1013,6 +1041,7 @@ def _build_pass3_items(
     return items
 
 
+# Pass3 item 목록을 프롬프트용 텍스트 블록으로 포맷
 def _format_pass3_items(pass3_items: list[dict]) -> str:
     blocks: list[str] = []
     for local_i, item in enumerate(pass3_items):
@@ -1032,6 +1061,7 @@ def _format_pass3_items(pass3_items: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+# Pass3: 원문 자체가 깨졌는지 먼저 판정(broken) 후, 깨진 항목에 한해 후보에서 최소 교체 span만 추출
 def _validate_candidates_pass3(
     pass3_items: list[dict],
     slide_context: str = "",
@@ -1210,6 +1240,7 @@ reason_code 2·3·4·6·7도 음가 근거 없이 다른 개념을 넣는 예외
     return result
 
 
+# 공백/문장부호 차이만 있는 표면적 편집인지 확인 (실질적 변경이 아니면 True)
 def _is_surface_only_edit(edit: dict) -> bool:
     from_text = str(edit.get("from_text", "") or "")
     to_text = str(edit.get("to_text", "") or "")
@@ -1219,10 +1250,12 @@ def _is_surface_only_edit(edit: dict) -> bool:
     return re.sub(strip_chars, "", from_text) == re.sub(strip_chars, "", to_text)
 
 
+# 완성형 한글 음절 여부 확인
 def _is_hangul_char(value: str) -> bool:
     return bool(value) and "가" <= value <= "힣"
 
 
+# 1~2글자 짧은 한글 교체가 앞뒤 한글과 붙어 다른 단어를 오염시킬 위험이 있는지 확인
 def _is_unsafe_short_korean_span(raw_text: str, from_text: str, to_text: str, raw_start: int, raw_end: int) -> bool:
     if len(from_text) > 2 and len(to_text) > 2:
         return False
@@ -1233,6 +1266,8 @@ def _is_unsafe_short_korean_span(raw_text: str, from_text: str, to_text: str, ra
     return _is_hangul_char(left) or _is_hangul_char(right)
 
 
+# LLM이 낸 from/to 변경 1건을 원문 내 실제 위치(raw_start/end)로 확장, 후보 문장에 없는
+# to_text·표면적 편집·불안전한 짧은 span은 제외
 def _expand_llm_change(raw_text: str, change: dict, candidates: list[dict]) -> list[dict]:
     raw_text = str(raw_text or "")
     from_text = str(change.get("from_text", "") or "")
@@ -1304,11 +1339,11 @@ def _hangul_batchim_index(ch: str) -> Optional[int]:
 
 def _fix_trailing_batchim_particle(text: str, insert_end: int, last_inserted_char: str) -> str:
     """to_text 삽입 직후 원문에 남아있던 조사(을/를, 은/는, 이/가, 과/와, 으로/로)를
-    방금 삽입한 단어의 받침 유무에 맞게 결정론적으로 교정한다.
+    방금 삽입한 단어의 받침 유무에 맞게 결정론적으로 교정
 
     최소 span 교체 방식상 후보 단어만 바뀌고 뒤에 남은 조사는 원문 그대로 남는데,
-    받침 유무가 바뀌는 치환(예: 욕구를->목적을)에서 조사가 안 맞게 되는 문제를 막는다.
-    한글 음절이 아니거나(영어/숫자/기호) 판정 불가능한 경우는 건드리지 않는다.
+    받침 유무가 바뀌는 치환(예: 욕구를->목적을)에서 조사가 안 맞게 되는 문제를 막음
+    한글 음절이 아니거나(영어/숫자/기호) 판정 불가능한 경우는 건드리지 않음
     """
     final_index = _hangul_batchim_index(last_inserted_char)
     if final_index is None:
@@ -1319,7 +1354,7 @@ def _fix_trailing_batchim_particle(text: str, insert_end: int, last_inserted_cha
     two = text[insert_end:insert_end + 2]
     if two == "으로" or one == "로":
         current_len = 2 if two == "으로" else 1
-        # ㄹ받침(final_index==8)은 으로가 아니라 로를 쓴다.
+        # ㄹ받침(final_index==8)은 으로가 아니라 로를 씀
         want_short = (not has_batchim) or final_index == 8
         correct = "로" if want_short else "으로"
         current = two if current_len == 2 else one
@@ -1337,6 +1372,7 @@ def _fix_trailing_batchim_particle(text: str, insert_end: int, last_inserted_cha
     return text
 
 
+# 검증된 편집들을 겹치지 않는 것만 골라 원문에 적용, 적용 후 받침 조사도 함께 보정
 def _apply_accepted_edits(raw_text: str, edits: list[dict]) -> tuple[str, list[dict]]:
     raw_text = str(raw_text or "")
     valid_edits: list[dict] = []
@@ -1370,6 +1406,7 @@ def _apply_accepted_edits(raw_text: str, edits: list[dict]) -> tuple[str, list[d
     return corrected, valid_edits
 
 
+# Pass1/2 후보로 Pass3 item을 만들고 곧바로 검증까지 실행하는 편의 함수
 def merge_two_passes(
     batch: list[tuple[int, dict]],
     pass1: dict[int, str],
@@ -1381,6 +1418,7 @@ def merge_two_passes(
     return merge_pass3_items(pass3_items, slide_context=slide_context)
 
 
+# Pass3 검증 결과를 실제 원문에 적용해 최종 교정 dict 구성
 def merge_pass3_items(
     pass3_items: list[dict],
     slide_context: str = "",
@@ -1410,6 +1448,7 @@ def merge_pass3_items(
     return corrections
 
 
+# Pass2 입력용 배치 복사 (현재는 Pass1 결과를 별도 반영하지 않고 그대로 복제)
 def _build_pass2_batch_from_pass1(
     batch: list[tuple[int, dict]],
     pass1: dict[int, str],
@@ -1425,14 +1464,14 @@ def _prepare_pass3_jobs(
     use_pass2: bool = True,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> dict:
-    """Pass1/Pass2를 실행해 Pass3 검증용 후보 job을 만든다.
+    """Pass1/Pass2를 실행해 Pass3 검증용 후보 job 생성
 
     Pass3 재현성 테스트 등에서 동일한 Pass1/2 후보 세트를 재사용하기 위해
-    correct_segments_three_pass에서 Pass1/2 단계만 분리했다.
+    correct_segments_three_pass에서 Pass1/2 단계만 분리
 
     progress_callback(band, done, total)이 주어지면 job이 하나씩 끝날 때마다
-    "pass1"/"pass2" 두 band로 나눠 보고한다 — 한 job 안에서 Pass1을 마친 시점과
-    (use_pass2면) Pass2까지 마친 시점을 따로 신호한다.
+    "pass1"/"pass2" 두 band로 나눠 보고 — 한 job 안에서 Pass1을 마친 시점과
+    (use_pass2면) Pass2까지 마친 시점을 따로 신호
     """
     scene_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
     scene_meta_by_index = _build_scene_metadata_index(metadata)
@@ -1493,7 +1532,7 @@ def _prepare_pass3_jobs(
 
     def _tick(band: str) -> None:
         # parallel_jobs는 이 함수가 호출되는 시점(=executor 제출 이후)에는 이미 다
-        # 채워져 있으므로, 총량으로 그냥 len(parallel_jobs)를 읽어도 된다.
+        # 채워져 있으므로, 총량으로 그냥 len(parallel_jobs)를 읽어도 됨
         nonlocal pass1_done, pass2_done
         if not progress_callback:
             return
@@ -1516,7 +1555,7 @@ def _prepare_pass3_jobs(
         _tick("pass1")
         if not use_pass2:
             # Pass2를 아예 안 쓰는 실행이면 그 band는 각 job이 끝나는 대로 바로
-            # 다 찬 것으로 본다 — Pass1과 동시에 완료 신호를 보낸다.
+            # 다 찬 것으로 봄 — Pass1과 동시에 완료 신호를 보냄
             _tick("pass2")
             return context, _build_pass3_items(sub, pass1, {})
 
@@ -1560,8 +1599,8 @@ def _prepare_pass3_jobs(
             parallel_jobs.append((sub, "", "", ""))
 
     if not parallel_jobs and progress_callback:
-        # 교정 대상 자체가 없으면 job이 하나도 안 도니 _tick이 안 불린다 — 두 band를
-        # 즉시 완료 처리해서 뒤 단계(그룹화)가 기다리지 않게 한다.
+        # 교정 대상 자체가 없으면 job이 하나도 안 돌아 _tick이 안 불림 — 두 band를
+        # 즉시 완료 처리해서 뒤 단계(그룹화)가 기다리지 않게 함
         progress_callback("pass1", 0, 0)
         progress_callback("pass2", 0, 0)
 
@@ -1601,8 +1640,11 @@ def _run_pass3_jobs(
     pass3_jobs: list[tuple[list[dict], str]],
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict[int, dict]:
-    """Pass3(merge_pass3_items)만 실행. PASS3_TEXT_MODEL을 바꿔가며 동일한
-    pass3_jobs(=동일 Pass1/2 후보)를 재사용해 재현성을 테스트할 때 쓴다."""
+    """Pass3(merge_pass3_items)만 실행
+
+    PASS3_TEXT_MODEL을 바꿔가며 동일한 pass3_jobs(=동일 Pass1/2 후보)를 재사용해
+    재현성을 테스트할 때 사용
+    """
     all_corrections: dict[int, dict] = {}
     total_pass3_items = sum(len(items) for items, _ in pass3_jobs)
     if pass3_jobs:
@@ -1627,11 +1669,12 @@ def _run_pass3_jobs(
                     progress_callback(done_jobs, total_jobs)
         print()
     elif progress_callback:
-        # 검증할 Pass3 후보가 아예 없으면 band를 즉시 완료 처리한다.
+        # 검증할 Pass3 후보가 아예 없으면 band를 즉시 완료 처리
         progress_callback(0, 0)
     return all_corrections
 
 
+# 원본 세그먼트에 scene/슬라이드 정보와 최종 교정 결과(적용/미적용)를 반영해 완성
 def _assemble_corrected_segments(
     segments: list[dict],
     seg_scene: dict[int, int],
@@ -1702,8 +1745,9 @@ def correct_segments_three_pass(
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> list[dict]:
     """progress_callback(band, done, total)이 주어지면 "pass1"/"pass2"/"pass3" 세 band로
-    나눠 실측 진행률을 보고한다. band별 총량은 그 band가 시작되는 시점에만 알면 된다
-    (Pass1/2 총량은 job 리스트가 다 만들어진 직후, Pass3 총량은 Pass1/2가 끝난 직후)."""
+    나눠 실측 진행률을 보고, band별 총량은 그 band가 시작되는 시점에만 알면 됨
+    (Pass1/2 총량은 job 리스트가 다 만들어진 직후, Pass3 총량은 Pass1/2가 끝난 직후)
+    """
     if not segments:
         if progress_callback:
             progress_callback("pass1", 0, 0)
@@ -1727,5 +1771,5 @@ def correct_segments_three_pass(
     )
 
 
-# 외부 호출 호환용 별칭. 구현은 현재 3-pass이다.
+# 외부 호출 호환용 별칭, 구현은 현재 3-pass
 correct_segments_two_pass = correct_segments_three_pass

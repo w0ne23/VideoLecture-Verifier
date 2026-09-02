@@ -1,3 +1,5 @@
+// 404 — 매칭되는 라우트가 없을 때 (App.jsx 의 path="*")
+
 import { useNavigate } from 'react-router-dom'
 
 export default function NotFoundPage() {

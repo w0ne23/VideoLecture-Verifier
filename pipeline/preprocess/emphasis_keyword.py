@@ -3,14 +3,14 @@
 
 - 주제 키워드 반복: 슬라이드 텍스트화 결과(t1) 전체에서 반복 등장하는 내용어 기반
 
-키워드 추출: kiwipiepy/Kiwi 형태소 분석 필수(명사만). 미설치 시 중단.
-주제 키워드 LLM 필터: Gemini로 강의 흐름과 무관한 후보 제거.
+키워드 추출: kiwipiepy/Kiwi 형태소 분석 필수(명사만), 미설치 시 중단
+주제 키워드 LLM 필터: Gemini로 강의 흐름과 무관한 후보 제거
 
 max_keywords / min_freq 조정 (기본값 20/5):
   - get_topic_keywords_filtered_v2(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
   - get_topic_keyword_count_map(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
   - slide_textualizer.py의 get_topic_keyword_count_map(...) 호출 인자
-  위 세 군데를 같은 값으로 맞춰서 바꾸면 됨.
+  위 세 군데를 같은 값으로 맞춰서 변경
 """
 
 import json
@@ -25,6 +25,7 @@ from typing import Optional, Set
 _KIWI = None
 
 
+# Kiwi 형태소 분석기 지연 초기화, 미설치 시 명확한 예외
 def _get_kiwi():
     global _KIWI
     if _KIWI is None:
@@ -39,6 +40,7 @@ def _get_kiwi():
     return _KIWI
 
 
+# 키워드 후보에서 제외할 불용어 최소 집합
 _MINIMAL_STOP = {
     "그", "이", "저", "것", "수", "등", "및", "또는", "그리고",
     "있다", "하다", "되다", "이다", "없다", "않다",
@@ -51,9 +53,11 @@ _MINIMAL_STOP = {
     "그런데", "그러나", "따라서", "즉시", "아마", "혹시", "좀", "더", "매우", "너무", "잘", "많이", "적게",
 }
 
+# 명사로 취급할 Kiwi 품사 태그
 _NOUN_TAGS = ("NNG", "NNP", "SL")
 
 
+# 연속된 명사 시퀀스에서 2~3어절 복합명사 후보 생성
 def _add_compound_nouns_from_seq(seq: list[str], out: list[str], min_length: int) -> None:
     if len(seq) < 2:
         return
@@ -66,6 +70,7 @@ def _add_compound_nouns_from_seq(seq: list[str], out: list[str], min_length: int
                 out.append(comp)
 
 
+# 텍스트에서 명사(+복합명사) 내용어 추출, 불용어/최소 길이 미만 제외
 def _extract_content_words(text: str, min_length: int = 3) -> list[str]:
     text = (text or "").strip()
     if not text:
@@ -93,6 +98,7 @@ def _extract_content_words(text: str, min_length: int = 3) -> list[str]:
     return words
 
 
+# 서로 포함관계인 후보 중 더 긴 대표 키워드만 남김
 def _select_representative_keywords(candidates: set[str]) -> set[str]:
     if not candidates:
         return set()
@@ -104,6 +110,7 @@ def _select_representative_keywords(candidates: set[str]) -> set[str]:
     return set(reps)
 
 
+# LLM(Gemini)으로 강의 맥락과 무관한 키워드 후보 제거, 실패 시 원본 후보 그대로 반환
 def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[str]) -> set[str]:
     if not candidate_keywords:
         return candidate_keywords
@@ -196,7 +203,7 @@ def get_topic_keywords_filtered_v2(
 ) -> set[str]:
     """
     v2: 전체 후보를 더 많이 모은 뒤 LLM으로 주제 무관만 제거하고,
-    남은 것 중 빈도 순 상위 max_keywords개를 반환.
+    남은 것 중 빈도 순 상위 max_keywords개를 반환
     """
     if not segments:
         return set()
@@ -248,10 +255,10 @@ def get_topic_keyword_count_map(
     _topic_keywords_override: Optional[Set[str]] = None,
 ) -> dict[str, int]:
     """
-    주제 키워드별 전체 등장 횟수를 반환.
+    주제 키워드별 전체 등장 횟수를 반환
 
-    반환값은 최종 주제 키워드로 살아남은 단어만 포함한다.
-    개별 context/slide 집계에서는 같은 키워드가 여러 번 등장해도 이 total_count를 한 번만 더한다.
+    반환값은 최종 주제 키워드로 살아남은 단어만 포함
+    개별 context/slide 집계에서는 같은 키워드가 여러 번 등장해도 이 total_count는 한 번만 더함
     """
     if not segments:
         return {}
@@ -284,7 +291,7 @@ def get_topic_keyword_count_map(
 
 
 def get_topic_keyword_score_map(topic_count_map: dict[str, int]) -> dict[str, int]:
-    """반복 키워드 count 내림차순으로 4개씩 5~1점을 부여한다."""
+    """반복 키워드 count 내림차순으로 4개씩 5~1점 부여"""
     if not topic_count_map:
         return {}
     sorted_items = sorted(topic_count_map.items(), key=lambda item: (-int(item[1]), item[0]))
@@ -295,7 +302,7 @@ def get_topic_keyword_score_map(topic_count_map: dict[str, int]) -> dict[str, in
 
 
 def topic_keyword_count_items(topic_count_map: dict[str, int]) -> list[dict]:
-    """JSON 저장용 [{keyword,total_count}] 목록으로 변환."""
+    """JSON 저장용 [{keyword,total_count}] 목록으로 변환"""
     score_map = get_topic_keyword_score_map(topic_count_map)
     return [
         {"keyword": kw, "total_count": int(total), "score": int(score_map.get(kw, 0))}
@@ -310,9 +317,9 @@ def summarize_topic_keyword_counts_for_text(
     min_keyword_len: int = 2,
 ) -> dict:
     """
-    특정 text에 포함된 반복 키워드와 그 키워드들의 total_count 합을 반환.
+    특정 text에 포함된 반복 키워드와 그 키워드들의 total_count 합을 반환
 
-    같은 text 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
+    같은 text 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더함
     """
     if not text or not topic_count_map:
         return {"keywords": [], "total_count_sum": 0, "keyword_scores": {}, "score_sum": 0}

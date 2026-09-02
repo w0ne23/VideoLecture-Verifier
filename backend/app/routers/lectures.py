@@ -1,3 +1,4 @@
+# 강의 업로드, 조회, 상태 스트리밍, 재실행/삭제 API
 import asyncio
 import json
 import logging
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/lectures')
 
 
+# 강의 목록 조회, status로 상태 필터링
 @router.get('')
 async def list_lectures(db: AsyncSession = Depends(get_db), status: Optional[str] = Query(None)):
     return await lecture_service.list_lectures(db, status_filter=status)
@@ -41,10 +43,10 @@ async def create_lecture(
     workflow_mode: str = Form(JOB_TYPE_VERIFY),
     db: AsyncSession = Depends(get_db),
 ):
-    """영상 업로드와 함께 Lecture·최초 Job을 생성하는 합성 연산.
+    """영상 업로드와 함께 Lecture·최초 Job을 생성하는 합성 연산
 
-    Lecture 행 삽입과 job 삽입을 같은 트랜잭션에서 수행하며, job 삽입은 재시도 경로와
-    동일한 build_job을 호출해 'Job 없는 Lecture'가 존재하지 않도록 보장한다.
+    Lecture 행 삽입과 job 삽입을 같은 트랜잭션에서 수행, job 삽입은 재시도 경로와 동일한
+    build_job을 호출해 'Job 없는 Lecture'가 존재하지 않도록 보장
     """
     job_type = normalize_job_type(workflow_mode, JOB_TYPE_VERIFY)
     if job_type != JOB_TYPE_VERIFY:
@@ -95,6 +97,7 @@ async def create_lecture(
     }
 
 
+# 강의 상세 조회, 최근 job 상태 포함
 @router.get('/{lecture_id}')
 async def get_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
     detail = await lecture_service.get_lecture_detail(db, lecture_id)
@@ -105,8 +108,10 @@ async def get_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get('/{lecture_id}/stream')
 async def stream_lecture_status(lecture_id: str, request: Request):
-    """lecture의 현재 job 상태를 SSE로 스트리밍한다. lecture당 실행 중 job은 최대 하나이므로
-    job_id 없이 lecture_id만으로 추적한다."""
+    """lecture의 현재 job 상태를 SSE로 스트리밍
+
+    lecture당 실행 중 job은 최대 하나이므로 job_id 없이 lecture_id만으로 추적
+    """
 
     async def event_generator():
         while True:
@@ -138,16 +143,19 @@ async def stream_lecture_status(lecture_id: str, request: Request):
     return StreamingResponse(event_generator(), media_type='text/event-stream')
 
 
+# 완료된 verify 결과(verification_final.json 등) 조회
 @router.get('/{lecture_id}/result')
 async def get_lecture_result(lecture_id: str, db: AsyncSession = Depends(get_db)):
     return await lecture_service.get_verified_result(db, lecture_id)
 
 
+# 전처리 단계별 중간 산출물(artifact) 조회
 @router.get('/{lecture_id}/artifacts/{stage}')
 async def get_lecture_artifact(lecture_id: str, stage: str, db: AsyncSession = Depends(get_db)):
     return await lecture_service.get_lecture_artifact(db, lecture_id, stage)
 
 
+# 기존 강의에 대해 새 job 생성해 재실행, mode 미지정 시 기본 워크플로 사용
 @router.post('/{lecture_id}/jobs')
 async def create_lecture_job(lecture_id: str, mode: Optional[str] = Query(None), db: AsyncSession = Depends(get_db)):
     result = await lecture_service.create_job(db, lecture_id, mode=mode)
@@ -156,6 +164,7 @@ async def create_lecture_job(lecture_id: str, mode: Optional[str] = Query(None),
     return result
 
 
+# 강의와 연관된 job, 저장된 파일 모두 삭제
 @router.delete('/{lecture_id}')
 async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
     success = await lecture_service.delete_lecture(db, lecture_id)

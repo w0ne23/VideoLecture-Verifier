@@ -1,15 +1,17 @@
-# 개발용 오버라이드 — 코드 수정을 즉시 반영한다 (배포용 기본 파일은 정적 빌드).
+# 개발용 오버라이드 — 코드 수정 즉시 반영 (배포용 기본 파일은 정적 빌드)
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 #
 # - frontend: nginx 정적 서빙 대신 vite dev 서버(HMR). node_modules 는 익명 볼륨으로
-#   가려 호스트(예: macOS)와 컨테이너(linux)의 네이티브 바이너리 충돌을 막는다
-#   (이미지 빌드 시 npm ci 로 채워진 리눅스용 node_modules 가 그대로 쓰인다).
-# - backend: ./backend·./pipeline 를 마운트하고 uvicorn --reload 로 자동 재시작.
+#   가려 호스트(macOS)와 컨테이너(linux)의 네이티브 바이너리 충돌 방지
+#   (이미지 빌드 시 npm ci 로 채운 리눅스용 node_modules 를 그대로 사용)
+# - backend: ./backend·./pipeline 마운트 + uvicorn --reload 자동 재시작
 #   (모델 클래스 추가 등 스키마 변경은 재시작 후 create_all 이 반영)
 
 services:
   backend:
+    # 기본 파일의 실행 명령을 --reload 버전으로 대체
+    # --reload-dir 로 감시 범위를 마운트한 소스 디렉터리로 한정해 불필요한 재시작 억제
     command:
       - uvicorn
       - app.main:app
@@ -27,9 +29,10 @@ services:
       - ./pipeline:/app/pipeline
 
   frontend:
-    # 기본(nginx) 이미지와 태그가 겹치지 않게 별도 이름을 준다 — 두 모드를
-    # 오가며 --build 없이 up 해도 서로의 이미지를 덮어쓰지 않는다.
+    # 기본(nginx) 이미지와 태그 충돌 방지용 별도 이름
+    # 두 모드를 오가며 --build 없이 up 해도 서로의 이미지를 덮어쓰지 않음
     image: vlverifier-frontend-dev
+    # serve 스테이지(nginx)가 아니라 build 스테이지(node)에서 멈춰 dev 서버 기동
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -37,7 +40,7 @@ services:
     command: npm run dev -- --host 0.0.0.0 --port 5173
     environment:
       VLVERIFIER_API_TARGET: http://backend:8000
-    # 기본 파일의 "5173:80" 을 대체 (nginx:80 대신 vite:5173).
+    # 기본 파일의 "5173:80" 대체 (nginx:80 대신 vite:5173)
     ports: !override
       - "5173:5173"
     volumes:

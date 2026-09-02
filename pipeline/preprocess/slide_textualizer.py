@@ -88,7 +88,7 @@ class Config:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
 
-# Post-video verifier input is intentionally base-only. Teacher annotations are not textualized.
+# post-video verifier 입력은 의도적으로 base 전용, 교수 필기는 텍스트화하지 않음
 T1_BASE_ONLY_EXTRACTION_PROMPT = """
 이 슬라이드 BASE 이미지에서 인쇄된 슬라이드 원본 텍스트와 구조만 추출하라.
 교수 필기, 손글씨, 밑줄, 화살표, 강조 표시는 모두 무시한다. 설명 없이 JSON만 출력.
@@ -197,18 +197,19 @@ T1_EXTRACTION_PROMPT_WITH_BUILDS = """
 
 class SlideLoader:
     """
-    slide_extractor.py 출력 디렉토리에서 텍스트 추출 대상 이미지 로드.
+    slide_extractor.py 출력 디렉토리에서 텍스트 추출 대상 이미지 로드
 
     선택 전략:
       - base + 모든 distinct build 프레임(있으면)을 함께 텍스트 추출 대상으로 사용
       - annotation(교수 필기) 프레임은 텍스트 추출 대상에서 완전히 제외
 
-    타임스탬프는 metadata.json에서 읽고, 없으면 파일명 패턴으로 폴백.
+    타임스탬프는 metadata.json에서 읽고, 없으면 파일명 패턴으로 폴백
     """
 
     def __init__(self, slides_dir: Path):
         self.slides_dir = Path(slides_dir)
 
+    # metadata.json 있으면 그 기준, 없으면 파일명 패턴으로 폴백
     def load(self) -> List[Dict]:
         metadata_path = self.slides_dir / "metadata.json"
 
@@ -220,17 +221,17 @@ class SlideLoader:
 
     def _load_from_metadata(self, metadata_path: Path) -> List[Dict]:
         """
-        metadata.json 기준으로 scene별 텍스트 추출 대상을 결정한다.
+        metadata.json 기준으로 scene별 텍스트 추출 대상을 결정
         실제 OpenAI Vision 호출은 slide_canonical_number 기준으로 캐시 가능하도록
-        representative scene 정보를 함께 싣는다.
+        representative scene 정보를 함께 실음
         """
         with open(metadata_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
         slide_number_lookup = self._build_slide_number_lookup(metadata)
 
-        # scene_index 기준으로 base / build 분류. annotation(교수 필기) 프레임은
-        # 텍스트 추출 후보에서 아예 배제하고, "있었다"는 사실만 참고용으로 기록한다.
+        # scene_index 기준으로 base / build 분류, annotation(교수 필기) 프레임은
+        # 텍스트 추출 후보에서 아예 배제하고, "있었다"는 사실만 참고용으로 기록
         base_entries: Dict[int, dict] = {}
         build_entries: Dict[int, List[dict]] = {}
         annotation_present: Dict[int, bool] = {}
@@ -378,6 +379,7 @@ class SlideLoader:
         )
         return slides
 
+    # scene을 시간순 정렬해 canonical index에 1부터 순번을 매긴 slide_number 조회 테이블 생성
     @staticmethod
     def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
         from collections import defaultdict
@@ -404,8 +406,8 @@ class SlideLoader:
 
     def _load_from_filenames(self) -> List[Dict]:
         """
-        metadata 없을 때 파일명 패턴으로 폴백. base + build 프레임만 사용하고,
-        annotation(교수 필기)은 텍스트 추출 대상에서 제외한다.
+        metadata 없을 때 파일명 패턴으로 폴백, base + build 프레임만 사용하고,
+        annotation(교수 필기)은 텍스트 추출 대상에서 제외
         """
         base_pattern  = re.compile(r'slide_(\d+)_base\.(jpg|png)', re.IGNORECASE)
         build_pattern = re.compile(r'slide_(\d+)_build_(\d+)\.(jpg|png)', re.IGNORECASE)
@@ -485,6 +487,7 @@ class T1Extractor:
                 raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
             logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
 
+    # OCR 힌트가 있으면 프롬프트 끝에 힌트 블록 추가
     @staticmethod
     def _compose_prompt_with_ocr(prompt: str, ocr_hint: str) -> str:
         hint = str(ocr_hint or "").strip()
@@ -496,6 +499,7 @@ class T1Extractor:
             f"{hint}\n"
         )
 
+    # PIL 이미지를 JPEG data URL로 인코딩
     @staticmethod
     def _image_to_data_url(image: Image.Image) -> str:
         buf = BytesIO()
@@ -503,6 +507,7 @@ class T1Extractor:
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64}"
 
+    # OpenAI Vision으로 t1 추출 호출, 실패 시 재시도
     def _call_openai(
         self,
         base_image: Image.Image,
@@ -551,6 +556,7 @@ class T1Extractor:
                     time.sleep(self.config.retry_delay * (attempt + 1))
         raise last_exc
 
+    # Ollama(로컬 LLM) Vision으로 t1 추출 호출, 실패 시 재시도
     def _call_ollama(
         self,
         base_image: Image.Image,
@@ -600,6 +606,7 @@ class T1Extractor:
                     time.sleep(self.config.retry_delay * (attempt + 1))
         raise last_exc
 
+    # LLM이 반환한 visual_elements 배열을 표준 필드로 정규화, 의미있는 필드가 하나도 없으면 제외
     @classmethod
     def _normalize_visual_elements(cls, elements: Any) -> List[Dict]:
         if not isinstance(elements, list):
@@ -627,6 +634,7 @@ class T1Extractor:
                 normalized.append(entry)
         return normalized
 
+    # LLM이 반환한 visual_relations 배열을 표준 필드로 정규화, 전부 빈 값이면 제외
     @classmethod
     def _normalize_visual_relations(cls, relations: Any) -> List[Dict]:
         if not isinstance(relations, list):
@@ -651,6 +659,7 @@ class T1Extractor:
                 normalized.append(entry)
         return normalized
 
+    # layout dict의 값들을 문자열/문자열 리스트로 정규화
     @staticmethod
     def _normalize_visual_layout(layout: Any) -> Dict:
         if not isinstance(layout, dict):
@@ -670,6 +679,7 @@ class T1Extractor:
                     normalized[key_s] = value_s
         return normalized
 
+    # visual_elements를 사람이 읽는 텍스트 라인으로 변환
     @staticmethod
     def _visual_elements_text(elements: List[Dict]) -> str:
         lines = []
@@ -685,6 +695,7 @@ class T1Extractor:
                 lines.append(line)
         return "\n".join(lines)
 
+    # visual_relations를 사람이 읽는 텍스트 라인으로 변환
     @staticmethod
     def _visual_relations_text(relations: List[Dict]) -> str:
         lines = []
@@ -705,6 +716,7 @@ class T1Extractor:
                 lines.append(line)
         return "\n".join(lines)
 
+    # layout을 사람이 읽는 텍스트 라인으로 변환
     @staticmethod
     def _visual_layout_text(layout: Dict) -> str:
         lines = []
@@ -717,6 +729,7 @@ class T1Extractor:
                 lines.append(f"{key}: {value_s}")
         return "\n".join(lines)
 
+    # LLM이 반환한 visual_assets 배열을 표준 asset 레코드 목록으로 정규화
     @classmethod
     def _normalize_visual_assets(cls, assets: Any) -> List[Dict]:
         if not isinstance(assets, list):
@@ -770,7 +783,7 @@ class T1Extractor:
         build_images: List[Image.Image] = None,
         ocr_hint: str = "",
     ) -> str:
-        """재시도 로직을 포함한 base(+build) 이미지 Gemini Vision 호출."""
+        """재시도 로직을 포함한 base(+build) 이미지 Gemini Vision 호출"""
         build_images = build_images or []
         if self.provider == "openai":
             return self._call_openai(base_image, build_images=build_images, ocr_hint=ocr_hint)
@@ -816,7 +829,7 @@ class T1Extractor:
         raise last_exc
 
     def extract(self, slide: Dict) -> Dict:
-        """단일 base 슬라이드에서 t1과 t1_structure를 추출한다."""
+        """단일 base 슬라이드에서 t1과 t1_structure 추출"""
         slide.setdefault("title", f"Slide {slide['slide_number']}")
         slide.setdefault("t1", "")
         slide.setdefault("t1_structure", "")
@@ -830,7 +843,7 @@ class T1Extractor:
             return slide
 
         # text_source/has_teacher_annotation은 SlideLoader가 이미 정확히 계산해
-        # 뒀으므로 여기서 덮어쓰지 않는다.
+        # 뒀으므로 여기서 덮어쓰지 않음
         base_image = slide.get("base_image")
         build_images = slide.get("build_images") or []
         ocr_hint = ""
@@ -884,6 +897,7 @@ class T1Extractor:
 
         return slide
 
+    # canonical slide 단위로 한 번만 LLM 호출하고, 같은 슬라이드를 반복하는 scene들은 캐시된 결과를 재사용
     def extract_batch(self, slides: List[Dict], progress_callback=None) -> List[Dict]:
         unique_slides = len({s.get("slide_canonical_number", s["slide_number"]) for s in slides})
         workers = max(1, min(self.config.workers, unique_slides))
@@ -892,7 +906,7 @@ class T1Extractor:
             f"(unique slides: {unique_slides}, workers: {workers})..."
         )
 
-        # One base-image request per canonical slide. Repeated scenes share its result.
+        # canonical slide 하나당 base 이미지 요청 1번, 반복되는 scene은 그 결과를 공유
         canonical_representatives: Dict[int, Dict] = {}
         for slide in slides:
             if slide.get("scene_type") == "video":
@@ -974,6 +988,7 @@ class TextualizationPipeline:
         self.config = config or Config()
         self.progress_callback = progress_callback
 
+    # 슬라이드 로드 -> t1 추출 -> 주제 키워드 집계 -> 결과 저장까지 전체 파이프라인 실행
     def run(self) -> Dict:
         start_time = time.time()
 
@@ -1114,6 +1129,7 @@ class TextualizationPipeline:
 #  메인                                                                         #
 # ============================================================================ #
 
+# CLI 진입점, 인자로 Config 구성 후 TextualizationPipeline 실행
 def main():
     import argparse
     from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR

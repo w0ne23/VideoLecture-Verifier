@@ -1,3 +1,6 @@
+// 통계 화면 — 3개 보기(도메인별/출처별/강의 길이별) 탭 + 차트 + 인사이트 카드
+// 데이터: GET /api/stats, 검증 완료 시 useJobStream 이 ['stats'] 캐시를 무효화해 자동 갱신
+
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import DomainBubblePies from '../components/stats/DomainBubblePies'
@@ -17,7 +20,7 @@ const VIEWS = [
 
 const EMPTY_STATS = { lecture_count: 0, by_tag: [], by_domain: [], by_duration: [] }
 
-/** API 행에 표시용 label 을 붙인다. by_duration 은 이미 label 을 갖고 있다. */
+// API 행에 표시용 label 부착 (by_duration 은 이미 label 보유)
 function decorate(view, rows) {
   if (view === 'duration') return rows
   const labels = view === 'tag' ? SOURCE_TAG_LABELS : DOMAIN_LABELS
@@ -44,6 +47,7 @@ export default function StatsPage() {
     [view, rows, domainIndex],
   )
 
+  // 보기 전환 시 animKey 를 올려 차트 재생, 도메인 캐러셀 인덱스 초기화
   function selectView(next) {
     setView(next)
     setAnimKey(key => key + 1)

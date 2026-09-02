@@ -1,5 +1,7 @@
-# Verifier models are registered dynamically from the endpoint/model bindings
-# selected in the web UI. No provider or model is preselected here.
+# LiteLLM 게이트웨이 설정 — VLVerifier 의 모든 검증 LLM 호출이 이 프록시 경유
+
+# 검증 모델은 웹 UI 에서 선택한 endpoint/model 바인딩으로부터 런타임에 등록
+# provider·model 을 여기서 미리 지정하지 않음
 model_list: []
 
 general_settings:
@@ -7,4 +9,5 @@ general_settings:
   database_url: os.environ/DATABASE_URL
 
 litellm_settings:
+  # 모델이 지원하지 않는 파라미터(예: 일부 모델의 temperature)를 에러 대신 무시
   drop_params: true

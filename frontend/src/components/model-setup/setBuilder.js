@@ -1,3 +1,5 @@
+// "Multi-LLM 조합(셋)" 만들기 — 선택한 LLM 목록 → 저장 payload / 저장된 셋 → 편집 상태 복원
+
 import {
   DEFAULT_STAGE_ORDER,
   STAGE_LABELS,
@@ -6,9 +8,11 @@ import {
 } from './stageModels'
 import { buildLlmConfig, versionToModelId } from './llmRegistry'
 
+// 여러 모델이 교차 검증하는 단계 / 대표 모델 하나만 쓰는 단계
 const MULTI_STAGES = ['detect', 'classify', 'judge']
 const SINGLE_STAGES = ['claim', 'slide']
 
+// id 배열에 100 을 균등 분배 (나머지는 마지막 id 에 몰아줌)
 function equalWeights(ids) {
   const count = ids.length
   if (!count) return {}
@@ -19,6 +23,7 @@ function equalWeights(ids) {
   }, {})
 }
 
+// 단계별 재시도 횟수 기본값 (그라운딩 포함 시 ground 도 추가)
 function defaultRetryCounts(includeGrounding) {
   const counts = {
     claim: 1,
@@ -31,10 +36,10 @@ function defaultRetryCounts(includeGrounding) {
   return counts
 }
 
-/**
- * 등록 LLM + 메인 LLM + 그라운딩 여부 → 기존 stage_models / editor_state 형태로 변환.
- * 가중치는 균등 분할(기존 자동 배정과 동일)로 내부 저장만 하고 UI에서는 노출하지 않는다.
- */
+// 선택 LLM + 대표(main) LLM + 그라운딩 여부 → 저장 payload (stage_models / llm_config / editor_state)
+// 단계 배치: claim·slide 는 대표 모델 1개, detect·classify·judge 는 선택 모델 전부(균등 가중치),
+// ground 는 그라운딩 포함 시에만 대표 모델 1개
+// 가중치는 균등 분배로 내부 저장만 하고 UI 에는 노출하지 않음
 export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGrounding }) {
   const selected = (selectedLlms || []).filter(Boolean)
   if (!selected.length) {
@@ -42,9 +47,8 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
   }
 
   const main = selected.find(llm => llm.id === mainLlmId) || selected[0]
-  // Keep the complete endpoint records here. In particular, a model set must
-  // carry credentialRef into llm_config; reducing this to {id, type} silently
-  // dropped the web-registered credential for preset-based runs.
+  // endpoint 레코드를 그대로 유지 — credentialRef 가 llm_config 로 전달돼야 함
+  // ({id, type} 로 줄이면 웹에서 등록한 키가 프리셋 실행에서 누락됨)
   const providers = selected
   const selectedIds = selected.map(llm => llm.id)
   const weights = equalWeights(selectedIds)
@@ -160,6 +164,8 @@ export function buildSetPayload({ name, selectedLlms, mainLlmId, includeGroundin
   }
 }
 
+// 저장된 editor_state → 셋 편집 화면 상태 { selectedLlmIds, selectedLlms, mainLlmId, includeGrounding }
+// 현재 등록 목록에 있으면 그 레코드, 없으면 저장 당시 스냅샷 사용
 export function parseSetEditorState(editorState, registeredLlms = []) {
   const state = editorState && typeof editorState === 'object' ? editorState : {}
   const registryById = new Map(registeredLlms.map(llm => [llm.id, llm]))
@@ -186,7 +192,7 @@ export function parseSetEditorState(editorState, registeredLlms = []) {
     }
   }
 
-  // 구버전 프리셋: multi 단계에서 쓰인 모델들을 셋 선택으로 복원
+  // 구버전 프리셋(llm_set_v2 아님): multi 단계에서 쓰인 모델들을 셋 선택으로 복원
   const stages = state.stages || {}
   const multiModels = []
   const seen = new Set()
@@ -227,6 +233,7 @@ export function parseSetEditorState(editorState, registeredLlms = []) {
   }
 }
 
+// editor_state → 셋 카드 표시용 요약 (모델 수·이름·대표 모델·그라운딩·단계 수)
 export function summarizeSetConfig(editorState) {
   const state = editorState && typeof editorState === 'object' ? editorState : {}
   if (state.kind === 'llm_set_v2') {

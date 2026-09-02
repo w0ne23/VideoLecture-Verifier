@@ -1,4 +1,4 @@
-"""Shared helpers for the classified verifier pipeline."""
+"""classified verifier 파이프라인이 공유하는 헬퍼"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 
+# analyzer 디렉터리를 가진 상위 경로를 저장소 루트로 판별
 def _find_repo_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
         if (candidate / "analyzer").is_dir():
@@ -15,6 +16,7 @@ def _find_repo_root(start: Path) -> Path:
     return start
 
 
+# subprocess로 실행될 때도 pipeline 패키지를 import할 수 있도록 루트를 sys.path에 추가
 _ROOT = _find_repo_root(Path(__file__).resolve())
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -22,6 +24,7 @@ if str(_ROOT) not in sys.path:
 from .claim_common import _empty_token_usage, _merge_token_usage
 
 
+# 검증 단계 subprocess에 그대로 전달할 환경변수 allowlist
 _ENV_KEYS = [
     "GOOGLE_API_KEY",
     "GEMINI_API_KEY",
@@ -73,6 +76,7 @@ _ENV_KEYS = [
     "VERIFIER_ISSUE_CLUSTER_MAX",
 ]
 
+# 토큰 사용량 dict를 로그 출력용 요약 문자열로 변환
 def _format_token_summary(usage: dict) -> str:
     total = (usage or {}).get("total", {})
     parts = [
@@ -90,6 +94,7 @@ def _format_token_summary(usage: dict) -> str:
     return " / ".join(parts)
 
 
+# _ENV_KEYS 중 값이 설정된 환경변수만 수집 (subprocess 전달용)
 def _collect_env_vars() -> dict:
     from dotenv import load_dotenv
 
@@ -97,6 +102,7 @@ def _collect_env_vars() -> dict:
     return {k: os.environ.get(k) for k in _ENV_KEYS if os.environ.get(k)}
 
 
+# claim 목록을 jsonl 파일로 저장, 출력 파일명은 verification_final.json 접두어 기준
 def _write_claims_jsonl(claims: list[dict], output_json_path: str | Path) -> str | None:
     if claims is None:
         return None
@@ -113,6 +119,7 @@ def _write_claims_jsonl(claims: list[dict], output_json_path: str | Path) -> str
     return str(out_path)
 
 
+# jsonl 파일에서 claim 목록 로드, 파싱 실패 라인은 무시
 def _load_claims_jsonl(path: str | Path) -> list[dict]:
     jsonl_path = Path(path)
     if not jsonl_path.exists():
@@ -132,7 +139,7 @@ def _load_claims_jsonl(path: str | Path) -> list[dict]:
 
 
 def _setup_worker(root: str, env_vars: dict, model: str):
-    """subprocess 공통 초기화."""
+    """subprocess 공통 초기화"""
     if root not in sys.path:
         sys.path.insert(0, root)
     for k, v in env_vars.items():

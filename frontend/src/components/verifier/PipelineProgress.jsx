@@ -1,12 +1,13 @@
 import { PIPELINE_NODES } from './verifierConstants'
 
-// VLVerifier PipelineProgress의 단일 행(verify 전용) 축소판.
-// 2행 그래프 플로우 레이아웃은 VLVerifier에 없으므로 노드/커넥터만 남겼다.
+// 검증 파이프라인 단계를 한 줄로 표시하는 진행 바 (노드 + 커넥터)
 
+// stages 배열에서 특정 stageKey 의 상태 추출 (없으면 wait)
 function getStageStatus(stages, key) {
   return stages.find(s => s.stage === key)?.status ?? 'wait'
 }
 
+// 노드 상태 → 접근성 라벨용 한글
 function getNodeStatusText(status) {
   if (status === 'done') return '완료'
   if (status === 'run') return '현재 단계'
@@ -14,6 +15,7 @@ function getNodeStatusText(status) {
   return '대기'
 }
 
+// stages: [{ stage, status }] — PIPELINE_NODES 순서대로 렌더
 export default function PipelineProgress({ stages, statusMessage }) {
   const nodes = PIPELINE_NODES.map(node => ({
     ...node,
@@ -26,6 +28,7 @@ export default function PipelineProgress({ stages, statusMessage }) {
       <div className="vf-progress-message">{String(statusMessage || '').trim() || '분석 준비 중...'}</div>
       <div className="vf-flow" role="list" aria-label="파이프라인 단계">
         {nodes.map((node, index) => {
+          // done/run 노드는 앞 노드와 잇는 커넥터를 채움
           const connectorOn = index > 0 && (node.status === 'done' || node.status === 'run')
           return (
             <div

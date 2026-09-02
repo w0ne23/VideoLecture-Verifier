@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 
-// startedAtMs(작업이 실제로 시작된 서버 타임스탬프)가 있으면 그걸 기준으로 경과 시간을
-// 계산한다 — 새로고침해도 컴포넌트가 다시 마운트될 뿐 작업 시작 시각은 그대로라서,
-// 시계가 0으로 초기화되지 않고 실제 경과 시간을 이어서 보여준다. startedAtMs가 없으면
-// (예: 서버 타임스탬프를 아직 못 받아온 순간) 지금 이 순간을 기준으로 임시로 잰다.
+// 경과 시간 스톱워치 (1초 단위 갱신, ms 반환)
+// startedAtMs(작업이 실제 시작된 서버 타임스탬프)가 있으면 그 기준으로 경과 시간 계산 —
+// 새로고침으로 컴포넌트가 재마운트돼도 시작 시각은 그대로라 시계가 0으로 리셋되지 않음
+// startedAtMs 가 없으면(서버 타임스탬프 수신 전) 현재 시각 기준으로 임시 측정
 export function useElapsedStopwatch(isRunning, startedAtMs) {
   const [elapsedMs, setElapsedMs] = useState(0)
 

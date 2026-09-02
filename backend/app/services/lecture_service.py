@@ -1,3 +1,4 @@
+# 강의 CRUD, job 생성, 검증 결과 조회/가공 로직
 import json
 import re
 import shutil
@@ -21,6 +22,7 @@ from app.services.model_settings_service import get_model_settings
 from app.services.storage_service import make_file_url, resolve_storage_path
 
 
+# lecture_id로 Lecture 조회 (job 목록 포함), 형식이 잘못되면 None
 async def _get_lecture(db: AsyncSession, lecture_id: str | uuid.UUID) -> Lecture | None:
     try:
         ident = uuid.UUID(str(lecture_id))
@@ -35,26 +37,28 @@ async def _get_lecture(db: AsyncSession, lecture_id: str | uuid.UUID) -> Lecture
 
 
 async def get_current_job(db: AsyncSession, lecture_id: str) -> ProcessingJob | None:
-    """lecture의 현재(최신) job을 반환한다. lecture당 실행 중 job은 최대 하나이므로
-    job_id 없이 lecture_id만으로 스트리밍 추적이 가능하다."""
+    """lecture의 현재(최신) job 반환
+
+    lecture당 실행 중 job은 최대 하나이므로 job_id 없이 lecture_id만으로 스트리밍 추적 가능
+    """
     lecture = await _get_lecture(db, lecture_id)
     return lecture.last_job if lecture else None
 
 
 async def build_job(db: AsyncSession, lecture_id, mode: str | None = None) -> ProcessingJob:
-    """업로드·재시도 공통 job 삽입 단위.
+    """업로드·재시도 공통 job 삽입 단위
 
     'Job 없는 Lecture'가 존재하지 않는다는 불변조건을, 두 생성 경로(POST /lectures의
-    합성 연산, POST /lectures/{id}/jobs의 원시 연산)가 이 함수 하나를 공유함으로써 구조로 보장한다.
-    호출자는 반환된 job을 같은 트랜잭션에서 db.add 한다.
+    합성 연산, POST /lectures/{id}/jobs의 원시 연산)가 이 함수 하나를 공유함으로써 구조로 보장
+    호출자는 반환된 job을 같은 트랜잭션에서 db.add
 
-    job_type은 mode에 따라 정해진다 — verify가 기본이고 verify_only도 만들 수 있다.
+    job_type은 mode에 따라 결정 — verify가 기본이고 verify_only도 생성 가능
 
     pipeline_stages를 빈 배열로 두면, 프론트가 최초 조회 시 verifier_web_grounding을
     포함한 모든 단계를 'wait'로 그려서(useJobStream.js) 실제 파이프라인이 시작되어
     worker.py가 'skip'을 써넣기 전까지 잠깐 "그라운딩 포함" 5단계 레이아웃이 보였다가
-    4단계로 바뀌는 깜빡임이 생긴다. 그래서 job을 만드는 시점에 현재 활성 LLM 셋을
-    미리 확인해, 그라운딩이 꺼져 있으면 그 사실을 처음부터 pipeline_stages에 넣어둔다.
+    4단계로 바뀌는 깜빡임 발생, 그래서 job을 만드는 시점에 현재 활성 LLM 셋을
+    미리 확인해 그라운딩이 꺼져 있으면 그 사실을 처음부터 pipeline_stages에 반영
     """
     stage_models = await get_model_settings(db)
     evidence_enabled = stage_models.get('CLASSIFIED_ISSUE_EVIDENCE_ENABLED', '1').strip().lower() not in {
@@ -74,6 +78,7 @@ async def build_job(db: AsyncSession, lecture_id, mode: str | None = None) -> Pr
     )
 
 
+# ProcessingJob을 API 응답용 dict로 변환, job이 없으면 None
 def _job_dict(job: ProcessingJob | None) -> dict[str, Any] | None:
     if not job:
         return None
@@ -88,6 +93,7 @@ def _job_dict(job: ProcessingJob | None) -> dict[str, Any] | None:
     }
 
 
+# 강의 상세 + 최근 job 상태를 API 응답용 dict로 구성
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any] | None:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
@@ -105,8 +111,9 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> dict[str, Any
 
 
 def _lecture_thumbnail_url(lecture: Lecture) -> str:
-    """전처리 단계에서 이미 추출해둔 슬라이드 프레임 중 첫 장을 썸네일로 재사용한다.
-    별도로 영상에서 프레임을 다시 뽑을 필요가 없다 - 아직 전처리 전이면 빈 문자열."""
+    """전처리 단계에서 이미 추출해둔 슬라이드 프레임 중 첫 장을 썸네일로 재사용, 별도로
+    영상에서 프레임을 다시 뽑을 필요 없음 - 아직 전처리 전이면 빈 문자열
+    """
     output_dir = resolve_storage_path(lecture.output_dir)
     if not output_dir:
         return ''
@@ -119,6 +126,7 @@ def _lecture_thumbnail_url(lecture: Lecture) -> str:
     return make_file_url(candidates[0])
 
 
+# 강의 목록 조회, status_filter 지정 시 해당 상태의 job을 가진 강의만 반환
 async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> list[dict[str, Any]]:
     result = await db.execute(
         select(Lecture)
@@ -148,7 +156,7 @@ async def list_lectures(db: AsyncSession, status_filter: str | None = None) -> l
 
 
 async def create_job(db: AsyncSession, lecture_id: str, mode: str | None = None) -> dict[str, Any] | None:
-    """기존 Lecture에 새 Job(재시도)을 생성하는 원시 연산. build_job을 공유한다."""
+    """기존 Lecture에 새 Job(재시도) 생성하는 원시 연산, build_job 공유"""
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return None
@@ -159,6 +167,7 @@ async def create_job(db: AsyncSession, lecture_id: str, mode: str | None = None)
     return {'status': 'success', 'job_id': str(job.id), 'job_type': job.job_type}
 
 
+# 강의 삭제, 연관된 업로드/산출물 디렉터리도 함께 제거
 async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
@@ -174,6 +183,7 @@ async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
     return True
 
 
+# 값을 int로 안전 변환, 실패/None이면 0
 def _safe_count(value: Any) -> int:
     try:
         return int(value or 0)
@@ -181,6 +191,7 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+# 슬라이드 오류 항목에 이미지 접근 URL(slide_image_url) 부여
 def _attach_slide_image_urls(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     for item in items:
@@ -195,6 +206,7 @@ def _attach_slide_image_urls(items: list[dict[str, Any]]) -> list[dict[str, Any]
     return enriched
 
 
+# feedback 항목 중 지정 status만 필터링
 def _filter_feedback_by_status(items: list[dict[str, Any]], status: str) -> list[dict[str, Any]]:
     return [
         item
@@ -204,7 +216,7 @@ def _filter_feedback_by_status(items: list[dict[str, Any]], status: str) -> list
 
 
 def _restore_feedback_display_aliases(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rebuild legacy UI aliases removed from the stored verifier JSON."""
+    """저장된 verifier JSON에서 제거된 레거시 UI 별칭 필드 재구성"""
     restored: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -245,9 +257,9 @@ def _restore_feedback_display_aliases(items: list[dict[str, Any]]) -> list[dict[
 
 
 def build_content_verification_response(lecture_id: str, stem: str, verifier_path: str, data: dict) -> dict[str, Any]:
-    """검증 결과 원본 JSON → API 응답 매핑 (순수 함수).
+    """검증 결과 원본 JSON → API 응답 매핑 (순수 함수)
 
-    반환 dict의 키 구성은 프론트엔드와의 계약이다.
+    반환 dict의 키 구성은 프론트엔드와의 계약
     """
     flow = data.get('claim_decision_flow', {}) or {}
     summary = data.get('claim_decision_flow_summary', {}) or {}
@@ -316,11 +328,11 @@ def build_content_verification_response(lecture_id: str, stem: str, verifier_pat
 
 
 def _is_complete_verification_result(path, stem: str) -> bool:
-    """Return whether a benchmark verification artifact is safe to expose.
+    """benchmark 검증 결과 파일을 노출해도 안전한지 판단
 
-    Benchmark runs can leave a syntactically valid final JSON behind even when
-    one of the model-specific verifier calls failed or produced unparseable
-    rows.  Those artifacts must not take precedence over a later complete run.
+    benchmark 실행은 모델별 verifier 호출 중 하나가 실패하거나 파싱 불가능한 값을
+    남겨도 문법적으로는 유효한 최종 JSON을 남길 수 있음, 이런 산출물이 이후의
+    완전한 실행 결과보다 우선시되면 안 됨
     """
     if not path.is_file():
         return False
@@ -350,7 +362,7 @@ def _is_complete_verification_result(path, stem: str) -> bool:
 
 
 def _verification_result_candidates(analyzer_dir, output_dir, stem: str) -> list:
-    """Order complete benchmark results before legacy result locations."""
+    """완전한 benchmark 결과를 레거시 결과 위치보다 우선하도록 정렬"""
     benchmark_results = []
     for benchmark_dir in analyzer_dir.glob('benchmark_*'):
         path = benchmark_dir / f'{stem}_verification_final.json'
@@ -373,6 +385,7 @@ def _verification_result_candidates(analyzer_dir, output_dir, stem: str) -> list
     ]
 
 
+# 파이프라인 stage 이름 -> classified_issue_artifacts 내 키 매핑
 ARTIFACT_STAGE_KEYS: dict[str, str] = {
     'claim_extraction': 'claims_json',
     'issue_judge': 'issue_judge',
@@ -385,10 +398,10 @@ ARTIFACT_STAGE_KEYS: dict[str, str] = {
 
 
 async def get_lecture_artifact(db: AsyncSession, lecture_id: str, stage: str) -> dict[str, Any]:
-    """GET /lectures/{id}/artifacts/{stage} 전용. 검증 파이프라인 중간단계 산출물 원본을 반환한다.
+    """GET /lectures/{id}/artifacts/{stage} 전용, 검증 파이프라인 중간단계 산출물 원본 반환
 
-    /result와 달리 가공 없이 raw JSON을 그대로 내려준다 — 프론트(단계별 리포트 화면)에서
-    필요한 필드만 추려서 렌더링한다.
+    /result와 달리 가공 없이 raw JSON을 그대로 내려주고, 프론트(단계별 리포트 화면)에서
+    필요한 필드만 추려서 렌더링
     """
     artifact_key = ARTIFACT_STAGE_KEYS.get(stage)
     if not artifact_key:
@@ -433,10 +446,10 @@ async def get_lecture_artifact(db: AsyncSession, lecture_id: str, stage: str) ->
 
 
 async def get_verified_result(db: AsyncSession, lecture_id: str) -> dict[str, Any]:
-    """GET /lectures/{id}/result 전용. job이 done인 lecture의 검증 결과를 반환한다.
+    """GET /lectures/{id}/result 전용, job이 done인 lecture의 검증 결과 반환
 
     /lectures/{id}(job 상태 조회)와 독립된 라우트에서만 호출되므로, 실패를 그대로
-    HTTPException으로 던져도 job 상태 조회에는 영향이 없다.
+    HTTPException으로 던져도 job 상태 조회에는 영향 없음
     """
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:

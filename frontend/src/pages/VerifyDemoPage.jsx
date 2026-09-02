@@ -1,3 +1,6 @@
+// [개발용] 파이프라인 진행 UI(아이콘 애니메이션)만 확인/수정하는 데모 라우트 (/dev/verify-demo-anime)
+// 실제 업로드·검증 API 없이 로컬 타이머로만 stage 전환, 결과 화면 없음
+
 import { useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import PipelineProgress from '../components/verifier/PipelineProgress'
@@ -5,8 +8,6 @@ import DemoStageAnimation from '../components/verifier/DemoStageAnimation'
 import { PIPELINE_NODES } from '../components/verifier/verifierConstants'
 import { DEMO_PHASES, useDemoPipelineFlow } from '../hooks/useDemoPipelineFlow'
 
-// 파이프라인 진행 UI만 확인/수정하기 위한 데모 라우트.
-// 실제 업로드·검증 API를 호출하지 않고 로컬 타이머로만 stage를 넘긴다. 결과 화면은 만들지 않는다.
 function DemoUploadStep({ flow }) {
   const inputRef = useRef(null)
   const { file, title, actions } = flow

@@ -1,3 +1,6 @@
+// 검증 결과 화면 — 결과 목록(VerifierResults) + 강의 영상 같이 보기 + 재검증/삭제
+// job 상태·결과는 useJobStream 에 위임
+
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { PHASES } from '../components/verifier/verifierConstants'
@@ -22,10 +25,8 @@ export default function ResultPage() {
     actions,
   } = useJobStream(lectureId, { onExit: goToList })
 
-  // 결과 화면에 아직 파이프라인이 안 끝난 강의로 진입했거나, "다시 검증"으로 재실행된 경우
-  // 진행 화면으로 되돌려보낸다.
-  // useJobStream의 초기 phase는 PIPELINE이므로, 로딩이 끝난 뒤에만 판정해야
-  // /result ↔ /verify 리다이렉트 루프가 생기지 않는다.
+  // 파이프라인이 아직 안 끝났거나 "다시 검증"으로 재실행된 경우 진행 화면으로 되돌림
+  // useJobStream 초기 phase 가 PIPELINE 이라, 로딩이 끝난 뒤에만 판정해야 /result ↔ /verify 루프가 안 생김
   useEffect(() => {
     if (isLoading) return
     if (phase === PHASES.PIPELINE || phase === PHASES.ERROR) {
@@ -33,6 +34,7 @@ export default function ResultPage() {
     }
   }, [phase, lectureId, navigate, isLoading])
 
+  // 오류 카드의 시각 버튼 → 영상 해당 지점 재생 + 스크롤
   function seekTo(seconds) {
     const video = videoRef.current
     if (!video) return

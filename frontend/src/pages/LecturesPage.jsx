@@ -1,3 +1,5 @@
+// 강의 목록 화면 — 검색·정렬·출처 필터 툴바 + LectureList
+
 import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -22,7 +24,7 @@ export default function LecturesPage() {
 
   const filters = useMemo(() => ({ query, sort, sourceFilter }), [query, sort, sourceFilter])
 
-  // LectureList도 같은 쿼리 키로 조회하므로 react-query 캐시를 공유해 요청이 중복되지 않는다.
+  // LectureList 도 같은 쿼리 키로 조회 → react-query 캐시 공유로 요청 중복 없음 (여기선 총 개수만 사용)
   const { data: lectures = [] } = useQuery({
     queryKey: ['lectures'],
     queryFn: () => listLectures(),

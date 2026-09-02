@@ -1,11 +1,15 @@
+// 도메인별 오류 유형 원 그래프 캐러셀 — 현재 도메인은 중앙에 크게, 이전/다음은 옆에 반투명
+
 import { useEffect, useState } from 'react'
 import { ISSUE_TYPES } from '../../config/statsConfig'
 
+// 중심 (cx,cy) 기준 각도(deg, 12시 방향이 0)의 원주 좌표
 function polar(cx, cy, r, angle) {
   const rad = ((angle - 90) * Math.PI) / 180
   return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]
 }
 
+// 파이 조각 하나의 SVG path — 거의 원(360도)이면 두 개의 반원 arc 로 그림
 function arcPath(cx, cy, r, startAngle, endAngle) {
   if (endAngle - startAngle >= 359.9) {
     const [x1, y1] = polar(cx, cy, r, 0)
@@ -24,6 +28,7 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
   return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`
 }
 
+// typeDist → 파이 조각 배열 (0건 유형 제외, 각도 누적)
 function slicesFor(typeDist, total) {
   let angle = 0
   return ISSUE_TYPES.map(type => {
@@ -37,9 +42,7 @@ function slicesFor(typeDist, total) {
   }).filter(Boolean)
 }
 
-// 현재 도메인 하나를 중앙에 크게, 이전·다음 도메인은 옆에 반투명하게 보여준다.
-// 화살표 버튼으로 넘겨보며, 양 끝에서 멈춘다(순환하지 않음) — 도메인이 2개일 때
-// 순환하면 양옆에 같은 도메인이 보여 "같은 게 두 개"처럼 오해되기 때문.
+// 파이 하나 — showLabels 면 각 조각 안에 값 라벨 표시
 function DomainPie({ row, radius, showLabels }) {
   const size = radius * 2 + 8
   const cx = size / 2
@@ -80,16 +83,17 @@ function DomainPie({ row, radius, showLabels }) {
   )
 }
 
+// rows: 도메인별 행 배열, onIndexChange: 중앙 도메인 인덱스를 부모에 통지
 export default function DomainBubblePies({ rows, animKey, onIndexChange }) {
   const [index, setIndex] = useState(0)
   const count = rows.length
+  // 양 끝에서 멈춤(순환 X) — 도메인 2개일 때 순환하면 양옆에 같은 게 보여 "같은 게 두 개"처럼 오해됨
   const safeIndex = Math.min(Math.max(index, 0), count - 1)
 
   const goPrev = () => setIndex(current => Math.max(0, current - 1))
   const goNext = () => setIndex(current => Math.min(count - 1, current + 1))
 
-  // 넘길 때마다 지금 중앙에 있는 도메인을 부모(설명 패널)에도 알려서,
-  // 그래프와 아래 설명이 항상 같은 도메인을 가리키게 한다.
+  // 넘길 때마다 중앙 도메인을 부모(설명 패널)에도 알려 그래프와 설명이 같은 도메인을 가리키게 함
   useEffect(() => {
     onIndexChange?.(safeIndex)
   }, [safeIndex, onIndexChange])

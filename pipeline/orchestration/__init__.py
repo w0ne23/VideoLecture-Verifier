@@ -1,2 +1,2 @@
-"""Pipeline workflow modules."""
+"""파이프라인 워크플로 모듈"""
 

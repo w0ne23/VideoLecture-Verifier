@@ -1,3 +1,4 @@
+# 슬라이드 전환 판정을 보조하는 OCR 힌트 조회/비교 유틸, OCR 서비스(RapidOCR/Nemotron)와 통신
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# OCR 서비스 설정용 환경변수 키 목록
 _OCR_PROVIDER_ENV = "VLVERIFIER_SLIDE_OCR_PROVIDER"
 _OCR_BASE_URL_ENV = "VLVERIFIER_SLIDE_OCR_BASE_URL"
 _OCR_MODEL_DIR_ENV = "VLVERIFIER_SLIDE_OCR_MODEL_DIR"
@@ -21,6 +23,7 @@ _OCR_TIMEOUT_ENV = "VLVERIFIER_SLIDE_OCR_TIMEOUT_SEC"
 _OCR_SIMILARITY_THRESHOLD_ENV = "VLVERIFIER_SLIDE_OCR_SIMILARITY_THRESHOLD"
 
 
+# 환경변수를 bool로 파싱, 1/true/yes/on만 True
 def env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -28,6 +31,7 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# 환경변수를 float로 파싱, 실패/미설정 시 default
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -38,32 +42,39 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+# 슬라이드 동일 판정에 쓰는 OCR 텍스트 유사도 임계값, 0~1로 clamp
 def ocr_similarity_threshold() -> float:
     return max(0.0, min(1.0, env_float(_OCR_SIMILARITY_THRESHOLD_ENV, 0.83)))
 
 
+# 설정된 OCR provider 이름, 미설정이면 'none'
 def ocr_provider() -> str:
     return str(os.getenv(_OCR_PROVIDER_ENV, "none") or "none").strip().lower()
 
 
+# OCR 힌트 기능 활성화 여부
 def ocr_enabled() -> bool:
     return ocr_provider() not in {"", "none", "off", "false", "0"}
 
 
+# OCR 서비스 base URL, override 우선 적용
 def ocr_base_url(override: str | None = None) -> str:
     if override:
         return str(override).strip().rstrip("/")
     return str(os.getenv(_OCR_BASE_URL_ENV, "http://ocr:8000") or "http://ocr:8000").strip().rstrip("/")
 
 
+# OCR 모델 디렉터리 경로
 def ocr_model_dir() -> str:
     return str(os.getenv(_OCR_MODEL_DIR_ENV, "") or "").strip()
 
 
+# OCR 언어 설정
 def ocr_lang() -> str:
     return str(os.getenv(_OCR_LANG_ENV, "multilingual") or "multilingual").strip().lower()
 
 
+# 비교를 위해 OCR 텍스트를 정규화 (NFC, 소문자, 공백/특수문자 제거)
 def normalize_ocr_text(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or "")).lower()
     text = re.sub(r"\s+", "", text)
@@ -71,6 +82,7 @@ def normalize_ocr_text(text: str) -> str:
     return text.strip()
 
 
+# 두 문자열 간 편집 거리 계산
 def levenshtein_distance(left: str, right: str) -> int:
     if left == right:
         return 0
@@ -93,6 +105,7 @@ def levenshtein_distance(left: str, right: str) -> int:
     return previous[-1]
 
 
+# 편집 거리 기반 유사도(0~1), 거리, 최대 길이 반환
 def levenshtein_similarity(left: str, right: str) -> tuple[float, int, int]:
     max_len = max(len(left), len(right))
     if max_len == 0:
@@ -101,6 +114,7 @@ def levenshtein_similarity(left: str, right: str) -> tuple[float, int, int]:
     return max(0.0, 1.0 - (distance / max_len)), distance, max_len
 
 
+# 로컬 경로를 OCR 서비스 컨테이너 내부 경로(/app 기준)로 변환
 def _service_path_for(path: Path) -> str:
     repo_root = Path(__file__).resolve().parents[2]
     try:
@@ -110,6 +124,7 @@ def _service_path_for(path: Path) -> str:
     return str(Path("/app") / rel)
 
 
+# 다양한 형태의 OCR 응답을 문자열 라인 목록으로 재귀 정규화
 def _normalize_text_lines(value: Any) -> list[str]:
     if value is None:
         return []
@@ -141,6 +156,7 @@ def _normalize_text_lines(value: Any) -> list[str]:
     return [text] if text else []
 
 
+# 라인 중복 제거 및 길이 제한
 def _compact_lines(lines: list[str], *, max_lines: int = 80, max_chars: int = 6000) -> str:
     compact: list[str] = []
     prev = ""
@@ -161,6 +177,7 @@ def _compact_lines(lines: list[str], *, max_lines: int = 80, max_chars: int = 60
     return text
 
 
+# OCR 응답 body에서 텍스트 콘텐츠 추출, 알려진 키 순서대로 시도
 def _response_content(body: dict[str, Any]) -> str:
     for key in ("text", "content", "ocr_text"):
         value = body.get(key)
@@ -173,6 +190,7 @@ def _response_content(body: dict[str, Any]) -> str:
     return ""
 
 
+# 이미지 경로+mtime+size+설정을 캐시 키로 삼아 OCR 결과를 메모리 캐시, 실패 시 빈 문자열
 @lru_cache(maxsize=2048)
 def _ocr_hint_for_path_cached(
     image_path: str,
@@ -213,6 +231,7 @@ def _ocr_hint_for_path_cached(
     return _compact_lines(_normalize_text_lines(text))
 
 
+# OCR 서비스에 이미지를 요청해 텍스트 결과 조회 (캐시 없이 즉시 호출)
 def _fetch_slide_ocr_text(image_path: str | Path, *, base_url: str | None = None) -> str:
     path = Path(image_path)
     service_path = _service_path_for(path)
@@ -239,6 +258,7 @@ def _fetch_slide_ocr_text(image_path: str | Path, *, base_url: str | None = None
     return _compact_lines(_normalize_text_lines(text))
 
 
+# 슬라이드 이미지의 OCR 힌트 텍스트 조회, 비활성화 상태거나 파일 없으면 빈 문자열, 캐시 활용
 def get_slide_ocr_hint(
     image_path: str | Path,
     *,
@@ -267,6 +287,7 @@ def get_slide_ocr_hint(
     )
 
 
+# 두 OCR 텍스트를 정규화 후 Levenshtein 유사도로 비교해 merge/reject/uncertain 판정
 def compare_ocr_texts(left_text: str, right_text: str) -> dict[str, Any]:
     left_norm = normalize_ocr_text(left_text)
     right_norm = normalize_ocr_text(right_text)
@@ -300,6 +321,7 @@ def compare_ocr_texts(left_text: str, right_text: str) -> dict[str, Any]:
     }
 
 
+# 두 슬라이드 이미지의 OCR 힌트를 조회해 비교, base_url 지정 시 캐시 없이 직접 조회
 def compare_slide_ocr(left_path: str | Path, right_path: str | Path, *, base_url: str | None = None) -> dict[str, Any]:
     if base_url:
         left = _fetch_slide_ocr_text(left_path, base_url=base_url)
@@ -315,6 +337,7 @@ def compare_slide_ocr(left_path: str | Path, right_path: str | Path, *, base_url
     return result
 
 
+# LLM 프롬프트에 삽입할 OCR 힌트 블록 텍스트 생성
 def format_ocr_hint_block(image_path: str | Path, *, label: str | None = None) -> str:
     hint = get_slide_ocr_hint(image_path)
     if not hint:

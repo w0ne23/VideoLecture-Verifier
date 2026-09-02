@@ -1,3 +1,5 @@
+// 상단 고정 헤더 — 브랜드 로고(홈 이동) + 주요 화면 링크
+
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
@@ -5,6 +7,7 @@ export default function SiteHeader() {
   const navigate = useNavigate()
   const [isScrolled, setIsScrolled] = useState(false)
 
+  // 8px 이상 스크롤되면 그림자 강조 클래스 부여
   useEffect(() => {
     const onScroll = () => setIsScrolled(window.scrollY > 8)
     onScroll()

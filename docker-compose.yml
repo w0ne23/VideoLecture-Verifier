@@ -1,4 +1,12 @@
+# VLVerifier 배포 기본 스택 — docker compose up 하나로 전체 서비스 기동
+# 개발 중 코드 즉시 반영은 docker-compose.dev.yml, GPU 가속은 docker-compose.gpu.yml 을
+# 오버라이드로 함께 지정
+#
+# 프로파일: ocr(별도 OCR 서비스), vlm(로컬 Ollama)
+
 services:
+  # PostgreSQL 16 — 애플리케이션 DB(verilec)와 LiteLLM 게이트웨이 DB(litellm)를
+  # 한 컨테이너에서 논리적으로 분리
   db:
     image: postgres:16
     extra_hosts:
@@ -8,30 +16,32 @@ services:
       POSTGRES_DB: verilec
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
-      # LocalVLM / OpenAI-compatible DiffusionGemma
 
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    # backend 의 depends_on(service_healthy)이 이 체크 통과까지 대기
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d verilec"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # FastAPI API 서버 + 검증 파이프라인 실행 워커
+  # 업로드 수신, 전처리, Multi-LLM 검증, 결과 조회 담당
   backend:
-    # 2 GiB works with Docker Desktop and small machines.  Large Linux hosts
-    # can raise this through VLVERIFIER_SHM_SIZE or the GPU override.
+    # 2 GiB 는 Docker Desktop·소형 머신 기준
+    # 대형 리눅스 호스트는 VLVERIFIER_SHM_SIZE 또는 GPU 오버라이드로 상향
     shm_size: "${VLVERIFIER_SHM_SIZE:-2g}"
     build:
       context: .
       dockerfile: backend/Dockerfile
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # numba/torch 등 native 세그폴트 발생 시 코어 덤프가 ./backend에 수십 GB씩
-    # 쌓이는 걸 막는다 (core.<pid> 파일 자체를 아예 안 만들게 함).
+    # 네이티브 세그폴트(numba/torch 등) 시 코어 덤프가 ./backend 에 수십 GB 쌓이는 것 방지
+    # (core.<pid> 파일 자체를 생성 안 함)
     ulimits:
       core: 0
 
@@ -39,18 +49,20 @@ services:
       - .env
 
     environment:
+      # 기본 인프라 연결
       DATABASE_URL: postgresql+asyncpg://user:pass@db/verilec
       LOCAL_STORAGE_DIR: /app/storage
       PIPELINE_ROOT: /app
-      # Portable default: CPU RapidOCR. The NVIDIA override switches this to
-      # Nemotron OCR v2 without changing the pipeline's HTTP OCR contract.
+
+      # 슬라이드 OCR — 기본은 CPU RapidOCR HTTP 호출
+      # GPU 오버라이드가 HTTP OCR 계약 유지한 채 Nemotron OCR v2 로 전환
       VLVERIFIER_SLIDE_OCR_PROVIDER: http
       VLVERIFIER_SLIDE_OCR_BASE_URL: http://127.0.0.1:8000
       VLVERIFIER_SLIDE_OCR_LANG: korean
       VLVERIFIER_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       VLVERIFIER_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
-      # LocalVLM — 슬라이드 후보 검토는 우리가 직접 제공하는 전처리라 외부 API가
-      # 아니라 로컬 LLM(Ollama)으로 돌린다.
+
+      # LocalVLM — 슬라이드 후보 검토는 VLVerifier 직접 제공 전처리라 외부 API 대신 로컬 LLM(Ollama) 사용
       # 상용 API 버전:
       #   VLVERIFIER_VLM_PROVIDER: "openai"
       #   VLVERIFIER_OPENAI_BASE_URL: "https://api.openai.com/v1"
@@ -68,15 +80,15 @@ services:
       VLVERIFIER_VLM_TIMEOUT_SEC: "300"
       VLVERIFIER_VLM_NUM_PREDICT: "512"
       VLVERIFIER_VLM_IMAGE_WIDTH: "768"
-      # P2A base slide t1/t1_structure — 속도보다 정확도 우선이라 로컬 모델 중
-      # qwen3-vl:30b 사용. gpt-5.4-mini로 되돌리려면 provider만 openai로 바꾸면 됨.
+
+      # P2A base 슬라이드 t1/t1_structure 추출 — 정확도 우선이라 로컬 qwen3-vl:30b 사용
+      # gpt-5.4-mini 로 되돌리려면 provider 만 openai 로 변경
       VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER: "${VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER:-ollama}"
       VLVERIFIER_SLIDE_TEXTUALIZER_MODEL: "${VLVERIFIER_SLIDE_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
       VLVERIFIER_SLIDE_TEXTUALIZER_WORKERS: "12"
 
-      # Verifier concurrency. Each multi-model stage applies this limit per
-      # model, while the claim extractor and slide checker use it as their
-      # stage worker limit. Host environment values can override the defaults.
+      # 검증 단계 동시성 — Multi-LLM 단계는 모델별 적용, claim 추출·슬라이드 검사는 단계 워커 상한
+      # 호스트 환경변수로 기본값 재정의 가능
       VERIFIER_STAGE_MAX_WORKERS: "${VERIFIER_STAGE_MAX_WORKERS:-12}"
       VERIFIER_CLAIM_EXTRACT_MAX_WORKERS: "${VERIFIER_CLAIM_EXTRACT_MAX_WORKERS:-20}"
       ISSUE_JUDGE_MAX_WORKERS: "${ISSUE_JUDGE_MAX_WORKERS:-20}"
@@ -88,36 +100,35 @@ services:
       LOCAL_LLM_MODEL: "${LOCAL_LLM_MODEL:-qwen3.8-27b}"
       LOCAL_LLM_ENABLE_THINKING: "${LOCAL_LLM_ENABLE_THINKING:-0}"
 
-      # All verifier models selected in the UI are invoked through LiteLLM.
+      # UI 에서 선택한 검증 모델은 모두 LiteLLM 게이트웨이 경유
       LITELLM_ENABLED: "${LITELLM_ENABLED:-1}"
       LITELLM_BASE_URL: "${LITELLM_BASE_URL:-http://litellm:4000/v1}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
       LITELLM_API_KEY: "${LITELLM_API_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
       VLVERIFIER_CREDENTIAL_ENCRYPTION_KEY: "${VLVERIFIER_CREDENTIAL_ENCRYPTION_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
 
-      # Portable default: Docker Desktop on macOS cannot expose VideoToolbox
-      # or NVIDIA CUDA to Linux containers.  The GPU override enables CUDA.
+      # 슬라이드 디코드 백엔드 — Docker Desktop(macOS)은 VideoToolbox/CUDA 를 리눅스 컨테이너에 노출 못 해 기본 auto
+      # GPU 오버라이드가 CUDA 활성화
       VLVERIFIER_SLIDE_DECODE_BACKEND: auto
       VLVERIFIER_GPU_ONLY: "0"
-      # Step 4 duplicate/build comparison crop: remove 5% from each edge.
+      # Step 4 중복/빌드 비교 크롭 — 각 가장자리 5% 제거
       VLVERIFIER_CONTENT_CROP_LEFT: "0.05"
       VLVERIFIER_CONTENT_CROP_TOP: "0.05"
       VLVERIFIER_CONTENT_CROP_RIGHT: "0.95"
       VLVERIFIER_CONTENT_CROP_BOTTOM: "0.95"
       VLVERIFIER_CLEAR_RESET_CROP_BOTTOM: "0.90"
 
-      # Ultralytics / matplotlib 경고 방지용
+      # Ultralytics/matplotlib 가 홈 디렉터리 쓰기를 시도하며 내는 경고 방지
       YOLO_CONFIG_DIR: /tmp/Ultralytics
       MPLCONFIGDIR: /tmp/matplotlib
       RAPIDOCR_HOME: /models
 
-      # Step 0 sample cache chunk 병렬화
+      # Step 0 sample cache 청크 병렬화
       VLVERIFIER_SAMPLE_CACHE_FPS: "2"
       VLVERIFIER_SAMPLE_CACHE_RESIZE_WIDTH: "768"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASKS: "1"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MODEL: "/app/models/yolo26n.pt"
-      # Empty prevents a TensorRT engine copied from a Linux host from being
-      # selected on a CPU-only machine; Ultralytics loads the .pt model.
+      # TensorRT 엔진(리눅스 호스트 복사본)이 CPU 전용 머신에서 선택되는 것 방지 — 빈 값이면 Ultralytics 가 .pt 로드
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ENGINE: ""
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_BATCH_SIZE: "32"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ENGINE_BATCH_SIZE: "32"
@@ -128,16 +139,13 @@ services:
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX: "4"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO: "0.08"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC: "0"
-      # Keep only two 1.4GB TensorRT execution contexts resident. Other
-      # decode chunks queue their person batches until a slot is available.
+      # 1.4GB TensorRT 실행 컨텍스트 2개만 상주 — 나머지 디코드 청크는 슬롯이 빌 때까지 person 배치 대기
       VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC: "20"
       VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_MIN_HITS: "1"
       VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_CONF: "0.45"
       VLVERIFIER_SCENE_BASE_DELAY_SEC: "2.0"
       VLVERIFIER_SCENE_BASE_MAX_PENDING_SEC: "5.0"
-      # Remove slides that appear for at most three seconds. The remaining
-      # timeline is compacted before OCR/VLM so an A -> transient -> A return
-      # is evaluated as one continuous slide.
+      # 최대 3초만 노출되는 슬라이드 제거 — 남은 타임라인은 OCR/VLM 전 압축돼 A→순간슬라이드→A 복귀를 연속 슬라이드로 평가
       VLVERIFIER_MIN_SLIDE_DURATION_SEC: "3.0"
       VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_WIDTH: "384"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_WORKERS: "1"
@@ -152,7 +160,7 @@ services:
       VLVERIFIER_SAMPLE_CACHE_MERGE_WORKERS: "4"
       VLVERIFIER_SAMPLE_CACHE_MERGE_MASK_WORKERS: "4"
 
-      # Step 1 timeline region 병렬화
+      # Step 1 타임라인 영역 분류 병렬화
       VLVERIFIER_REGION_WORKERS: "4"
       VLVERIFIER_REGION_CHUNK_SAMPLES: "2000"
       VLVERIFIER_REGION_GUARD_SAMPLES: "1"
@@ -163,7 +171,7 @@ services:
       VLVERIFIER_SCENE_PROBE_GUARD_SAMPLES: "100"
       VLVERIFIER_SCENE_PROBE_KEEP_PARTS: "0"
 
-      # Step 4 duplicates 병렬화
+      # Step 4 중복 슬라이드 판정 병렬화
       VLVERIFIER_DUPLICATE_PARALLEL: "1"
       VLVERIFIER_DUPLICATE_WORKERS: "4"
       VLVERIFIER_DUPLICATE_LOG_PAIRS: "0"
@@ -180,8 +188,8 @@ services:
       db:
         condition: service_healthy
 
-  # 정적 빌드된 SPA를 nginx로 서빙하고 /api·/files 를 backend로 프록시한다.
-  # 개발 중 코드 즉시 반영이 필요하면 docker-compose.dev.yml 을 함께 사용한다.
+  # 정적 빌드 SPA 를 nginx 로 서빙, /api·/files 를 backend 로 프록시
+  # 코드 즉시 반영이 필요하면 docker-compose.dev.yml 병행
   frontend:
     build:
       context: ./frontend
@@ -191,6 +199,8 @@ services:
     depends_on:
       - backend
 
+  # 슬라이드 OCR 마이크로서비스 — ocr 프로파일 지정 시에만 기동
+  # backend 의 VLVERIFIER_SLIDE_OCR_BASE_URL 이 이 서비스를 가리키면 OCR 부하 분리 (주로 GPU 오버라이드)
   ocr:
     profiles:
       - ocr
@@ -211,14 +221,16 @@ services:
     ports:
       - "8010:8000"
 
+  # 로컬 LLM 런타임 — vlm 프로파일 지정 시에만 기동
+  # LocalVLM(슬라이드 검토)·slide textualizer 가 호출
   ollama:
     profiles:
       - vlm
     image: ollama/ollama:latest
     container_name: vlverifier-ollama
     environment:
-      # 모델 기본 컨텍스트(Qwen3 계열은 262144)로 그대로 로드하면 KV 캐시만으로
-      # GPU를 다 채워 연산이 CPU로 밀려난다 — 실제로 겪은 문제라 명시적으로 낮춘다.
+      # 모델 기본 컨텍스트(Qwen3 계열 262144) 그대로 로드하면 KV 캐시만으로 GPU 가 차 연산이 CPU 로 밀림
+      # (실제로 겪은 문제라 명시적으로 하향)
       OLLAMA_CONTEXT_LENGTH: "${VLVERIFIER_OLLAMA_CONTEXT_LENGTH:-16384}"
       OLLAMA_NUM_PARALLEL: "${VLVERIFIER_OLLAMA_NUM_PARALLEL:-4}"
     volumes:
@@ -226,9 +238,8 @@ services:
     ports:
       - "11434:11434"
 
-  # OpenAI-compatible gateway. It uses a separate logical database inside the
-  # existing PostgreSQL container, so the gateway schema cannot touch the
-  # application's `verilec` database.
+  # OpenAI 호환 게이트웨이 — UI 에서 선택한 검증 모델을 provider 별 라우팅
+  # 기존 PostgreSQL 컨테이너 안 별도 논리 DB(litellm) 사용 → 게이트웨이 스키마가 애플리케이션 DB(verilec)를 건드릴 수 없음
   litellm:
     image: docker.litellm.ai/berriai/litellm:v1.98.0
     command:
@@ -240,8 +251,7 @@ services:
       - "4000"
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
-      # LiteLLM uses DATABASE_URL for its proxy-management database.
-      # Reuse the existing PostgreSQL service used by the backend.
+      # LiteLLM 은 프록시 관리용 DB 연결에 DATABASE_URL 사용 — backend 의 PostgreSQL 서비스 재사용
       DATABASE_URL: "${LITELLM_DATABASE_URL:-postgresql://user:pass@db/litellm}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
@@ -263,7 +273,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+# 컨테이너 재생성과 무관하게 유지되는 영속 볼륨
 volumes:
-  ollama:
-  postgres_data:
-  rapid_ocr_models:
+  ollama:            # Ollama 가 받아둔 모델 가중치
+  postgres_data:     # PostgreSQL 데이터 디렉터리
+  rapid_ocr_models:  # RapidOCR 모델 캐시

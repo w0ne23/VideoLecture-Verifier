@@ -1,11 +1,11 @@
-"""통계 페이지용 데이터 계층.
+"""통계 페이지용 데이터 계층
 
 - `record_verification_stats`: 완료된 verify 실행에서 요약을 뽑아 `verification_stats`
-  테이블에 1행으로 적재한다 (worker 완료 hook + 백필 스크립트가 호출).
-- 집계 API(`aggregate`)는 Phase 2에서 추가한다.
+  테이블에 1행으로 적재 (worker 완료 hook + 백필 스크립트가 호출)
+- 집계 API(`aggregate`)는 Phase 2에서 추가 예정
 
-진실의 원본은 여전히 디스크의 `..._verification_final.json` / `pipeline_timings.json`
-등이다. 이 모듈은 그것을 조회 가능한 형태로 투영할 뿐이다.
+원본은 여전히 디스크의 `..._verification_final.json` / `pipeline_timings.json` 등이고
+이 모듈은 그것을 조회 가능한 형태로 투영
 """
 
 import json
@@ -25,8 +25,8 @@ from app.services.storage_service import resolve_storage_path
 
 logger = logging.getLogger(__name__)
 
-# 프론트(statsConfig.ISSUE_TYPES)와 동일한 5개 지식 오류 유형.
-# composite_issue = 슬라이드 오류. 지식 오류에 포함한다.
+# 프론트(statsConfig.ISSUE_TYPES)와 동일한 5개 지식 오류 유형
+# composite_issue = 슬라이드 오류, 지식 오류에 포함
 KNOWN_ISSUE_TYPES = (
     'factual_error',
     'temporal_error',
@@ -43,6 +43,7 @@ _STATUS_BUCKET = {
 }
 
 
+# JSON 파일 로드, 읽기/파싱 실패 시 None
 def _load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding='utf-8'))
@@ -50,6 +51,7 @@ def _load_json(path: Path) -> Any:
         return None
 
 
+# 값을 int로 안전 변환, 실패 시 0
 def _safe_int(value: Any) -> int:
     try:
         return int(value)
@@ -57,24 +59,25 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+# bool을 제외한 int/float 값만 통과, 아니면 None
 def _num(value: Any) -> float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def _split_preprocess_verify(timings_doc: dict) -> tuple[float | None, float | None, float | None]:
-    """pipeline_timings.json 에서 전처리/검증/총 소요 시간(초)을 뽑는다.
+    """pipeline_timings.json에서 전처리/검증/총 소요 시간(초) 추출
 
-    파이프라인은 전처리 → 검증 순차 실행이지만, pipeline_timings.json 은 스킵된
-    스테이지의 이전 실행 시간을 보존한다("이 강의 전처리는 원래 N초 걸린다"를 계속
-    보여주려고). 그래서 `총 − 전처리` 로 검증 시간을 구하면 재검증 시 0 이 된다.
-    대신 각 단계의 스테이지 시간을 직접 합산한다.
+    파이프라인은 전처리 → 검증 순차 실행이지만, pipeline_timings.json은 스킵된 스테이지의
+    이전 실행 시간을 보존 ("이 강의 전처리는 원래 N초 걸린다"를 계속 보여주기 위함)
+    따라서 `총 − 전처리`로 검증 시간을 구하면 재검증 시 0이 되므로, 대신 각 단계의
+    스테이지 시간을 직접 합산
 
-    - 전처리: `P{n} ... total` 롤업 키 합 (하위 P1A/P1B 와 이중 카운트 방지)
-    - 검증: `V1` + `V2A~V2F*` 스테이지 시간 합. 검증 내부는 병렬이라 wall-clock 보다
-      약간 크게 나올 수 있으나, "검증 시간은 강의 길이와 무관"이라는 뷰의 취지엔 맞다.
+    - 전처리: `P{n} ... total` 롤업 키 합 (하위 P1A/P1B와 이중 카운트 방지)
+    - 검증: `V1` + `V2A~V2F*` 스테이지 시간 합, 검증 내부는 병렬이라 wall-clock보다
+      약간 크게 나올 수 있으나 "검증 시간은 강의 길이와 무관"이라는 뷰의 취지에는 부합
       (`V2 run_verifier` 롤업은 stale 될 수 있어 폴백으로만 사용)
-    - 총합: run_history 의 마지막 실행 elapsed_sec 우선(진짜 wall-clock), 없으면
-      elapsed_total_sec, 그래도 없으면 전처리+검증.
+    - 총합: run_history의 마지막 실행 elapsed_sec 우선(진짜 wall-clock), 없으면
+      elapsed_total_sec, 그마저 없으면 전처리+검증
     """
     timings = timings_doc.get('timings') or {}
     if not isinstance(timings, dict):
@@ -116,9 +119,9 @@ def _split_preprocess_verify(timings_doc: dict) -> tuple[float | None, float | N
 
 
 def _breakdown_by_type(feedback_items: list, slide_summary: dict, slide_needs_review: list) -> dict:
-    """{ confirmed: {type: n}, review: {...}, rejected: {...} }.
+    """{ confirmed: {type: n}, review: {...}, rejected: {...} } 형태로 집계
 
-    슬라이드 오류는 composite_issue 유형으로 합산한다 (reportable=확정, needs_review=교수확인).
+    슬라이드 오류는 composite_issue 유형으로 합산 (reportable=확정, needs_review=교수확인)
     """
     buckets: dict[str, dict[str, int]] = {'confirmed': {}, 'review': {}, 'rejected': {}}
 
@@ -140,9 +143,9 @@ def _breakdown_by_type(feedback_items: list, slide_summary: dict, slide_needs_re
 
 
 def extract_stats(lecture, job_id) -> dict | None:
-    """lecture 의 디스크 산출물에서 verification_stats 행 kwargs 를 만든다.
+    """lecture의 디스크 산출물에서 verification_stats 행 kwargs 생성
 
-    결과 JSON 이 없으면 None (호출부에서 skip).
+    결과 JSON이 없으면 None (호출부에서 skip)
     """
     stem = str(lecture.id)
     output_dir = resolve_storage_path(lecture.output_dir)
@@ -201,6 +204,7 @@ def extract_stats(lecture, job_id) -> dict | None:
     }
 
 
+# ISO 8601 문자열을 datetime으로 파싱, 실패/비문자열이면 None
 def _parse_dt(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -211,10 +215,10 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 async def record_verification_stats(db: AsyncSession, lecture_id, job_id) -> bool:
-    """완료된 verify 실행 1건을 verification_stats 에 적재한다 (1강의 1행, upsert 성격).
+    """완료된 verify 실행 1건을 verification_stats에 적재 (1강의 1행, upsert 성격)
 
-    호출부(worker hook / 백필)에서 job_type == 'verify' 인지 이미 걸렀다고 가정한다.
-    통계 적재 실패가 상위 흐름을 막지 않도록 예외는 호출부에서 삼킨다.
+    호출부(worker hook / 백필)에서 job_type == 'verify'인지 이미 걸렀다고 가정
+    통계 적재 실패가 상위 흐름을 막지 않도록 예외는 호출부에서 처리
     """
     from app.models import Lecture
 
@@ -235,6 +239,7 @@ async def record_verification_stats(db: AsyncSession, lecture_id, job_id) -> boo
     return True
 
 
+# 문자열을 UUID로 변환
 def _to_uuid(value: str):
     import uuid
     return uuid.UUID(value)
@@ -244,7 +249,7 @@ def _to_uuid(value: str):
 # 집계 (통계 페이지 GET /stats)
 # ---------------------------------------------------------------------------
 
-# 파이프라인이 분류하는 도메인 키. 이 목록 밖이거나 비면 'etc'(기타)로 묶는다.
+# 파이프라인이 분류하는 도메인 키, 이 목록 밖이거나 비면 'etc'(기타)로 묶음
 KNOWN_DOMAINS = (
     'engineering',
     'natural_science',
@@ -258,12 +263,13 @@ KNOWN_DOMAINS = (
 _DURATION_BUCKET_SEC = 15 * 60  # 15분 단위
 
 
+# 알려진 이슈 유형 전부 0으로 초기화한 분포 dict
 def _empty_type_dist() -> dict:
     return {t: 0 for t in KNOWN_ISSUE_TYPES}
 
 
 def _reported_type_dist(breakdown: dict) -> dict:
-    """confirmed + review 만 합산 (기각 제외). 슬라이드 오류는 이미 composite_issue 로 포함됨."""
+    """confirmed + review만 합산 (기각 제외), 슬라이드 오류는 이미 composite_issue로 포함"""
     dist = _empty_type_dist()
     for bucket in ('confirmed', 'review'):
         for ftype, n in (breakdown or {}).get(bucket, {}).items():
@@ -272,20 +278,22 @@ def _reported_type_dist(breakdown: dict) -> dict:
     return dist
 
 
+# other의 값을 target에 누적 합산
 def _add_dist(target: dict, other: dict) -> None:
     for k, v in other.items():
         target[k] = target.get(k, 0) + v
 
 
+# 숫자 값들의 평균, 값이 없으면 None
 def _mean(values: list) -> float | None:
     nums = [v for v in values if isinstance(v, (int, float))]
     return round(sum(nums) / len(nums), 2) if nums else None
 
 
 async def aggregate(db: AsyncSession) -> dict:
-    """통계 페이지가 쓰는 3개 뷰로 집계한다.
+    """통계 페이지가 쓰는 3개 뷰(태그별/도메인별/영상 길이별)로 집계
 
-    verification_stats 에는 job_type='verify' 완료 건만 들어있다 (verify_only 제외).
+    verification_stats에는 job_type='verify' 완료 건만 들어있음 (verify_only 제외)
     """
     from sqlalchemy import select
 

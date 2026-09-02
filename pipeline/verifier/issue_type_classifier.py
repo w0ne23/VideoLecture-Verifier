@@ -1,4 +1,4 @@
-"""Standalone weighted issue type classifier for analyzer issue-judge outputs."""
+"""analyzer issue-judge 출력을 가중치 기반 앙상블로 4가지 issue 유형으로 분류하는 독립 실행형 분류기"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 
 SCHEMA_VERSION = "issue_types.v3"
-# LLM이 확률을 내는 4유형. composite_issue는 별도 routing 결과로 유지한다.
+# LLM이 확률을 내는 4유형, composite_issue는 별도 routing 결과로 유지
 ISSUE_TYPES = (
     "temporal_error",
     "scope_overclaim",
@@ -53,6 +53,7 @@ TOKEN_USAGE_FIELDS = (
 DEFAULT_LOW_MARGIN_THRESHOLD = 0.10
 
 
+# .env 파일 로드 (dotenv 미설치면 무시)
 def _load_env() -> None:
     try:
         from dotenv import load_dotenv
@@ -61,10 +62,12 @@ def _load_env() -> None:
     load_dotenv()
 
 
+# 현재 시각을 ISO 8601 문자열로 반환
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+# LLM 호출 seed 값 조회, 환경변수 미설정/파싱 실패 시 None
 def _env_seed() -> int | None:
     raw = str(os.getenv("VERIFIER_SEED", "") or "").strip()
     if not raw:
@@ -77,12 +80,14 @@ def _env_seed() -> int | None:
         return None
 
 
+# 콤마/공백 구분 문자열을 리스트로 분리
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [part for part in re.split(r"[\s,]+", str(value).strip()) if part]
 
 
+# issue_classify 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
     try:
@@ -92,6 +97,7 @@ def _default_models() -> list[str]:
     return configured_stage_models("issue_classify")
 
 
+# issue의 고유 식별자 조회, issue_id/claim_id가 없으면 내용 기반 해시로 생성
 def _issue_identity(list_key: str, index: int, issue: dict[str, Any]) -> str:
     issue_id = str(issue.get("issue_id") or issue.get("claim_id") or "").strip()
     if issue_id:
@@ -106,6 +112,7 @@ def _issue_identity(list_key: str, index: int, issue: dict[str, Any]) -> str:
     return f"{list_key}:{index + 1}:{digest}"
 
 
+# payload의 지정 list_key들에서 issue 목록을 식별자와 함께 수집
 def collect_issues(payload: dict[str, Any], list_keys: list[str]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for list_key in list_keys:
@@ -126,6 +133,7 @@ def collect_issues(payload: dict[str, Any], list_keys: list[str]) -> list[dict[s
     return refs
 
 
+# 입력 경로의 상위 디렉터리들에서 *_merged_clean.json 파일 탐색
 def _guess_merged_clean_path(input_path: Path) -> Path | None:
     for parent in [input_path.parent, *input_path.parents]:
         candidates = sorted(parent.glob("*_merged_clean.json"))
@@ -134,10 +142,12 @@ def _guess_merged_clean_path(input_path: Path) -> Path | None:
     return None
 
 
+# 리스트를 지정 크기로 분할
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+# LLM 프롬프트에 넣을 issue 요약(식별자+claim 텍스트) 추출
 def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
     issue = ref["issue"]
     return {
@@ -148,6 +158,7 @@ def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# issue 유형 분류용 LLM 프롬프트 생성
 def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
     rows = [_issue_brief(item) for item in items]
     return f"""당신은 강의 verifier가 선별한 issue 후보를 4가지 유형으로 재분류하는 심사자입니다.
@@ -207,6 +218,7 @@ confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도�
 """
 
 
+# 코드펜스(```json ... ```) 제거
 def _strip_json_fence(text: str) -> str:
     stripped = (text or "").strip()
     if stripped.startswith("```"):
@@ -215,17 +227,20 @@ def _strip_json_fence(text: str) -> str:
     return stripped.strip()
 
 
+# LLM 응답에서 classifications 배열 파싱
 def _parse_response(text: str) -> list[dict[str, Any]]:
     payload = json.loads(_strip_json_fence(text))
     rows = payload.get("classifications", [])
     return rows if isinstance(rows, list) else []
 
 
+# 문자열을 4개 정규 유형 중 하나로 정규화, 아니면 None
 def _normalize_issue_type(value: Any) -> str | None:
     raw = str(value or "").strip().lower()
     return raw if raw in ISSUE_TYPES else None
 
 
+# issue_type에 대응하는 한글 라벨 조회
 def _issue_type_label(issue_type: str | None) -> str:
     if not issue_type:
         return "분류 실패"
@@ -233,6 +248,7 @@ def _issue_type_label(issue_type: str | None) -> str:
     return ISSUE_TYPE_LABELS.get(normalized, str(issue_type))
 
 
+# 값을 float로 안전 변환, 실패 시 default
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -240,6 +256,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+# 확률 값 검증(숫자/NaN/inf/음수 여부), 오류 메시지와 함께 반환
 def _safe_probability(value: Any) -> tuple[float | None, str | None]:
     try:
         number = float(value)
@@ -252,6 +269,7 @@ def _safe_probability(value: Any) -> tuple[float | None, str | None]:
     return number, None
 
 
+# LLM이 낸 확률 dict를 4개 유형 합이 1이 되도록 정규화, 검증 실패 시 오류 메시지 반환
 def _normalize_probabilities(raw: Any) -> tuple[dict[str, float] | None, str | None]:
     if not isinstance(raw, dict):
         return None, "probabilities 객체가 없거나 dict가 아닙니다."
@@ -271,6 +289,7 @@ def _normalize_probabilities(raw: Any) -> tuple[dict[str, float] | None, str | N
     return {key: round(value / total, 6) for key, value in values.items()}, None
 
 
+# 확률 dict에서 최고 확률 유형과 그 값 조회
 def _top_probability_type(probabilities: dict[str, float]) -> tuple[str | None, float]:
     if not probabilities:
         return None, 0.0
@@ -278,6 +297,7 @@ def _top_probability_type(probabilities: dict[str, float]) -> tuple[str | None, 
     return top_type, float(probabilities.get(top_type, 0.0) or 0.0)
 
 
+# 여러 환경변수 이름 중 값이 있는 첫 번째를 반환
 def _env_first(*names: str, default: str = "") -> str:
     for name in names:
         value = os.getenv(name, "").strip()
@@ -287,7 +307,7 @@ def _env_first(*names: str, default: str = "") -> str:
 
 
 def resolve_low_margin_threshold(override: float | None = None) -> float:
-    """1위·2위 유형 점수 차이가 이 값 미만이면 low_margin으로 표시한다."""
+    """1위·2위 유형 점수 차이가 이 값 미만이면 low_margin으로 표시"""
     if override is not None:
         return max(0.0, float(override))
     raw = _env_first(
@@ -301,6 +321,7 @@ def resolve_low_margin_threshold(override: float | None = None) -> float:
         return DEFAULT_LOW_MARGIN_THRESHOLD
 
 
+# 환경변수를 float로 읽되 최솟값 이상으로 clamp
 def _env_float(name: str, default: float, *, min_value: float = 1.0) -> float:
     try:
         value = float(os.getenv(name, str(default)) or default)
@@ -309,6 +330,7 @@ def _env_float(name: str, default: float, *, min_value: float = 1.0) -> float:
     return max(min_value, value)
 
 
+# 환경변수를 int로 읽되 최솟값 이상으로 clamp
 def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
     try:
         value = int(os.getenv(name, str(default)) or default)
@@ -317,6 +339,7 @@ def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
     return max(min_value, value)
 
 
+# 축약된 별칭을 실제 Anthropic 모델 ID로 변환
 def _resolve_anthropic_model(model_name: str) -> str:
     aliases = {
         "haiku-4.5": "claude-haiku-4-5-20251001",
@@ -333,7 +356,7 @@ def _resolve_anthropic_model(model_name: str) -> str:
 
 
 def _resolve_vllm_model(model_spec: str) -> str:
-    """Resolve an OpenAI-compatible local/remote vLLM model specification."""
+    """OpenAI 호환 local/remote vLLM 모델 스펙 해석"""
     raw = str(model_spec or "").strip()
     lowered = raw.lower()
     if lowered in {"vllm", "qwen", "local", "local-llm"}:
@@ -349,6 +372,7 @@ def _resolve_vllm_model(model_spec: str) -> str:
     return raw
 
 
+# 모델 스펙 문자열을 provider/alias/실제 모델명으로 해석
 def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     raw = str(model_spec or "").strip()
     lowered = raw.lower()
@@ -415,8 +439,8 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
         return {"provider": "ollama", "alias": raw, "resolved_model": raw.split(":", 1)[1].strip()}
     if lowered.startswith("ollama/"):
         return {"provider": "ollama", "alias": raw, "resolved_model": raw.split("/", 1)[1].strip()}
-    # Unknown concrete model IDs are valid when a configured runtime/LiteLLM
-    # binding owns the invocation. Do not route or substitute them here.
+    # 설정된 runtime/LiteLLM 바인딩이 호출을 담당할 때는 알 수 없는 구체적 모델 ID도
+    # 유효함, 여기서는 라우팅하거나 치환하지 않음
     return {"provider": "runtime", "alias": raw, "resolved_model": raw}
 
 
@@ -432,7 +456,7 @@ def _call_llm(
     structured_schema: dict[str, Any] | None = None,
     stage: str = "issue_classify",
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
-    """Call the selected classifier model through the runtime gateway."""
+    """선택된 classifier 모델을 런타임 게이트웨이로 호출"""
     try:
         from .runtime_llm import call_runtime_llm, resolve_runtime_binding
     except ImportError:
@@ -478,6 +502,7 @@ def _call_llm(
     return text, usage, resolved
 
 
+# 모델 1개가 담당하는 전체 배치를 순차 처리
 def _model_worker(args: tuple) -> dict[str, Any]:
     model, issues, batch_size, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
@@ -519,6 +544,7 @@ def _model_worker(args: tuple) -> dict[str, Any]:
     }
 
 
+# 배치 1개를 처리, 파싱 실패 항목만 골라 재시도, 최종 실패한 issue는 parse_failed로 채움
 def _batch_worker(args: tuple) -> dict[str, Any]:
     model, batch, batch_index, total_batches, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
@@ -566,11 +592,16 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 time.sleep(retry_wait)
         except Exception as exc:
             last_exc = exc
+            # anthropic.APIConnectionError.__str__()은 실제 원인과 무관하게 항상 고정된
+            # "Connection error." 문자열을 반환함 — 진짜 근본 원인(TLS, DNS, proxy 등)이
+            # 보이도록 감싸진 원인(cause)도 함께 표면화
+            cause = getattr(exc, "__cause__", None)
+            detail = f"{type(exc).__name__}: {exc}" + (f" (caused by {type(cause).__name__}: {cause})" if cause else "")
             if attempt >= attempts:
                 raise
             print(
                 f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
-                f"{attempt}/{attempts - 1}: {exc}",
+                f"{attempt}/{attempts - 1}: {detail}",
                 flush=True,
             )
             if retry_wait:
@@ -607,6 +638,7 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
     }
 
 
+# 배치 처리 성공 결과를 모델별 결과 dict에 누적
 def _append_batch_result(model_results: dict[str, dict[str, Any]], result: dict[str, Any]) -> None:
     model = result["model"]
     target = model_results[model]
@@ -616,6 +648,7 @@ def _append_batch_result(model_results: dict[str, dict[str, Any]], result: dict[
     target["token_usage_by_batch"].append(result["token_usage"])
 
 
+# 배치 처리 실패를 모델별 결과 dict에 기록 (모델 항목이 없으면 새로 생성)
 def _append_batch_error(model_results: dict[str, dict[str, Any]], args: tuple, exc: Exception) -> None:
     model, _batch, batch_index, _total_batches, _current_date, _max_tokens = args
     try:
@@ -634,6 +667,7 @@ def _append_batch_error(model_results: dict[str, dict[str, Any]], args: tuple, e
     target["batch_errors"].append({"batch_index": batch_index, "error": str(exc)})
 
 
+# 여러 배치의 토큰 사용량을 필드별로 합산
 def _aggregate_token_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
     totals = Counter()
     for usage in usages:
@@ -645,7 +679,7 @@ def _aggregate_token_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _parse_model_weights(value: str | None, models: list[str], model_results: dict[str, dict[str, Any]]) -> dict[str, float]:
-    """Assign every selected model the same vote weight."""
+    """선택된 모든 모델에 동일한 투표 가중치 부여"""
     del value, model_results
     if not models:
         return {}
@@ -653,6 +687,7 @@ def _parse_model_weights(value: str | None, models: list[str], model_results: di
     return {model: round(equal, 6) for model in models}
 
 
+# 모델별 확률에 가중치를 곱해 유형별 가중 점수 합산, 실패/파싱 오류 모델의 가중치는 missing_weight로 집계
 def _weighted_scores(
     verdicts: list[dict[str, Any]],
     model_weights: dict[str, float],
@@ -676,6 +711,7 @@ def _weighted_scores(
     return {key: round(value, 6) for key, value in scores.items()}, used_weights, round(missing_weight, 6)
 
 
+# 가중 점수가 가장 높은 유형을 잠정 채택, 1위/2위 점수 차이가 임계값 미만이면 low_margin으로 표시
 def _choose_final_type(
     verdicts: list[dict[str, Any]],
     model_weights: dict[str, float],
@@ -699,6 +735,7 @@ def _choose_final_type(
     )
 
 
+# 정상 응답한 모델들의 최고 확률 유형만 모아 리스트로 반환
 def _model_top_types(verdicts: list[dict[str, Any]]) -> list[str]:
     tops: list[str] = []
     for verdict in verdicts:
@@ -710,16 +747,18 @@ def _model_top_types(verdicts: list[dict[str, Any]]) -> list[str]:
     return tops
 
 
+# 참여 모델 수만큼 서로 다른 top_issue_type이 나왔는지(전원 의견 불일치) 확인
 def _all_models_disagree(verdicts: list[dict[str, Any]], *, expected_model_count: int) -> bool:
-    # A single model cannot disagree with another model.  Without this guard,
-    # a one-model classifier run with one valid top type was incorrectly routed
-    # to composite_issue because ``len(set(tops)) == expected_model_count``.
+    # 모델이 하나뿐이면 다른 모델과 의견이 갈릴 수 없음, 이 가드가 없으면 모델 1개로
+    # 실행했을 때 유효한 top type 1개만 있어도 ``len(set(tops)) == expected_model_count``
+    # 조건이 성립해 잘못 composite_issue로 라우팅됨
     if expected_model_count < 2:
         return False
     tops = _model_top_types(verdicts)
     return len(tops) >= expected_model_count and len(set(tops)) == expected_model_count
 
 
+# low_margin 또는 전 모델 의견 불일치 시 최종 유형을 composite_issue로 재라우팅
 def _apply_composite_routing(
     *,
     provisional_type: str | None,
@@ -737,6 +776,7 @@ def _apply_composite_routing(
     return provisional_type, reasons
 
 
+# 모델 실패나 누락된 issue별 판정이 없는지 검증, 문제가 있으면 예외로 전체 실행 중단
 def _validate_classification_completeness(
     *,
     models: list[str],
@@ -773,6 +813,7 @@ def _validate_classification_completeness(
             )
 
 
+# issue 1건에 대해 최종 유형/점수/composite 라우팅 여부를 포함한 분류 레코드 구성
 def _classification_record(
     ref: dict[str, Any],
     verdicts: list[dict[str, Any]],
@@ -827,6 +868,7 @@ def _classification_record(
     }
 
 
+# 분류 레코드를 최종 유형별로 그룹화, 유형이 없는 것은 unclassified로 분류
 def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
     by_type = {issue_type: [] for issue_type in ALL_ISSUE_TYPES}
     unclassified = []
@@ -850,6 +892,7 @@ def _group_results(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {"by_type": by_type, "unclassified": unclassified}
 
 
+# 확률 dict를 짧은 라벨 기반 한 줄 문자열로 포맷
 def _format_probability_vector(probabilities: dict[str, Any] | None) -> str:
     if not isinstance(probabilities, dict):
         return "-"
@@ -861,6 +904,7 @@ def _format_probability_vector(probabilities: dict[str, Any] | None) -> str:
     return ", ".join(parts)
 
 
+# issue별 모델 확률/앙상블 점수를 콘솔에 보기 좋게 출력
 def _print_classification_score_report(records: list[dict[str, Any]]) -> None:
     if not records:
         print("점수 리포트: 분류 결과 없음")
@@ -911,6 +955,7 @@ def _print_classification_score_report(records: list[dict[str, Any]]) -> None:
             print(f"  weighted: {weighted_text}")
 
 
+# 후속 단계로 넘길 최소 필드만 남긴 model_classifications 요약
 def _compact_model_classifications(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     compact: list[dict[str, Any]] = []
     for verdict in verdicts:
@@ -921,14 +966,15 @@ def _compact_model_classifications(verdicts: list[dict[str, Any]]) -> list[dict[
                 "model": verdict.get("model", ""),
                 "top_issue_type": verdict.get("top_issue_type", ""),
                 "top_probability": verdict.get("top_probability", 0.0),
-                # This is carried only as an unverified entity/search hint for
-                # downstream grounding. It is not external factual evidence.
+                # 이 reason은 후속 grounding 단계를 위한 검증되지 않은 entity/검색 힌트일 뿐,
+                # 외부 사실 근거가 아님
                 "reason": str(verdict.get("reason") or "")[:320],
             }
         )
     return compact
 
 
+# 분류 레코드를 후속 단계 입력용 축소된 item 형식으로 변환
 def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "issue_id": record.get("issue_id", ""),
@@ -957,6 +1003,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# 분류 결과 전체를 유형별로 묶은 후속 단계 입력 JSON으로 변환
 def build_next_stage_input(result: dict[str, Any], *, classification_path: str | Path) -> dict[str, Any]:
     issues_by_type = {issue_type: [] for issue_type in ALL_ISSUE_TYPES}
     unclassified = []
@@ -988,6 +1035,7 @@ def build_next_stage_input(result: dict[str, Any], *, classification_path: str |
     }
 
 
+# 모델별 판정 개수를 유형별로 집계
 def _model_breakdown(model_results: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     breakdown = {}
     for model, result in model_results.items():
@@ -1011,6 +1059,7 @@ def _model_breakdown(model_results: dict[str, dict[str, Any]]) -> dict[str, dict
     return breakdown
 
 
+# issue 목록을 여러 모델로 병렬 분류하고, 가중 앙상블로 최종 유형 결정까지 수행하는 전체 파이프라인
 def classify_issues(
     payload: dict[str, Any],
     *,
@@ -1096,8 +1145,8 @@ def classify_issues(
                 progress_done += 1
                 done = progress_done
             progress_notify(done, total_batch_count)
-        # ``max_workers``는 전체 한도가 아니라 모델당 한도다. 공급자별
-        # executor를 분리해 한 모델의 대기/제한이 다른 모델의 슬롯을 막지 않는다.
+        # ``max_workers``는 전체 한도가 아니라 모델당 한도, 공급자별
+        # executor를 분리해 한 모델의 대기/제한이 다른 모델의 슬롯을 막지 않음
         worker_args_by_model: dict[str, list[tuple]] = defaultdict(list)
         for args in worker_args:
             worker_args_by_model[args[0]].append(args)
@@ -1243,6 +1292,7 @@ def classify_issues(
     }
 
 
+# 입력 파일명에서 _issue_judge 접미어를 떼고 _issue_types.json 출력 경로 생성
 def _default_output_path(input_path: Path) -> Path:
     stem = input_path.stem
     if stem.endswith("_issue_judge"):
@@ -1250,6 +1300,7 @@ def _default_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{stem}_issue_types.json")
 
 
+# 출력 파일명에서 _issue_types 접미어를 떼고 _classified_issues.json 경로 생성
 def _default_next_input_path(output_path: Path) -> Path:
     stem = output_path.stem
     if stem.endswith("_issue_types"):
@@ -1257,26 +1308,27 @@ def _default_next_input_path(output_path: Path) -> Path:
     return output_path.with_name(f"{stem}_classified_issues.json")
 
 
+# CLI 인자 파서 구성
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Classify issue-judge selected issues into 4 issue types with composite routing.",
+        description="issue-judge가 선택한 issue를 composite routing을 포함한 4가지 issue 유형으로 분류",
     )
-    parser.add_argument("input_json", help="verifier issue judge JSON path")
-    parser.add_argument("-o", "--output", help="output JSON path")
+    parser.add_argument("input_json", help="verifier issue judge JSON 경로")
+    parser.add_argument("-o", "--output", help="출력 JSON 경로")
     parser.add_argument(
         "--merged-clean",
         default=None,
-        help="merged_clean JSON path retained for output metadata compatibility",
+        help="출력 메타데이터 호환성을 위해 유지하는 merged_clean JSON 경로",
     )
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Defaults to the issue_classify stage bindings.",
+        help="콤마/공백 구분 모델 목록, 기본값은 issue_classify 스테이지 바인딩",
     )
     parser.add_argument(
         "--issue-list-keys",
         default=",".join(DEFAULT_LIST_KEYS),
-        help="comma/space separated JSON list keys to classify. Default: issues",
+        help="분류 대상 JSON list key(콤마/공백 구분), 기본값: issues",
     )
     parser.add_argument(
         "--batch-size",
@@ -1294,28 +1346,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-weights",
         default=None,
-        help="deprecated compatibility option; selected models always receive equal weight",
+        help="사용 중단된 호환 옵션, 선택된 모델은 항상 동일 가중치를 받음",
     )
     parser.add_argument(
         "--low-margin-threshold",
         type=float,
         default=None,
         help=(
-            "mark low_margin when top score minus second score is below this value "
-            f"(default: {DEFAULT_LOW_MARGIN_THRESHOLD}, env: ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD)"
+            "1위 점수와 2위 점수 차이가 이 값 미만이면 low_margin으로 표시 "
+            f"(기본값: {DEFAULT_LOW_MARGIN_THRESHOLD}, 환경변수: ISSUE_TYPE_CLASSIFIER_LOW_MARGIN_THRESHOLD)"
         ),
     )
-    parser.add_argument("--limit", type=int, default=None, help="optional issue count limit for quick tests")
-    parser.add_argument("--dry-run", action="store_true", help="validate input/output shape without calling LLMs")
+    parser.add_argument("--limit", type=int, default=None, help="빠른 테스트용 issue 개수 제한(선택)")
+    parser.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 입출력 형식만 검증")
     parser.add_argument(
         "--next-input-output",
         default=None,
-        help="write slim next-stage input JSON path. Default: alongside classifier output as *_classified_issues.json",
+        help="후속 단계 입력용 축소 JSON 경로, 기본값은 classifier 출력과 같은 위치의 *_classified_issues.json",
     )
     parser.add_argument(
         "--no-next-input",
         action="store_true",
-        help="do not write the slim next-stage input JSON",
+        help="후속 단계 입력용 축소 JSON을 작성하지 않음",
     )
     parser.add_argument(
         "--print-scores",
@@ -1330,6 +1382,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# CLI 진입점, 분류 실행 후 결과/후속 입력 JSON 저장 및 요약 출력
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     input_path = Path(args.input_json)

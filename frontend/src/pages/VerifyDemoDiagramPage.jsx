@@ -1,13 +1,14 @@
+// [개발용] 아키텍처 다이어그램(전처리/검증 두 구간, 구간마다 두 갈래) 확인/수정 데모 (/dev/verify-demo-diagram)
+// 실제 API 없이 로컬 타이머로만 진행, /dev/verify-demo 와 별개
+
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import DiagramPipeline from '../components/verifier/DiagramPipeline'
 import { DEMO_PHASES } from '../hooks/useDemoPipelineFlow'
 import { useDemoDiagramFlow } from '../hooks/useDemoDiagramFlow'
 
-// 발화 검증(로즈)·슬라이드 검증(틸) 구간의 선/노드 색을 켜고 끄며 비교해볼 수 있는 실험용
-// 컨트롤. 상태를 페이지 최상단에 둬서 진행/에러/완료 단계를 오가도 값이 유지된다.
-// 여러 팔레트를 만들어봤지만 비교해보니 이 로즈/틸 조합이 제일 나아서 색 자체는 고정하고
-// "선만/노드만 다르게" 토글만 남겼다.
+// 발화 검증(rose)·슬라이드 검증(teal) 구간의 선/노드 색을 켜고 끄며 비교하는 실험용 컨트롤
+// 상태를 페이지 최상단에 둬 진행/에러/완료 단계를 오가도 값 유지 — 색은 고정, "선만/노드만 다르게" 토글만 유지
 function ColorLabControls({ diffLine, diffNode, onToggleLine, onToggleNode, noGrounding, onToggleGrounding }) {
   return (
     <div className="diag-colorlab">
@@ -30,9 +31,6 @@ function ColorLabControls({ diffLine, diffNode, onToggleLine, onToggleNode, noGr
   )
 }
 
-// 첨부된 아키텍처 다이어그램(전처리/검증 두 구간, 구간마다 두 갈래로 나뉘었다 합쳐짐)을
-// 확인/수정하기 위한 데모 라우트. /dev/verify-demo와 마찬가지로 실제 업로드·검증 API를
-// 호출하지 않고 로컬 타이머로만 진행한다. 기존 /dev/verify-demo는 건드리지 않는다.
 function DemoUploadStep({ flow }) {
   const inputRef = useRef(null)
   const { file, title, actions } = flow
@@ -84,8 +82,8 @@ function DemoUploadStep({ flow }) {
 function DemoPipelineStep({ flow, colorLab }) {
   const { phase, title, file, tickIndex, autoPlay, status, currentStage, actions } = flow
   const isError = phase === DEMO_PHASES.ERROR
-  // worker.py가 그라운딩 미포함 잡의 verifier_web_grounding stage를 시작부터 'skip'으로
-  // 보고하는 것과 같은 신호를 데모에서 흉내낸다 — DiagramPipeline은 이 값만 보고 레이아웃을 바꾼다.
+  // worker.py 가 그라운딩 미포함 잡의 verifier_web_grounding stage 를 시작부터 'skip' 으로
+  // 보고하는 신호를 데모에서 흉내냄 — DiagramPipeline 은 이 값만 보고 레이아웃 변경
   const displayStatus = colorLab.noGrounding ? { ...status, issue_filter: 'skip' } : status
 
   return (

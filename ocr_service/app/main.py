@@ -1,3 +1,4 @@
+# VLVerifier OCR 서비스, Nemotron OCR 기반 슬라이드 이미지 텍스트 인식 API
 from __future__ import annotations
 
 import logging
@@ -16,17 +17,22 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# 백엔드와 공유하는 로컬 스토리지 경로, 상대경로 이미지 요청은 이 경로 기준으로 해석
 LOCAL_STORAGE_DIR = Path(os.getenv("LOCAL_STORAGE_DIR", "/app/storage"))
+# 기본 OCR 언어
 OCR_LANG = os.getenv("VLVERIFIER_SLIDE_OCR_LANG", "multilingual").strip().lower()
+# Nemotron OCR 모델 디렉터리 경로, 미지정 시 허브에서 로드
 OCR_MODEL_DIR = os.getenv("VLVERIFIER_SLIDE_OCR_MODEL_DIR", "").strip()
 
 
+# OCR 요청 바디
 class OCRRequest(BaseModel):
-    image_path: str = Field(..., description="Path visible inside the OCR container")
+    image_path: str = Field(..., description="OCR 컨테이너 내부 기준 경로")
     lang: str | None = None
     model_dir: str | None = None
 
 
+# OCR 응답 스키마
 class OCRResponse(BaseModel):
     image_path: str
     text: str
@@ -35,6 +41,8 @@ class OCRResponse(BaseModel):
     lang: str
 
 
+# OCR 원본 결과(str/list/dict/속성 객체 등 다양한 형태)를 문자열 라인 목록으로 재귀 정규화
+# Nemotron OCR 반환 타입이 버전/모드에 따라 달라질 수 있어 어떤 형태가 와도 라인 배열로 수렴시킴
 def _normalize_lines(value: Any) -> list[str]:
     if value is None:
         return []
@@ -63,6 +71,7 @@ def _normalize_lines(value: Any) -> list[str]:
     return [text] if text else []
 
 
+# 인식된 텍스트 라인 중복 제거 및 길이 제한
 def _compact_lines(lines: list[str], *, max_lines: int = 80, max_chars: int = 6000) -> list[str]:
     compact: list[str] = []
     prev = ""
@@ -81,6 +90,7 @@ def _compact_lines(lines: list[str], *, max_lines: int = 80, max_chars: int = 60
     return compact
 
 
+# Nemotron OCR 인스턴스를 지연 로딩하고, 언어/모델 조합이 바뀌면 자동으로 재로딩하는 런타임 래퍼
 class OCRRuntime:
     def __init__(self) -> None:
         self.ocr = None
@@ -88,6 +98,7 @@ class OCRRuntime:
         self.loaded_lang = OCR_LANG
         self.loaded_model_dir = OCR_MODEL_DIR
 
+    # 요청된 언어/모델 조합으로 OCR 인스턴스 로드, 이미 로드된 조합과 같으면 재사용
     def load(self, *, lang: str | None = None, model_dir: str | None = None) -> None:
         requested_lang = (lang or OCR_LANG).strip().lower()
         requested_model_dir = (model_dir or OCR_MODEL_DIR).strip()
@@ -101,6 +112,7 @@ class OCRRuntime:
         kwargs: dict[str, Any] = {}
         if requested_model_dir:
             kwargs["model_dir"] = requested_model_dir
+        # 영어 전용 요청이면 다국어 가중치 대신 영어 전용 가중치 사용
         if requested_lang in {"en", "english"}:
             kwargs["lang"] = "en"
 
@@ -110,6 +122,7 @@ class OCRRuntime:
         self.loaded_lang = requested_lang
         self.loaded_model_dir = requested_model_dir
 
+    # 이미지 경로에 대해 OCR 실행, predict/call 인터페이스 중 지원하는 쪽을 사용
     def infer(self, image_path: Path, lang: str | None = None, model_dir: str | None = None) -> OCRResponse:
         if not image_path.exists():
             raise FileNotFoundError(str(image_path))
@@ -135,9 +148,11 @@ class OCRRuntime:
         )
 
 
+# 프로세스 전역에서 공유하는 OCR 런타임 싱글턴
 runtime = OCRRuntime()
 
 
+# 앱 시작 시 스토리지 디렉터리 사전 생성
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     LOCAL_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,6 +160,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VLVerifier OCR Service", lifespan=lifespan)
+# 내부망에서 백엔드가 호출하는 전용 서비스라 모든 origin 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -154,11 +170,13 @@ app.add_middleware(
 )
 
 
+# 서비스 상태 확인
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# 이미지 경로를 받아 OCR 실행, 상대경로면 LOCAL_STORAGE_DIR 기준으로 해석
 @app.post("/ocr", response_model=OCRResponse)
 def ocr(req: OCRRequest) -> OCRResponse:
     image_path = Path(req.image_path)

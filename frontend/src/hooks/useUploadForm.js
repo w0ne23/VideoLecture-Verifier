@@ -1,17 +1,19 @@
+// 강의 업로드 폼 상태 관리 + 제출 (react-query mutation)
+
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { uploadLecture } from '../api/pipeline'
 
-// 업로드 화면에서 출처 태그 선택 UI를 없앤 대신, 백엔드가 요구하는 값을 채우기 위해
-// 항상 '기타'로 보낸다. 기존 강의의 출처 필터·통계는 그대로 유지된다.
+// 업로드 화면에 출처 태그 선택 UI 가 없어, 백엔드 필수값을 채우려고 항상 '기타'로 전송
+// 기존 강의의 출처 필터·통계는 그대로 유지
 const DEFAULT_SOURCE_TAG = 'etc'
 
+// 파일명에서 확장자를 뗀 문자열
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
 }
 
-// VLVerifier의 useUploadForm을 verify 전용으로 축소한 버전.
-// 업로드 성공 시 onUploaded(lectureId)로 상세 화면 전환을 위임한다.
+// 업로드 성공 시 onUploaded(lectureId)로 상세 화면 전환 위임
 export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
@@ -33,8 +35,8 @@ export function useUploadForm({ onUploaded } = {}) {
     if (!nextFile) return
     setFile(nextFile)
     setLocalError('')
-    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
-    // (그냥 비어있는지만 보면, 이전 파일에서 자동 채워진 제목이 새 파일을 골라도 그대로 남는다.)
+    // 사용자가 제목을 직접 수정한 적 없을 때만 파일명으로 자동 갱신
+    // (빈 값 여부만 보면, 이전 파일에서 자동 채워진 제목이 새 파일 선택 후에도 남음)
     setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
   }
 

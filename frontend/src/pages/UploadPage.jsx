@@ -1,3 +1,5 @@
+// 강의 업로드 화면 — UploadForm 래퍼, 업로드 성공 시 진행 화면으로 이동
+
 import { useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import UploadForm from '../components/UploadForm'

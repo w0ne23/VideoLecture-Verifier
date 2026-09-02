@@ -1,10 +1,10 @@
-"""기존에 완료된 verify 강의들을 verification_stats 에 소급 적재한다.
+"""기존에 완료된 verify 강의들을 verification_stats에 소급 적재
 
     docker compose exec backend python -m app.scripts.backfill_verification_stats
 
-- job_type='verify' + status='done' 인 강의만 대상 (verify_only 제외).
-- 결과 JSON 파일이 없으면 skip.
-- 멱등: record_verification_stats 가 lecture 당 기존 행을 지우고 다시 넣는다.
+- job_type='verify' + status='done'인 강의만 대상 (verify_only 제외)
+- 결과 JSON 파일이 없으면 skip
+- 멱등: record_verification_stats가 lecture당 기존 행을 지우고 다시 넣음
 """
 
 import asyncio
@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
 logger = logging.getLogger('backfill')
 
 
+# 강의별 완료된 verify job을 찾아 통계 테이블에 적재, 결과 파일 없으면 skip
 async def main() -> None:
     inserted = skipped = 0
     async with AsyncSessionLocal() as db:
@@ -35,7 +36,7 @@ async def main() -> None:
             )
         ).all()
 
-        # 강의당 마지막 verify job 만 남긴다.
+        # 강의당 마지막 verify job만 유지
         latest_job: dict = {}
         titles: dict = {}
         for lecture_id, title, job_id in rows:

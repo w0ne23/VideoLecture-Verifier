@@ -1,6 +1,13 @@
+# NVIDIA GPU 오버라이드 — CUDA 디코드, TensorRT person 마스킹, GPU OCR 활성화
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+#
+# 단일 GPU 에 backend/ocr/ollama 배치 (VLVERIFIER_NVIDIA_DEVICE 로 지정)
+
 services:
   backend:
     shm_size: "${VLVERIFIER_SHM_SIZE:-64g}"
+    # CUDA 휠로 torch 빌드 + TensorRT 설치
     build:
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
@@ -8,12 +15,15 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+      # 기본 파일의 auto/http(127.0.0.1) 설정을 GPU 경로로 대체
       VLVERIFIER_SLIDE_DECODE_BACKEND: ffmpeg-cuda
       VLVERIFIER_SLIDE_OCR_PROVIDER: http
       VLVERIFIER_SLIDE_OCR_BASE_URL: http://ocr:8000
+      # 미리 빌드한 FP16 TensorRT 엔진으로 person 마스킹
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ENGINE: "/app/storage/models/yolo26n-fp16.engine"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXTS: "2"
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_SERIALIZE: "0"
+      # GPU 여유가 있어 CPU 기본값보다 워커 수 상향
       VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_WORKERS: "4"
       VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS: "12"
       VLVERIFIER_SAMPLE_CACHE_MERGE_WORKERS: "8"
@@ -29,6 +39,8 @@ services:
               device_ids: ["${VLVERIFIER_NVIDIA_DEVICE:-1}"]
               capabilities: [gpu]
 
+  # 기본 파일에서 profiles(ocr) 로 정의된 서비스에 GPU 부착
+  # 이 오버라이드 사용 시 `--profile ocr` 를 함께 지정해야 기동
   ocr:
     environment:
       NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
@@ -43,10 +55,10 @@ services:
 
   ollama:
     environment:
-      # 두 카드에 걸쳐 텐서를 분산했을 때 GPU 0이 세 번 연속(ERR! 두 번 +
-      # 시스템 행 한 번) 죽는 걸 확인했다 — GSP 펌웨어를 꺼도 재현됨. RTX 4090은
-      # NVLink가 없어 P2P 자체가 이 하드웨어에서 불안정한 것으로 보여, 안전하게
-      # backend/ocr와 같은 GPU 한 장(VLVERIFIER_NVIDIA_DEVICE)만 쓰도록 고정한다.
+      # 두 카드에 걸쳐 텐서를 분산했을 때 GPU 0 이 세 번 연속(ERR! 두 번 +
+      # 시스템 행 한 번) 죽는 것을 확인 (GSP 펌웨어를 꺼도 재현). RTX 4090 은
+      # NVLink 가 없어 P2P 자체가 이 하드웨어에서 불안정한 것으로 보여, 안전하게
+      # backend/ocr 와 같은 GPU 한 장(VLVERIFIER_NVIDIA_DEVICE)만 쓰도록 고정
       NVIDIA_VISIBLE_DEVICES: "${VLVERIFIER_NVIDIA_DEVICE:-1}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     deploy:
