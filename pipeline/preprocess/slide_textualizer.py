@@ -121,8 +121,7 @@ T1_BASE_ONLY_EXTRACTION_PROMPT = """
 """
 
 # base + build 프레임이 있는 슬라이드 (이미지 2장 이상):
-# Image 1 (BASE)        → slide_emphasis 추출 (애니메이션 진행 전 원본)
-# Image 2..N (BUILD 1..N-1) → t1 텍스트 추출, BASE와 합쳐 놓치는 내용 없이 종합
+# Image 1..N (BASE + BUILD 1..N-1) → t1 텍스트 추출, 전부 합쳐 놓치는 내용 없이 종합
 T1_EXTRACTION_PROMPT_WITH_BUILDS = """
 여러 장의 이미지가 순서대로 제공됩니다:
   - Image 1        : BASE, 이 슬라이드의 최초 상태
@@ -170,14 +169,6 @@ T1_EXTRACTION_PROMPT_WITH_BUILDS = """
       },
       "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
     }
-  ],
-  "slide_emphasis": [
-    {
-      "text": "강조된 텍스트 원문",
-      "type": "color" | "bold" | "underline" | "box" | "highlight" | "italic" | "callout" | "other",
-      "color": "red",
-      "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
-    }
   ]
 }
 
@@ -197,29 +188,6 @@ T1_EXTRACTION_PROMPT_WITH_BUILDS = """
   - visual_elements는 화살표, 박스, 아이콘, 레이어, 말풍선, 라벨, 선, 축 등 질문 대상이 될 수 있는 시각 요소를 분리할 것.
   - visual_relations는 화살표/선/위치/포함 관계가 무엇을 연결하고 무엇을 의미하는지 분리할 것.
   - layout은 상단/중앙/하단/좌/우 등 공간 배치가 의미를 갖는 경우에만 작성할 것.
-
-[slide_emphasis]
-  - 반드시 Image 1 (BASE) 만을 기준으로 판단할 것. 이후 이미지들은 slide_emphasis 판단에
-    절대 사용하지 말 것.
-  - 슬라이드 제작 시 의도적으로 삽입된 시각적 강조만 수집:
-    - 슬라이드 최상단 제목과 페이지 번호는 제외하되, 본문 영역 안에서 하위 내용을 묶는
-      섹션 헤더/소제목은 포함할 것. 특히 주변 본문보다 명확히 크거나 굵거나 색이 다르거나
-      계층 제목처럼 배치된 텍스트는 "bold" 또는 적절한 type으로 수집할 것.
-    "color"     : Image 1에서 이미 다른 텍스트와 색상이 다른 텍스트 (빨간색, 주황색 등)
-    "bold"      : 굵게 처리된 텍스트
-    "underline" : 슬라이드 디자인의 일부인 밑줄 (Image 1에 이미 존재하는 것만)
-    "box"       : 강조 박스/테두리로 감싸진 텍스트
-    "highlight" : 형광펜 효과
-    "italic"    : 기울임 처리된 텍스트
-    "callout"   : 말풍선/풍선 도형(callout shape) 안에 담긴 텍스트.
-                  특정 요소를 화살표로 가리키며 설명하는 줄글 형태도 포함.
-                  (단순 강조 목적이 아닌 설명 대체 용도로 보이는 경우에도 "callout"으로 분류)
-    "other"     : 위에 해당하지 않는 기타 강조
-  - 불릿 포인트/리스트 마커(■ ▪ □ • ▶ 등)의 색상은 텍스트 강조로 보지 말 것.
-    마커 색이 주황·빨강이더라도, 그 옆 텍스트 자체가 같은 색이 아니라면 "color" 강조로 포함하지 말 것.
-  - 강조 요소가 없으면 빈 배열 []
-  - bbox: 정규화 좌표 (0.0~1.0, 좌상단 기준) {"x": float, "y": float, "w": float, "h": float}
-  - color: 텍스트 색상이 강조 이유일 때만 기재 (예: "red", "orange"), 아니면 null
 """
 
 
@@ -361,7 +329,6 @@ class SlideLoader:
                     "t1":             "",
                     "t1_structure":   "",
                     "slide_type":     "video",
-                    "slide_emphasis": [],
                 })
                 continue
 
@@ -854,7 +821,6 @@ class T1Extractor:
         slide.setdefault("t1", "")
         slide.setdefault("t1_structure", "")
         slide.setdefault("visual_assets", [])
-        slide.setdefault("slide_emphasis", [])
         slide.setdefault("ocr_text", "")
         if slide.get("scene_type") == "video":
             slide["title"] = slide.get("title") or "영상 구간"
@@ -910,7 +876,6 @@ class T1Extractor:
             slide["visual_assets"]  = self._normalize_visual_assets(
                 result.get("visual_assets", [])
             )
-            slide["slide_emphasis"] = []
 
         except Exception as e:
             logger.error(
@@ -960,7 +925,6 @@ class T1Extractor:
                 "t1_structure": slide["t1_structure"],
                 "slide_type": slide.get("slide_type", "text"),
                 "visual_assets": list(slide.get("visual_assets", [])),
-                "slide_emphasis": [],
                 "ocr_text": slide.get("ocr_text", ""),
                 "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
             }
@@ -983,7 +947,6 @@ class T1Extractor:
             slide["t1_structure"] = cached["t1_structure"]
             slide["slide_type"] = cached["slide_type"]
             slide["visual_assets"] = list(cached.get("visual_assets", []))
-            slide["slide_emphasis"] = []
             slide["ocr_text"] = cached.get("ocr_text", "")
             if slide is not canonical_representatives[cache_key]:
                 logger.info(
@@ -1104,7 +1067,6 @@ class TextualizationPipeline:
                     "t1_structure":        s["t1_structure"],
                     "slide_type":          s.get("slide_type", "text"),
                     "visual_assets":       s.get("visual_assets", []),
-                    "slide_emphasis":      [],
                     "ocr_text":            s.get("ocr_text", ""),
                     "slide_topic_keywords": s.get("slide_topic_keywords", []),
                     "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),
