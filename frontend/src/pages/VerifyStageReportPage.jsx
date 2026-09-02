@@ -114,10 +114,10 @@ function buildIssueJudgeColumn(judgeData, summaryData) {
   const s = summaryData?.summary || {}
   const detailRows = [
     { key: 'agreed', label: '모델 전원 일치', value: s.all_models_agreed_count ?? '-' },
-    { key: 'partial', label: '일부만 일치', value: s.partial_agreement_count ?? '-' },
-    { key: 'single', label: '단일 모델만 감지', value: s.single_model_only_count ?? '-' },
+    { key: 'partial', label: '절반 이상 일치', value: s.majority_agreement_count ?? s.partial_agreement_count ?? '-' },
+    { key: 'single', label: '단일 강한 확신 통과', value: s.single_model_only_count ?? '-' },
     { key: 'none', label: '이슈 없음', value: s.no_issue_claim_count ?? '-' },
-    { key: 'reject', label: '단일 모델 낮은 신뢰도로 기각', value: s.rejected_single_model_low_confidence_count ?? '-' },
+    { key: 'reject', label: '합의 기준 미달 기각', value: s.consensus_rejected_count ?? s.rejected_single_model_low_confidence_count ?? '-' },
     { divider: true },
     ...Object.entries(s.issue_counts_by_model || {}).map(([model, count]) => ({ key: model, label: model, value: count })),
   ]

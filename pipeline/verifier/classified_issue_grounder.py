@@ -164,20 +164,16 @@ def _status_from_score(score: float) -> str:
 
 
 def _grounding_model_specs() -> list[str]:
-    configured = (
-        _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODELS"))
-        or _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL"))
-        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODEL"))
-    )
-    return configured or ["gpt"]
+    try:
+        from .runtime_llm import configured_stage_models
+    except ImportError:
+        from runtime_llm import configured_stage_models
+    return configured_stage_models("grounding")
 
 
 def _pre_verifier_evidence_model() -> str:
-    return (
-        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MODEL", "").strip()
-        or "gpt-5.6-luna-medium"
-    )
+    configured = _grounding_model_specs()
+    return configured[0] if configured else ""
 
 
 def _pre_verifier_evidence_max_tool_calls() -> int:
@@ -237,10 +233,7 @@ def _pre_verifier_evidence_max_fetch_attempts() -> int:
 
 
 def _pre_verifier_evidence_semantic_model() -> str:
-    return (
-        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEMANTIC_MODEL", "").strip()
-        or _pre_verifier_evidence_model()
-    )
+    return _pre_verifier_evidence_model()
 
 
 def _pre_verifier_evidence_semantic_max_tokens() -> int:
@@ -4845,6 +4838,8 @@ def collect_pre_verifier_evidence(
     target_groups = _group_pre_verifier_targets(targets)
     retrieval_targets = [group[0] for group in target_groups]
     model_spec = _pre_verifier_evidence_model()
+    if retrieval_targets and not model_spec:
+        raise RuntimeError("웹 근거 수집에 사용할 모델을 grounding 단계에서 선택해야 합니다.")
     token_usage = _empty_token_usage()
     evidence_items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -5041,6 +5036,8 @@ def collect_pre_verifier_evidence_batched(
     ]
     model_spec = _pre_verifier_evidence_model()
     query_plan_model_spec = _pre_verifier_evidence_semantic_model()
+    if retrieval_targets and (not model_spec or not query_plan_model_spec):
+        raise RuntimeError("웹 근거 수집에 사용할 모델을 grounding 단계에서 선택해야 합니다.")
     stage_usage = {
         "query_planning": _empty_token_usage(),
         "web_search_and_fetch": _empty_token_usage(),

@@ -14,6 +14,7 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d verilec"]
       interval: 5s
@@ -75,7 +76,6 @@ services:
       # model, while the claim extractor and slide checker use it as their
       # stage worker limit. Host environment values can override the defaults.
       VERIFIER_STAGE_MAX_WORKERS: "${VERIFIER_STAGE_MAX_WORKERS:-12}"
-      VERIFIER_CLAIM_EXTRACT_MODEL: "${VERIFIER_CLAIM_EXTRACT_MODEL:-gpt-5.4}"
       VERIFIER_CLAIM_EXTRACT_MAX_WORKERS: "${VERIFIER_CLAIM_EXTRACT_MAX_WORKERS:-20}"
       ISSUE_JUDGE_MAX_WORKERS: "${ISSUE_JUDGE_MAX_WORKERS:-20}"
       ISSUE_TYPE_CLASSIFIER_MAX_WORKERS: "${ISSUE_TYPE_CLASSIFIER_MAX_WORKERS:-20}"
@@ -86,10 +86,8 @@ services:
       LOCAL_LLM_MODEL: "${LOCAL_LLM_MODEL:-qwen3.8-27b}"
       LOCAL_LLM_ENABLE_THINKING: "${LOCAL_LLM_ENABLE_THINKING:-0}"
 
-      # Optional LiteLLM gateway. Disabled by default so existing runs keep
-      # using their current provider clients until the gateway is explicitly
-      # enabled.
-      LITELLM_ENABLED: "${LITELLM_ENABLED:-0}"
+      # All verifier models selected in the UI are invoked through LiteLLM.
+      LITELLM_ENABLED: "${LITELLM_ENABLED:-1}"
       LITELLM_BASE_URL: "${LITELLM_BASE_URL:-http://litellm:4000/v1}"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
       LITELLM_API_KEY: "${LITELLM_API_KEY:-${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}}"
@@ -226,11 +224,10 @@ services:
     ports:
       - "11434:11434"
 
-  # OpenAI-compatible gateway for the first endpoint integration step.
-  # Start it explicitly with: docker compose --profile llm-gateway up
+  # OpenAI-compatible gateway. It uses a separate logical database inside the
+  # existing PostgreSQL container, so the gateway schema cannot touch the
+  # application's `verilec` database.
   litellm:
-    profiles:
-      - llm-gateway
     image: docker.litellm.ai/berriai/litellm:v1.98.0
     command:
       - "--config"
@@ -241,6 +238,9 @@ services:
       - "4000"
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
+      # LiteLLM uses DATABASE_URL for its proxy-management database.
+      # Reuse the existing PostgreSQL service used by the backend.
+      DATABASE_URL: "${LITELLM_DATABASE_URL:-postgresql://user:pass@db/litellm}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
@@ -258,6 +258,9 @@ services:
       - ./docker/litellm/config.yaml:/app/config.yaml:ro
     ports:
       - "${LITELLM_PORT:-4000}:4000"
+    depends_on:
+      db:
+        condition: service_healthy
 volumes:
   ollama:
   postgres_data:

@@ -68,29 +68,14 @@ def _claim_extract_prompt_profile() -> str:
     raw = str(os.getenv("VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE", "auto") or "auto").strip().lower()
     if raw in {"generic", "portable", "free"}:
         return "generic"
-    if raw in {"gpt", "gpt_strict", "gpt-strict", "openai_strict", "openai-strict"}:
-        return "gpt_strict"
     if raw in {"default", "base", "common", "none", "off"}:
         return "default"
-
-    from . import claim_common as cv
-
-    if cv._model_mode() == "generic":
-        return "generic"
-
-    model = (
-        os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
-        or os.getenv("VERIFIER_MODEL", "")
-        or ""
-    ).strip().lower()
-    if model.startswith(("gpt", "o1", "o3")):
-        return "gpt_strict"
-    return "default"
+    return "generic"
 
 
 def _model_specific_extract_rules() -> str:
     profile = _claim_extract_prompt_profile()
-    if profile not in {"gpt_strict", "generic"}:
+    if profile != "generic":
         return ""
     return """
 ### 빠뜨림 방지 지시 관련 추가 규칙

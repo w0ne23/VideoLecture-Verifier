@@ -197,6 +197,8 @@ CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE = _env_int(
     "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
     _env_int("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", 5),
 )
+DEFAULT_ISSUE_JUDGE_MIN_CONFIDENCE = 0.70
+DEFAULT_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE = 0.85
 
 
 class _DockerLogTee:
@@ -278,73 +280,29 @@ def _split_model_specs(value: str | None) -> list[str]:
 
 
 def _default_issue_judge_models() -> list[str]:
-    configured = (
-        _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
-        or _split_model_specs(os.getenv("VERIFIER_ISSUE_JUDGE_MODELS"))
+    from .runtime_llm import configured_stage_models
+    return configured_stage_models("issue_detect")
+
+
+def _issue_judge_min_confidence_for_model(model: str | None = None) -> float:
+    """Return the common first-pass confidence threshold for every judge.
+
+    Detector candidates use one threshold regardless of provider or model
+    name.  The argument is retained for worker-call compatibility, but model
+    specific thresholds are intentionally no longer consulted.
+    """
+    del model
+    return _env_float(
+        "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE",
+        DEFAULT_ISSUE_JUDGE_MIN_CONFIDENCE,
     )
-    return configured or ["gpt-5.4", "claude-sonnet-5", "grok-4.5"]
-
-
-def _is_openai_model(model: str) -> bool:
-    return str(model or "").lower().startswith(("gpt", "o1", "o3"))
-
-
-def _is_xai_model(model: str) -> bool:
-    return cv._is_xai_model(model)
-
-
-def _is_deepseek_model(model: str) -> bool:
-    return cv._is_deepseek_model(model)
-
-
-def _is_anthropic_model(model: str) -> bool:
-    lowered = str(model or "").lower()
-    return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
-
-
-def _issue_judge_min_confidence_for_model(
-    model: str,
-) -> float:
-    """Return the first-pass issue detector threshold for a judge model."""
-    def _bounded(value: float) -> float:
-        return max(0.0, min(1.0, value))
-
-    model_key = re.sub(r"[^0-9A-Za-z]+", "_", str(model or "").strip()).strip("_").upper()
-    env_candidates = []
-    if model_key:
-        env_candidates.append(f"VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_{model_key}")
-    if _is_anthropic_model(model):
-        env_candidates.extend(
-            [
-                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_CLAUDE",
-                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_ANTHROPIC",
-            ]
-        )
-        default = 0.60
-    elif _is_openai_model(model):
-        env_candidates.extend(
-            [
-                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_GPT",
-                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_OPENAI",
-            ]
-        )
-        default = 0.8
-    else:
-        default = 0.8
-
-    for key in env_candidates:
-        raw = os.getenv(key)
-        if raw is None:
-            continue
-        try:
-            return _bounded(float(str(raw).strip()))
-        except ValueError:
-            continue
-    return _bounded(default)
 
 
 def _issue_judge_single_model_keep_confidence() -> float:
-    return _env_float("VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE", 0.85)
+    return _env_float(
+        "VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE",
+        DEFAULT_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE,
+    )
 
 
 def _issue_judge_score_lookup(
@@ -374,121 +332,102 @@ def _issue_judge_consensus_decision(
     evaluated_models: list[str],
     scores_by_claim: dict[str, dict[str, float]],
     single_keep_confidence: float | None = None,
+    majority_min_confidence: float | None = None,
 ) -> dict:
     """Resolve detector votes before downstream verification.
 
-    Two or more positive model votes always pass. A single-model candidate
-    passes only when that model reaches the strong-keep threshold.
+    At least half of the evaluated models must independently score the claim
+    at or above the common 0.70 threshold.  A claim also passes when one model
+    reaches the strong-keep threshold, even without half-model agreement.
     """
     single_keep_confidence = (
         _issue_judge_single_model_keep_confidence()
         if single_keep_confidence is None
         else single_keep_confidence
     )
+    majority_min_confidence = (
+        _issue_judge_min_confidence_for_model()
+        if majority_min_confidence is None
+        else _clamp01(majority_min_confidence)
+    )
     claim_scores = scores_by_claim.get(claim_id, {}) or {}
-    issue_model_count = len(issue_models)
     evaluated_count = len(evaluated_models)
     if evaluated_count == 0:
         return {"keep": False, "status": "all_models_failed"}
-    if issue_model_count == 0:
+    if not issue_models:
         return {"keep": False, "status": "no_issue"}
-    if issue_model_count >= 2:
-        status = "all_models_agreed" if issue_model_count == evaluated_count else "partial_agreement"
-        return {"keep": True, "status": status}
 
-    positive_model = issue_models[0]
-    positive_confidence = _clamp01(claim_scores.get(positive_model, 0.0))
-    if positive_confidence >= single_keep_confidence:
+    evaluated_set = set(evaluated_models)
+    qualified_models = []
+    for model in issue_models:
+        if model not in evaluated_set:
+            continue
+        if _clamp01(claim_scores.get(model, 0.0)) >= majority_min_confidence:
+            qualified_models.append(model)
+
+    # "다수"는 strict majority가 아니라 절반 이상 합의다. 따라서 4개
+    # 모델이면 2개, 5개 모델이면 3개가 0.70 이상일 때 통과한다.
+    majority_required = (evaluated_count + 1) // 2
+    qualified_count = len(qualified_models)
+    if qualified_count >= majority_required:
+        status = "all_models_agreed" if qualified_count == evaluated_count else "partial_agreement"
+        return {
+            "keep": True,
+            "status": status,
+            "qualified_models": qualified_models,
+            "qualified_model_count": qualified_count,
+            "majority_required": majority_required,
+            "majority_min_confidence": round(majority_min_confidence, 6),
+        }
+
+    strong_models = [
+        model
+        for model in qualified_models
+        if _clamp01(claim_scores.get(model, 0.0)) >= single_keep_confidence
+    ]
+    if strong_models:
+        positive_model = max(
+            strong_models,
+            key=lambda model: _clamp01(claim_scores.get(model, 0.0)),
+        )
+        positive_confidence = _clamp01(claim_scores.get(positive_model, 0.0))
         return {
             "keep": True,
             "status": "single_model_strong",
             "positive_model": positive_model,
             "positive_confidence": round(positive_confidence, 6),
+            "qualified_models": qualified_models,
+            "qualified_model_count": qualified_count,
+            "majority_required": majority_required,
+            "majority_min_confidence": round(majority_min_confidence, 6),
         }
+
+    strongest_model = max(
+        qualified_models or [model for model in issue_models if model in evaluated_set],
+        key=lambda model: _clamp01(claim_scores.get(model, 0.0)),
+        default="",
+    )
+    strongest_confidence = _clamp01(claim_scores.get(strongest_model, 0.0)) if strongest_model else 0.0
+    status = (
+        "rejected_single_model_low_confidence"
+        if qualified_count == 1
+        else "rejected_below_majority"
+    )
     return {
         "keep": False,
-        "status": "rejected_single_model_low_confidence",
+        "status": status,
         "rejection": {
             "claim_id": claim_id,
-            "reason": "single_model_below_strong_keep_confidence",
-            "positive_model": positive_model,
-            "positive_confidence": round(positive_confidence, 6),
+            "reason": "below_majority_and_no_single_strong_model",
+            "positive_model": strongest_model,
+            "positive_confidence": round(strongest_confidence, 6),
+            "qualified_models": qualified_models,
+            "qualified_model_count": qualified_count,
+            "majority_required": majority_required,
+            "majority_min_confidence": round(majority_min_confidence, 6),
             "strong_keep_confidence": round(single_keep_confidence, 6),
         },
     }
-
-
-def _missing_provider_key(model: str) -> str | None:
-    # The web UI stores the secret behind a credential_ref. In that mode the
-    # worker exposes only the decrypted, job-scoped credential map; legacy
-    # provider environment variables are intentionally absent. Do not reject
-    # a configured model before runtime_llm gets a chance to resolve it.
-    if _runtime_credential_available_for_model(model):
-        return None
-    if _is_openai_model(model):
-        gateway_enabled = (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if gateway_enabled:
-            if not os.getenv("LITELLM_API_KEY"):
-                return "LITELLM_API_KEY"
-        elif not os.getenv("OPENAI_API_KEY"):
-            return "OPENAI_API_KEY"
-    if _is_xai_model(model) and not os.getenv("XAI_API_KEY"):
-        return "XAI_API_KEY"
-    if _is_deepseek_model(model) and not os.getenv("DEEPSEEK_API_KEY"):
-        return "DEEPSEEK_API_KEY"
-    if _is_anthropic_model(model) and not os.getenv("ANTHROPIC_API_KEY"):
-        return "ANTHROPIC_API_KEY"
-    return None
-
-
-def _runtime_credential_available_for_model(model: str) -> bool:
-    """Check a saved web credential without resolving or registering anything."""
-    try:
-        credentials = json.loads(os.getenv("VLVERIFIER_CREDENTIALS_JSON", "") or "{}")
-        config = json.loads(os.getenv("VLVERIFIER_LLM_CONFIG_JSON", "") or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    if not isinstance(credentials, dict) or not isinstance(config, dict):
-        return False
-
-    requested = str(model or "").strip().lower()
-    if not requested:
-        return False
-    requested_base = re.sub(r"-(low|medium|high|xhigh)$", "", requested)
-    endpoints = {
-        str(item.get("id") or ""): item
-        for item in config.get("endpoints", []) or []
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
-    stage_bindings = config.get("stage_bindings", {})
-    if not isinstance(stage_bindings, dict):
-        return False
-    for values in stage_bindings.values():
-        if not isinstance(values, list):
-            continue
-        for binding in values:
-            if not isinstance(binding, dict):
-                continue
-            bound_model = str(binding.get("model") or "").strip().lower()
-            if not bound_model:
-                continue
-            bound_base = re.sub(r"-(low|medium|high|xhigh)$", "", bound_model)
-            model_match = (
-                bound_base == requested_base
-                or bound_base.rsplit("/", 1)[-1] == requested_base
-                or (requested_base in {"gpt", "openai"} and bound_base.startswith("gpt"))
-                or (requested_base in {"claude", "anthropic"} and bound_base.startswith("claude"))
-                or (requested_base in {"grok", "xai"} and bound_base.startswith("grok"))
-            )
-            if not model_match:
-                continue
-            endpoint = endpoints.get(str(binding.get("endpoint_ref") or ""), {})
-            reference = str(endpoint.get("credential_ref") or "").strip()
-            if reference.startswith("credential:") and credentials.get(reference):
-                return True
-    return False
 
 
 def _rebuild_classified_claim_batches(claims: list[dict], contexts: list[dict], batch_size: int) -> list[dict]:
@@ -721,10 +660,13 @@ def _build_issue_judge_comparison(
         issues_by_model_claim[model] = grouped
 
     all_model_agreed_count = 0
+    majority_agreement_count = 0
     single_model_only_count = 0
     no_issue_claim_count = 0
     disagreement_count = 0
     rejected_single_model_count = 0
+    rejected_below_majority_count = 0
+    consensus_rejected_count = 0
     union_issue_claim_ids = set()
 
     for claim in claims:
@@ -778,12 +720,25 @@ def _build_issue_judge_comparison(
         elif status == "single_model_strong":
             single_model_only_count += 1
             union_issue_claim_ids.add(claim_id)
-            exclusive_by_model[issue_models[0]].append(claim_id)
+            positive_model = str(decision.get("positive_model") or "").strip()
+            if not positive_model and issue_models:
+                positive_model = issue_models[0]
+            if positive_model in exclusive_by_model:
+                exclusive_by_model[positive_model].append(claim_id)
         elif status == "partial_agreement":
             disagreement_count += 1
+            majority_agreement_count += 1
             union_issue_claim_ids.add(claim_id)
-        else:
+        elif status == "rejected_single_model_low_confidence":
             rejected_single_model_count += 1
+            consensus_rejected_count += 1
+        elif status == "rejected_below_majority":
+            rejected_below_majority_count += 1
+            consensus_rejected_count += 1
+        else:
+            consensus_rejected_count += 1
+
+        decision_details = decision.get("rejection") or decision
 
         by_claim.append({
             "claim_id": claim_id,
@@ -796,6 +751,9 @@ def _build_issue_judge_comparison(
                 "status": status,
                 "issue_model_count": len(issue_models),
                 "issue_models": issue_models,
+                "qualified_model_count": decision_details.get("qualified_model_count", 0),
+                "majority_required": decision_details.get("majority_required", 0),
+                "majority_min_confidence": decision_details.get("majority_min_confidence", _issue_judge_min_confidence_for_model()),
                 "single_model_rejection": consensus_rejection or {},
             },
         })
@@ -814,8 +772,12 @@ def _build_issue_judge_comparison(
             "issue_counts_by_model": issue_counts,
             "all_models_agreed_count": all_model_agreed_count,
             "partial_agreement_count": disagreement_count,
+            "majority_agreement_count": majority_agreement_count,
             "single_model_only_count": single_model_only_count,
             "rejected_single_model_low_confidence_count": rejected_single_model_count,
+            "rejected_below_majority_count": rejected_below_majority_count,
+            "consensus_rejected_count": consensus_rejected_count,
+            "majority_min_confidence": _issue_judge_min_confidence_for_model(),
             "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
             "no_issue_claim_count": no_issue_claim_count,
         },
@@ -922,6 +884,13 @@ def _write_issue_judge_merged_output(
         model: len((judge_results.get(model, {}) or {}).get("issues", []) or [])
         for model in models
     }
+    decision_statuses = [
+        str(decision.get("status") or "")
+        for decision in decisions_by_claim.values()
+    ]
+    rejected_single_model_count = decision_statuses.count("rejected_single_model_low_confidence")
+    rejected_below_majority_count = decision_statuses.count("rejected_below_majority")
+    consensus_rejected_count = rejected_single_model_count + rejected_below_majority_count
     summary = {
         "input_model_count": len(models),
         "failed_models": failed_models,
@@ -930,7 +899,10 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "duplicate_claim_count": len(set(duplicate_claim_ids)),
         "skipped_without_claim_id": skipped_without_claim_id,
-        "rejected_single_model_low_confidence_count": len(rejected_single_model),
+        "rejected_single_model_low_confidence_count": rejected_single_model_count,
+        "rejected_below_majority_count": rejected_below_majority_count,
+        "consensus_rejected_count": consensus_rejected_count,
+        "majority_min_confidence": _issue_judge_min_confidence_for_model(),
         "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
     }
     payload = {
@@ -989,40 +961,52 @@ def run_issue_judge_only(
         and _json_file_exists(comparison_path)
         and _json_file_exists(merged_issue_judge_path)
     ):
-        print(f"  ⏭  issue judge — 출력 파일 존재, 스킵")
-        print(f"     {merged_issue_judge_path}")
         merged_issue_judge = _load_json_file(merged_issue_judge_path)
         summary_payload = _load_json_file(summary_path)
         cached_summary = summary_payload.get("summary", {}) or {}
-        cached_evaluated_count = int(cached_summary.get("evaluated_model_count", 0) or 0)
-        cached_failed_models = cached_summary.get("failed_models", []) or []
-        if cached_evaluated_count == 0 and cached_failed_models:
-            raise RuntimeError(
-                "캐시된 issue judge 결과가 전체 모델 실패 상태라 verifier를 계속 진행할 수 없습니다. "
-                f"summary={summary_path}, failed_models={cached_failed_models}"
-            )
-        return {
-            "merged_path": str(merged_file),
-            "output_dir": str(out_dir),
-            "issue_judge_summary": str(summary_path),
-            "issue_judge_comparison": str(comparison_path),
-            "issue_judge_merged": str(merged_issue_judge_path),
-            "issue_judge_paths": summary_payload.get("issue_judge_result_paths", {}) or {},
-            "issue_judge_count": (merged_issue_judge.get("summary", {}) or {}).get("merged_issue_count", 0),
-            "skipped": True,
-        }
+        cached_merged_summary = merged_issue_judge.get("summary", {}) or {}
+        cached_models = summary_payload.get("models") or merged_issue_judge.get("models") or []
+        current_majority_threshold = _issue_judge_min_confidence_for_model()
+        current_single_threshold = _issue_judge_single_model_keep_confidence()
+        def _matches_policy(value: object, expected: float) -> bool:
+            try:
+                return abs(float(value) - expected) < 1e-9
+            except (TypeError, ValueError):
+                return False
+
+        cache_policy_matches = (
+            list(cached_models) == list(issue_judge_models or _default_issue_judge_models())
+            and
+            _matches_policy(cached_summary.get("majority_min_confidence"), current_majority_threshold)
+            and _matches_policy(cached_merged_summary.get("majority_min_confidence"), current_majority_threshold)
+            and _matches_policy(cached_summary.get("single_model_strong_keep_confidence"), current_single_threshold)
+            and _matches_policy(cached_merged_summary.get("single_model_strong_keep_confidence"), current_single_threshold)
+        )
+        if cache_policy_matches:
+            print(f"  ⏭  issue judge — 출력 파일 존재, 스킵")
+            print(f"     {merged_issue_judge_path}")
+            cached_evaluated_count = int(cached_summary.get("evaluated_model_count", 0) or 0)
+            cached_failed_models = cached_summary.get("failed_models", []) or []
+            if cached_evaluated_count == 0 and cached_failed_models:
+                raise RuntimeError(
+                    "캐시된 issue judge 결과가 전체 모델 실패 상태라 verifier를 계속 진행할 수 없습니다. "
+                    f"summary={summary_path}, failed_models={cached_failed_models}"
+                )
+            return {
+                "merged_path": str(merged_file),
+                "output_dir": str(out_dir),
+                "issue_judge_summary": str(summary_path),
+                "issue_judge_comparison": str(comparison_path),
+                "issue_judge_merged": str(merged_issue_judge_path),
+                "issue_judge_paths": summary_payload.get("issue_judge_result_paths", {}) or {},
+                "issue_judge_count": (merged_issue_judge.get("summary", {}) or {}).get("merged_issue_count", 0),
+                "skipped": True,
+            }
+        print("  ↻ issue judge — 합의 기준 변경 감지, 기존 출력 재생성")
 
     models = issue_judge_models or _default_issue_judge_models()
     if len(models) < 1:
-        raise RuntimeError("issue judge 모델이 필요합니다. ISSUE_JUDGE_MODELS 또는 --issue-judge-models를 확인하세요.")
-    missing_judge_keys = [
-        f"{model}({missing} 없음)"
-        for model in models
-        for missing in [_missing_provider_key(model)]
-        if missing
-    ]
-    if missing_judge_keys:
-        raise RuntimeError(f"issue judge 모델 키가 필요합니다: {', '.join(missing_judge_keys)}")
+        raise RuntimeError("Detector에 사용할 모델을 issue_detect 단계에서 선택해야 합니다.")
     ctx = prepare_verification(str(merged_file), current_date=current_date)
     claims = _load_claims_jsonl(claims_path)
 
@@ -1592,8 +1576,8 @@ def run_classified_issue_pipeline(
     detector_rows.extend([
         ("통합 후보", f"{issue_judge_result.get('issue_judge_count', 0)}개"),
         (
-            "단일 모델 기준 미달 기각",
-            f"{issue_judge_summary.get('rejected_single_model_low_confidence_count', 0)}개",
+            "합의 기준 미달 기각",
+            f"{issue_judge_summary.get('consensus_rejected_count', issue_judge_summary.get('rejected_single_model_low_confidence_count', 0))}개",
         ),
         ("모델 실패", ", ".join(issue_judge_summary.get("failed_models", []) or []) or "없음"),
     ])
@@ -1622,14 +1606,19 @@ def run_classified_issue_pipeline(
         _default_output_path as _verifier_default_output_path,
         _default_models as _verifier_default_models,
     )
-    from .classified_issue_grounder import collect_pre_verifier_evidence_batched
+    from .classified_issue_grounder import collect_pre_verifier_evidence_batched, _grounding_model_specs
 
     issue_judge_merged_path = Path(issue_judge_result["issue_judge_merged"]).resolve()
     issue_judge_payload = json.loads(issue_judge_merged_path.read_text(encoding="utf-8"))
     issue_type_output_path = _issue_type_default_output_path(issue_judge_merged_path)
     classified_input_path = _issue_type_default_next_input_path(issue_type_output_path)
     resolved_issue_type_models = issue_type_models or _issue_type_default_models()
+    if not resolved_issue_type_models:
+        raise RuntimeError("오류 유형 분류에 사용할 모델을 issue_classify 단계에서 선택해야 합니다.")
     classifier_cached = _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path)
+    if classifier_cached:
+        cached_classifier = _load_json_file(issue_type_output_path)
+        classifier_cached = list(cached_classifier.get("models") or []) == list(resolved_issue_type_models)
     classifier_stage_started = _llm_stage_start(
         "L3",
         "classify_issue_types — 오류 유형 분류",
@@ -1700,7 +1689,13 @@ def run_classified_issue_pipeline(
     evidence_output_path = out_dir / f"{base_stem}_classified_issue_evidence.json"
     evidence_result: dict = {}
     if evidence_enabled:
+        selected_grounding_models = _grounding_model_specs()
+        if not selected_grounding_models:
+            raise RuntimeError("웹 근거 수집에 사용할 모델을 grounding 단계에서 선택해야 합니다.")
         evidence_cached = _json_file_exists(evidence_output_path)
+        if evidence_cached:
+            cached_evidence = _load_json_file(evidence_output_path)
+            evidence_cached = str(cached_evidence.get("model") or "") == selected_grounding_models[0]
         evidence_stage_started = _llm_stage_start(
             "L4",
             "ground_evidence — 웹 근거 수집",
@@ -1752,7 +1747,13 @@ def run_classified_issue_pipeline(
 
     verifier_output_path = _verifier_default_output_path(classified_input_path)
     resolved_verifier_models = verifier_models or _verifier_default_models()
+    if not resolved_verifier_models:
+        raise RuntimeError("최종 검증에 사용할 모델을 verify 단계에서 선택해야 합니다.")
     verifier_cached = _json_file_exists(verifier_output_path)
+    if verifier_cached:
+        cached_verifier = _load_json_file(verifier_output_path)
+        cached_verifier_models = list((cached_verifier.get("model_weights") or {}).keys())
+        verifier_cached = cached_verifier_models == list(resolved_verifier_models)
     verifier_stage_started = _llm_stage_start(
         "L5",
         "verify_issues — 최종 다중 모델 검증",

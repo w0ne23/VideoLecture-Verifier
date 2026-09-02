@@ -52,66 +52,13 @@ def _litellm_enabled() -> bool:
 
 
 def _gateway_model_name(model: str) -> str:
-    """Convert a pipeline model spec to the LiteLLM model alias.
+    """Return the concrete model selected for the stage.
 
-    The web UI may use short provider aliases (``gpt``, ``claude``, ``grok``)
-    or provider-qualified local specs.  LiteLLM receives one flat model name,
-    so resolve those aliases here without changing the legacy stage env map.
+    Provider aliases and provider-specific fallback models are deliberately
+    not resolved here.  The selected stage binding must contain the concrete
+    model identifier that LiteLLM should call.
     """
     raw = str(model or "").strip()
-    lowered = raw.lower()
-    defaults = {
-        "gpt": (
-            "ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-            "CLASSIFIED_ISSUE_VERIFIER_GPT_MODEL",
-            "VERIFIER_CLAIM_EXTRACT_MODEL",
-            "gpt-5.4",
-        ),
-        "openai": (
-            "ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-            "VERIFIER_CLAIM_EXTRACT_MODEL",
-            "gpt-5.4",
-        ),
-        "claude": (
-            "ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-            "CLASSIFIED_ISSUE_VERIFIER_CLAUDE_MODEL",
-            "claude-sonnet-5",
-        ),
-        "anthropic": (
-            "ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-            "CLASSIFIED_ISSUE_VERIFIER_CLAUDE_MODEL",
-            "claude-sonnet-5",
-        ),
-        "grok": (
-            "ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-            "CLASSIFIED_ISSUE_VERIFIER_GROK_MODEL",
-            "grok-4.5",
-        ),
-        "xai": (
-            "ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-            "CLASSIFIED_ISSUE_VERIFIER_GROK_MODEL",
-            "grok-4.5",
-        ),
-    }
-    if lowered in defaults:
-        for env_key in defaults[lowered][:-1]:
-            value = str(os.getenv(env_key, "") or "").strip()
-            if value:
-                return value
-        return defaults[lowered][-1]
-
-    for prefix in (
-        "openai:", "openai/", "anthropic:", "anthropic/", "xai:", "xai/",
-        "gemini:", "gemini/", "deepseek:", "deepseek/", "groq:", "groq/",
-        "ollama:", "ollama/", "vllm:", "vllm/", "local:", "local/",
-    ):
-        if lowered.startswith(prefix):
-            raw = raw[len(prefix):].strip()
-            break
-
-    # Thinking suffixes are request controls, not separate LiteLLM deployments.
-    if re.search(r"-(low|medium|high|xhigh)$", raw, flags=re.IGNORECASE):
-        raw = re.sub(r"-(low|medium|high|xhigh)$", "", raw, flags=re.IGNORECASE)
     return raw
 
 
@@ -186,6 +133,7 @@ def _provider_model_name(model: str, endpoint: dict[str, Any]) -> str:
     }
     if first in known_prefixes:
         return raw
+    protocol = str(endpoint.get("protocol") or "").strip().lower()
     prefix = {
         "openai": "openai",
         "anthropic": "anthropic",
@@ -195,25 +143,34 @@ def _provider_model_name(model: str, endpoint: dict[str, Any]) -> str:
         "openrouter": "openrouter",
         "local": "openai",
     }.get(provider, provider)
+    if provider in {"", "custom"}:
+        if protocol in {"openai_chat_completions", "openai_responses"}:
+            prefix = "openai"
+        elif protocol == "anthropic_messages":
+            prefix = "anthropic"
     return f"{prefix}/{raw}" if prefix else raw
 
 
 def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
-    """Register a web credential-backed deployment in the LiteLLM proxy.
-
-    Static .env-backed deployments keep their existing aliases. A credential
-    entered in the web UI receives a stable opaque alias; the raw key is sent
-    only over the internal proxy request and is never put in the model config
-    or application logs.
-    """
+    """Register the selected endpoint/model as an opaque LiteLLM deployment."""
     reference = str(source_endpoint.get("credential_ref") or "").strip()
-    secret = _load_runtime_credentials().get(reference, "") if reference else ""
+    secret = (
+        _load_runtime_credentials().get(reference, "")
+        or (os.getenv(reference, "") if reference else "")
+    )
     if not secret:
-        return model
+        raise RuntimeError(
+            f"선택한 모델의 credential_ref를 확인할 수 없습니다: {reference or '미설정'}"
+        )
 
     provider_model = _provider_model_name(model, source_endpoint)
+    endpoint_identity = "\0".join((
+        str(source_endpoint.get("id") or ""),
+        str(source_endpoint.get("provider") or ""),
+        str(source_endpoint.get("base_url") or ""),
+    ))
     alias_digest = hashlib.sha256(
-        f"{reference}\0{provider_model}".encode("utf-8")
+        f"{reference}\0{provider_model}\0{endpoint_identity}".encode("utf-8")
     ).hexdigest()[:24]
     alias = f"vlverifier-{alias_digest}"
 
@@ -290,6 +247,26 @@ def _load_config() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def configured_stage_models(stage: str) -> list[str]:
+    """Return concrete model IDs selected for a verifier stage."""
+    config = _load_config()
+    raw_bindings = config.get("stage_bindings")
+    if not isinstance(raw_bindings, dict):
+        return []
+    for key in _STAGE_ALIASES.get(stage, (stage,)):
+        values = raw_bindings.get(key)
+        if not isinstance(values, list):
+            continue
+        models = [
+            str(item.get("model") or "").strip()
+            for item in values
+            if isinstance(item, dict) and str(item.get("model") or "").strip()
+        ]
+        if models:
+            return list(dict.fromkeys(models))
+    return []
+
+
 def _provider_family(value: str) -> str:
     lowered = str(value or "").strip().lower()
     if lowered in {"gpt", "openai"} or lowered.startswith(("gpt", "o1", "o3")):
@@ -318,18 +295,14 @@ def _model_matches(binding_model: str, requested_model: str) -> bool:
         return False
     if left == right:
         return True
-    # A worker may receive a short alias (gpt/claude/grok) while the UI stores
-    # the concrete model ID.  Match aliases by provider only when there is one
-    # eligible binding for that provider; the caller handles ambiguity.
     return False
 
 
 def resolve_runtime_binding(stage: str, model_spec: str = "") -> dict[str, Any] | None:
     """Resolve a configured endpoint binding for a pipeline stage.
 
-    Exact model matches are preferred.  Short aliases are accepted only when
-    they identify one provider binding in the stage, preventing an arbitrary
-    choice when several models from the same provider are configured.
+    Exact model matches are required when a model is specified. This prevents
+    provider aliases from silently selecting a different configured model.
     """
     config = _load_config()
     endpoints = {
@@ -363,18 +336,10 @@ def resolve_runtime_binding(stage: str, model_spec: str = "") -> dict[str, Any] 
     requested = str(model_spec or "").strip()
     exact = [item for item in bindings if _model_matches(item.get("model"), requested)]
     selected = exact
-    if not selected:
-        requested_provider = _provider_family(requested)
-        provider_matches = [
-            item for item in bindings
-            if _endpoint_provider(endpoints[str(item["endpoint_ref"])]) == requested_provider
-        ]
-        if len(provider_matches) == 1:
-            selected = provider_matches
-    if not selected and len(bindings) == 1:
+    if not selected and not requested and len(bindings) == 1:
         selected = bindings
     if len(selected) != 1:
-        return _litellm_runtime(model_spec) if _litellm_enabled() else None
+        return None
 
     binding = selected[0]
     endpoint = endpoints[str(binding["endpoint_ref"])]
@@ -532,7 +497,12 @@ def _call_openai_compatible(
     if not api_key:
         reference = str(endpoint.get("credential_ref") or "")
         raise RuntimeError(f"{reference or provider} API 키가 설정되지 않았습니다.")
-    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": _timeout(endpoint)}
+    # Network/API retry policy is owned by the shared pipeline wrapper.
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": _timeout(endpoint),
+        "max_retries": 0,
+    }
     base_url = str(endpoint.get("base_url") or "").strip()
     if base_url:
         client_kwargs["base_url"] = base_url
@@ -634,7 +604,11 @@ def _call_anthropic_messages(
     if not api_key:
         reference = str(endpoint.get("credential_ref") or "ANTHROPIC_API_KEY")
         raise RuntimeError(f"{reference} API 키가 설정되지 않았습니다.")
-    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": _timeout(endpoint)}
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": _timeout(endpoint),
+        "max_retries": 0,
+    }
     base_url = str(endpoint.get("base_url") or "").strip()
     if base_url:
         client_kwargs["base_url"] = base_url

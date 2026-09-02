@@ -82,11 +82,11 @@ def resolve_pipeline_package_root() -> Path:
 
 
 def api_call_with_retry(func, max_retries=None, initial_wait=None):
-    """API 호출 재시도 (429, 503, 500 에러 처리)"""
+    """API 호출 재시도 (재시도 간격은 0초가 기본값)."""
     if max_retries is None:
         max_retries = int(os.getenv("VERIFIER_API_MAX_RETRIES", "5"))
     if initial_wait is None:
-        initial_wait = float(os.getenv("VERIFIER_API_INITIAL_WAIT", "10"))
+        initial_wait = float(os.getenv("VERIFIER_API_INITIAL_WAIT", "0"))
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -112,9 +112,12 @@ def api_call_with_retry(func, max_retries=None, initial_wait=None):
             ]
             if any(code in error_msg for code in retry_errors) and attempt < max_retries - 1:
                 print(f"API ERROR: {error_msg}")
-                wait = initial_wait * (attempt + 1)
-                print(f"  ↺ {wait:.1f}s 후 재시도 ({attempt + 1}/{max_retries - 1})")
-                time.sleep(wait)
+                wait = max(0.0, initial_wait) * (attempt + 1)
+                if wait:
+                    print(f"  ↺ {wait:.1f}s 후 재시도 ({attempt + 1}/{max_retries - 1})")
+                    time.sleep(wait)
+                else:
+                    print(f"  ↺ 즉시 재시도 ({attempt + 1}/{max_retries - 1})")
             else:
                 raise e
     if last_error is not None:

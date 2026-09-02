@@ -553,17 +553,13 @@ class T1Extractor:
         last_exc = None
         for attempt in range(self.config.max_retries):
             try:
-                request_kwargs = {
-                    "model": self.config.model,
-                    "messages": [{"role": "user", "content": content}],
-                    "response_format": {"type": "json_object"},
-                    "max_completion_tokens": 4096,
-                }
-                # GPT-5.6 계열은 temperature를 직접 지정하지 않고
-                # 서버 기본값을 사용한다.
-                if not str(self.config.model or "").strip().lower().startswith("gpt-5.6"):
-                    request_kwargs["temperature"] = 0
-                response = self.client.chat.completions.create(**request_kwargs)
+                response = self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[{"role": "user", "content": content}],
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=4096,
+                    temperature=0,
+                )
                 try:
                     from .cost_report import record_model_call
 

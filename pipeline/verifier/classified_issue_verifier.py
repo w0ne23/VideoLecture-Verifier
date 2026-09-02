@@ -32,17 +32,15 @@ from .issue_type_classifier import (
 
 
 SCHEMA_VERSION = "classified_issue_verifier.v3"
-DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
-DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 5
 FINAL_VERIFIER_MAX_ATTEMPTS = max(
     1,
     int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_ATTEMPTS", "3") or "3"),
 )
-CATEGORY_MODEL_WEIGHT_OVERRIDES = {
-    "scope_overclaim": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
-    "confusing_explanation": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
-}
+# Deliberately keep one weighting policy for every issue type. The previous
+# category-specific overrides made scope/confusing issues use different model
+# priors from factual/temporal issues, which contradicted the equal-weight
+# verifier setting.
 JUDGMENTS = {
     "valid_issue",
     "partially_resolved",
@@ -203,15 +201,11 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = _split_csv(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODELS"))
-    models = configured or list(DEFAULT_MODELS)
-    verifier_gpt_model = os.getenv("CLASSIFIED_ISSUE_VERIFIER_GPT_MODEL", "").strip()
-    if verifier_gpt_model:
-        models = [
-            verifier_gpt_model if str(model).strip().lower() in {"gpt", "openai"} else model
-            for model in models
-        ]
-    return models
+    try:
+        from .runtime_llm import configured_stage_models
+    except ImportError:
+        from runtime_llm import configured_stage_models
+    return configured_stage_models("verify")
 
 
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -1256,52 +1250,13 @@ def _weighted_final_score(
     return round(score, 6), used_weights, round(missing_weight, 6), round(disagreement, 6), bool(disagreement >= 0.35)
 
 
-def _verdict_model_family(verdict: dict[str, Any]) -> str:
-    model = str(verdict.get("model") or "").strip().lower()
-    provider = str(verdict.get("provider") or "").strip().lower()
-    resolved_model = str(verdict.get("resolved_model") or "").strip().lower()
-    if provider in {"openai", "anthropic", "xai"}:
-        return provider
-    if model.startswith(("gpt", "o1", "o3")) or resolved_model.startswith(("gpt", "o1", "o3")):
-        return "gpt"
-    if (
-        model.startswith("claude")
-        or resolved_model.startswith("claude")
-        or any(token in model for token in ("sonnet", "haiku", "opus"))
-        or any(token in resolved_model for token in ("sonnet", "haiku", "opus"))
-    ):
-        return "claude"
-    if model.startswith("grok") or resolved_model.startswith("grok"):
-        return "xai"
-    if (
-        provider == "vllm"
-        or model.startswith(("qwen", "vllm"))
-        or resolved_model.startswith(("qwen", "vllm"))
-    ):
-        return "vllm"
-    return model
-
-
 def _effective_model_weights(
     category: str,
     verdicts: list[dict[str, Any]],
     base_weights: dict[str, float],
 ) -> dict[str, float]:
-    override = CATEGORY_MODEL_WEIGHT_OVERRIDES.get(category)
-    if not override:
-        return base_weights
-
-    weights: dict[str, float] = {}
-    seen_models = {str(verdict.get("model") or "") for verdict in verdicts if str(verdict.get("model") or "")}
-    for model in seen_models:
-        verdict = next((row for row in verdicts if str(row.get("model") or "") == model), {})
-        family = _verdict_model_family(verdict)
-        weights[model] = float(override.get(family, 0.0) or 0.0)
-
-    total = sum(weights.values())
-    if total <= 0:
-        return base_weights
-    return {model: round(weight / total, 6) for model, weight in weights.items()}
+    del category, verdicts
+    return base_weights
 
 
 def _issue_result_record(
@@ -1662,6 +1617,8 @@ def judge_classified_issues(
     web_evidence_path: str | Path | None = None,
 ) -> dict[str, Any]:
     _load_env()
+    if not models:
+        raise RuntimeError("최종 검증에 사용할 모델이 선택되지 않았습니다.")
     standard_refs, composite_refs = _flatten_issues(payload, limit=limit)
     if issue_ids:
         wanted = {str(issue_id).strip() for issue_id in issue_ids if str(issue_id).strip()}
@@ -1909,12 +1866,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Default: CLASSIFIED_ISSUE_VERIFIER_MODELS or preset",
+        help="comma/space separated model list. Defaults to the verify stage bindings.",
     )
     parser.add_argument(
         "--model-weights",
-        default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS", DEFAULT_MODEL_WEIGHTS),
-        help="comma/space separated weights, e.g. gpt=0.4,claude=0.4,grok=0.2",
+        default=None,
+        help="deprecated compatibility option; selected models always receive equal weight",
     )
     parser.add_argument(
         "--batch-size",
@@ -1958,7 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
 
     models = _split_csv(args.models)
     if not models:
-        raise ValueError("사용할 모델이 없습니다. --models 또는 CLASSIFIED_ISSUE_VERIFIER_MODELS를 설정하세요.")
+        raise ValueError("verify 단계에서 사용할 모델을 선택해야 합니다.")
 
     result = judge_classified_issues(
         payload,

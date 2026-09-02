@@ -16,11 +16,6 @@ from typing import Any
 
 
 SCHEMA_VERSION = "issue_types.v3"
-DEFAULT_MODELS = (
-    "gpt",
-    "claude",
-    "grok",
-)
 # LLM이 확률을 내는 4유형. composite_issue는 별도 routing 결과로 유지한다.
 ISSUE_TYPES = (
     "temporal_error",
@@ -31,19 +26,6 @@ ISSUE_TYPES = (
 COMPOSITE_ISSUE_TYPE = "composite_issue"
 ALL_ISSUE_TYPES = ISSUE_TYPES + (COMPOSITE_ISSUE_TYPE,)
 DEFAULT_LIST_KEYS = ("issues",)
-DEFAULT_MODEL_WEIGHTS = {
-    "gpt": 0.4,
-    "openai": 0.4,
-    "claude": 0.4,
-    "cluade": 0.4,
-    "anthropic": 0.4,
-    "grok": 0.2,
-    "xai": 0.2,
-    "qwen": 0.2,
-    "vllm": 0.2,
-    "gemini": 0.2,
-    "google": 0.2,
-}
 ISSUE_TYPE_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "오래된 내용",
@@ -68,15 +50,6 @@ TOKEN_USAGE_FIELDS = (
 )
 
 DEFAULT_LOW_MARGIN_THRESHOLD = 0.10
-
-
-def _is_grok_model(model: str) -> bool:
-    try:
-        resolved = _resolve_model_spec(model)
-    except Exception:
-        resolved = {}
-    lowered = str(model or "").strip().lower()
-    return resolved.get("provider") == "xai" or lowered.startswith("grok") or lowered.startswith("xai:")
 
 
 def _load_env() -> None:
@@ -111,11 +84,11 @@ def _split_csv(value: str | None) -> list[str]:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = (
-        _split_csv(os.getenv("ISSUE_TYPE_CLASSIFIER_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_ISSUE_TYPE_CLASSIFIER_MODELS"))
-    )
-    return configured or list(DEFAULT_MODELS)
+    try:
+        from .runtime_llm import configured_stage_models
+    except ImportError:
+        from runtime_llm import configured_stage_models
+    return configured_stage_models("issue_classify")
 
 
 def _issue_identity(list_key: str, index: int, issue: dict[str, Any]) -> str:
@@ -395,38 +368,6 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
                 else _resolve_vllm_model(raw)
             ) or _resolve_vllm_model(raw),
         }
-    if lowered in {"gpt", "openai"}:
-        return {
-            "provider": "openai",
-            "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GPT_MODEL",
-                default="gpt-5.4",
-            ),
-        }
-    if lowered in {"claude", "cluade", "anthropic"}:
-        return {
-            "provider": "anthropic",
-            "alias": raw,
-            "resolved_model": _resolve_anthropic_model(
-                _env_first(
-                    "ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-                    "VERIFIER_ISSUE_TYPE_CLASSIFIER_CLAUDE_MODEL",
-                    default="claude-sonnet-5",
-                )
-            ),
-        }
-    if lowered in {"grok", "xai"}:
-        return {
-            "provider": "xai",
-            "alias": raw,
-            "resolved_model": _env_first(
-                "ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GROK_MODEL",
-                default="grok-4.5",
-            ),
-        }
     if lowered in {"deepseek", "deepseek-default"}:
         return {
             "provider": "deepseek",
@@ -473,7 +414,9 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
         return {"provider": "ollama", "alias": raw, "resolved_model": raw.split(":", 1)[1].strip()}
     if lowered.startswith("ollama/"):
         return {"provider": "ollama", "alias": raw, "resolved_model": raw.split("/", 1)[1].strip()}
-    raise ValueError(f"지원하지 않는 모델 지정: {model_spec}")
+    # Unknown concrete model IDs are valid when a configured runtime/LiteLLM
+    # binding owns the invocation. Do not route or substitute them here.
+    return {"provider": "runtime", "alias": raw, "resolved_model": raw}
 
 
 def _parse_openai_model_spec(model_spec: str) -> tuple[str, str | None]:
@@ -677,9 +620,9 @@ def _call_openai_like(
         _env_float("ISSUE_TYPE_CLASSIFIER_TIMEOUT_SEC", 240.0),
     )
     client = (
-        OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
         if base_url
-        else OpenAI(api_key=api_key, timeout=timeout)
+        else OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
     )
     use_web_search = provider == "openai" and bool(web_search)
     if use_web_search:
@@ -740,7 +683,7 @@ def _call_openai_like(
                 }
 
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_API_RETRIES", 2, min_value=0) + 1
-    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC", 10.0, min_value=0.0)
+    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC", 0.0, min_value=0.0)
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -798,7 +741,7 @@ def _call_anthropic(
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
     base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
-    client = Anthropic(api_key=api_key, base_url=base_url)
+    client = Anthropic(api_key=api_key, base_url=base_url, max_retries=0)
     classifier_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -989,6 +932,11 @@ def _call_llm(
             }
             return text, usage, resolved
 
+    if stage in {"issue_classify", "classify", "verify", "judge", "issue_detect", "detect"}:
+        raise RuntimeError(
+            f"{stage} 단계의 선택 모델을 런타임 바인딩으로 해석하지 못했습니다: {model_spec}"
+        )
+
     resolved = _resolve_model_spec(model_spec)
     provider = resolved["provider"]
     model = resolved["resolved_model"]
@@ -1102,7 +1050,7 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
     model, batch, batch_index, total_batches, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
     attempts = _env_int("ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES", 2, min_value=0) + 1
-    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC", 10.0, min_value=0.0)
+    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC", 0.0, min_value=0.0)
     last_exc: Exception | None = None
     pending = list(batch)
     rows_by_id: dict[str, dict[str, Any]] = {}
@@ -1223,61 +1171,13 @@ def _aggregate_token_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
     return dict(totals)
 
 
-def _canonical_model_weight_key(model: str, result: dict[str, Any] | None = None) -> str:
-    lowered = str(model or "").strip().lower()
-    provider = str((result or {}).get("provider", "") or "").strip().lower()
-    if lowered in DEFAULT_MODEL_WEIGHTS:
-        return lowered
-    if provider in DEFAULT_MODEL_WEIGHTS:
-        return provider
-    if lowered.startswith(("gpt", "o1", "o3")):
-        return "gpt"
-    if lowered.startswith("claude") or lowered.startswith(("sonnet", "haiku", "opus")):
-        return "claude"
-    if lowered.startswith("grok") or provider == "xai":
-        return "grok"
-    if lowered.startswith("gemini") or provider == "gemini":
-        return "gemini"
-    return lowered
-
-
 def _parse_model_weights(value: str | None, models: list[str], model_results: dict[str, dict[str, Any]]) -> dict[str, float]:
-    configured: dict[str, float] = {}
-    for part in _split_csv(value):
-        if "=" not in part:
-            continue
-        key, raw_value = part.split("=", 1)
-        key = key.strip().lower()
-        try:
-            configured[key] = max(0.0, float(raw_value))
-        except ValueError:
-            continue
-
-    weights = {}
-    for model in models:
-        result = model_results.get(model, {})
-        keys = [
-            str(model or "").strip().lower(),
-            _canonical_model_weight_key(model, result),
-            str(result.get("provider", "") or "").strip().lower(),
-        ]
-        weight = None
-        for key in keys:
-            if key in configured:
-                weight = configured[key]
-                break
-        if weight is None:
-            for key in keys:
-                if key in DEFAULT_MODEL_WEIGHTS:
-                    weight = DEFAULT_MODEL_WEIGHTS[key]
-                    break
-        weights[model] = float(weight if weight is not None else 1.0)
-
-    total = sum(weights.values())
-    if total <= 0:
-        equal = 1.0 / max(len(models), 1)
-        return {model: equal for model in models}
-    return {model: round(weight / total, 6) for model, weight in weights.items()}
+    """Assign every selected model the same vote weight."""
+    del value, model_results
+    if not models:
+        return {}
+    equal = 1.0 / len(models)
+    return {model: round(equal, 6) for model in models}
 
 
 def _weighted_scores(
@@ -1655,6 +1555,8 @@ def classify_issues(
     low_margin_threshold: float | None = None,
 ) -> dict[str, Any]:
     _load_env()
+    if not models:
+        raise RuntimeError("오류 유형 분류에 사용할 모델이 선택되지 않았습니다.")
     resolved_low_margin_threshold = resolve_low_margin_threshold(low_margin_threshold)
     refs = collect_issues(payload, list_keys)
     if limit is not None:
@@ -1741,15 +1643,14 @@ def classify_issues(
                     _append_batch_error(model_results, args, exc)
                     failed_batch_args.append(args)
 
-        grok_failed_args = [args for args in failed_batch_args if _is_grok_model(args[0])]
-        if grok_failed_args:
-            wait_sec = _env_float("ISSUE_TYPE_CLASSIFIER_GROK_RETRY_WAIT_SEC", 60.0, min_value=0.0)
+        if failed_batch_args:
+            wait_sec = _env_float("ISSUE_TYPE_CLASSIFIER_RETRY_WAIT_SEC", 0.0, min_value=0.0)
             if wait_sec:
-                print(f"\n  ── Grok 실패 batch만 {wait_sec:g}초 후 재시도 ──", flush=True)
+                print(f"\n  ── 실패 batch {wait_sec:g}초 후 1회 재시도 ──", flush=True)
                 time.sleep(wait_sec)
             else:
-                print("\n  ── Grok 실패 batch만 재시도 ──", flush=True)
-            for args in grok_failed_args:
+                print("\n  ── 실패 batch 1회 재시도 ──", flush=True)
+            for args in failed_batch_args:
                 model = args[0]
                 try:
                     result = _batch_worker(args)
@@ -1883,7 +1784,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Default: ISSUE_TYPE_CLASSIFIER_MODELS or preset",
+        help="comma/space separated model list. Defaults to the issue_classify stage bindings.",
     )
     parser.add_argument(
         "--issue-list-keys",
@@ -1905,8 +1806,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-date", default=os.getenv("ISSUE_TYPE_CLASSIFIER_CURRENT_DATE", "2026-05-12"))
     parser.add_argument(
         "--model-weights",
-        default=os.getenv("ISSUE_TYPE_CLASSIFIER_MODEL_WEIGHTS", "gpt=0.4,claude=0.4,grok=0.2"),
-        help="comma/space separated weights, e.g. gpt=0.4,claude=0.4,grok=0.2. Values are normalized to sum to 1.",
+        default=None,
+        help="deprecated compatibility option; selected models always receive equal weight",
     )
     parser.add_argument(
         "--low-margin-threshold",
@@ -1959,10 +1860,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     models = _split_csv(args.models)
-    if len(models) != 3:
-        print(f"⚠️ 3개 LLM 사용을 권장합니다. 현재 모델 수: {len(models)} ({', '.join(models)})")
     if not models:
-        raise ValueError("사용할 모델이 없습니다. --models 또는 ISSUE_TYPE_CLASSIFIER_MODELS를 설정하세요.")
+        raise ValueError("issue_classify 단계에서 사용할 모델을 선택해야 합니다.")
 
     result = classify_issues(
         payload,

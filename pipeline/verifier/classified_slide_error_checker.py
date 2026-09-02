@@ -43,7 +43,6 @@ from .issue_type_classifier import (
 
 
 SCHEMA_VERSION = "classified_slide_error_checker.v5"
-DEFAULT_MODELS = ("gpt",)
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MIN_SCORE = 0.0
 
@@ -97,11 +96,11 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = (
-        _split_csv(os.getenv("CLASSIFIED_SLIDE_ERROR_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_CLASSIFIED_SLIDE_ERROR_MODELS"))
-    )
-    return configured or list(DEFAULT_MODELS)
+    try:
+        from .runtime_llm import configured_stage_models
+    except ImportError:
+        from runtime_llm import configured_stage_models
+    return configured_stage_models("slide")
 
 
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
