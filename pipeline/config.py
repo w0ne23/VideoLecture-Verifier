@@ -216,7 +216,7 @@ def get_openai_client():
     def create_client():
         if not current_key or OpenAI is None:
             return None
-        kwargs = {"api_key": current_key, "max_retries": 0}
+        kwargs = {"api_key": current_key}
         if current_base_url:
             kwargs["base_url"] = current_base_url
         return OpenAI(**kwargs)
@@ -232,7 +232,7 @@ def get_xai_client():
     return _cached_client(
         "xai", f"{current_key}|{current_base_url}",
         lambda: (
-            OpenAI(api_key=current_key, base_url=current_base_url, max_retries=0)
+            OpenAI(api_key=current_key, base_url=current_base_url)
             if current_key and OpenAI is not None
             else None
         ),
@@ -245,7 +245,7 @@ def get_deepseek_client():
     return _cached_client(
         "deepseek", f"{current_key}|{current_base_url}",
         lambda: (
-            OpenAI(api_key=current_key, base_url=current_base_url, max_retries=0)
+            OpenAI(api_key=current_key, base_url=current_base_url)
             if current_key and OpenAI is not None
             else None
         ),
@@ -258,7 +258,7 @@ def get_ollama_client():
     return _cached_client(
         "ollama", f"{current_key}|{current_base_url}",
         lambda: (
-            OpenAI(api_key=current_key, base_url=current_base_url, max_retries=0)
+            OpenAI(api_key=current_key, base_url=current_base_url)
             if OpenAI is not None
             else None
         ),
@@ -271,7 +271,7 @@ def get_anthropic_client():
     return _cached_client(
         "anthropic", f"{current_key}|{current_base_url}",
         lambda: (
-            Anthropic(api_key=current_key, base_url=current_base_url, max_retries=0)
+            Anthropic(api_key=current_key, base_url=current_base_url)
             if current_key and Anthropic is not None
             else None
         ),
