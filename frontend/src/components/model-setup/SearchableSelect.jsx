@@ -1,9 +1,8 @@
+// 긴 native select 대신 검색·스크롤을 제공하는 작은 combobox
+// options: [{ value, label }]
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-/**
- * 긴 native select 대신 검색·스크롤을 제공하는 작은 combobox.
- * options: [{ value, label }]
- */
 export default function SearchableSelect({
   value,
   onChange,
@@ -19,6 +18,7 @@ export default function SearchableSelect({
   const [query, setQuery] = useState('')
 
   const selected = options.find(option => option.value === value)
+  // label + value 를 합쳐 부분 문자열 검색
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
     if (!normalizedQuery) return options
@@ -27,6 +27,7 @@ export default function SearchableSelect({
     ))
   }, [options, query])
 
+  // 열려 있을 때: 바깥 클릭으로 닫기 + 검색창 포커스
   useEffect(() => {
     if (!open) return undefined
     const handlePointerDown = event => {

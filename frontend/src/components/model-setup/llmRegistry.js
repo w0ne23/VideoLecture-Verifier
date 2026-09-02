@@ -1,19 +1,21 @@
+// 등록된 LLM(provider + model + 마스킹 키) 목록 관리 (localStorage) + 백엔드 계약 변환
+
 import { VERSION_TO_MODEL_ID, nextProviderId } from './stageModels'
 
+// 버전 선택에서 "직접 입력" 을 나타내는 sentinel
 export const CUSTOM_VERSION = '__custom__'
 
 const REGISTRY_KEY = 'vlverifier_registered_llms'
 const LEGACY_PROVIDERS_KEY = 'vlverifier_providers'
 
+// API 키를 앞 8자 + 뒤 4자만 남기고 마스킹 (원본은 서버에만 저장)
 export function maskKey(key) {
   if (!key || key.length <= 8) return key || ''
   return `${key.slice(0, 8)}******${key.slice(-4)}`
 }
 
-/**
- * LiteLLM Catalog 응답을 화면·저장 모델에서 사용할 공통 메타데이터로 변환한다.
- * Provider와 모델 목록은 이 함수에 하드코딩하지 않고 Catalog 응답으로만 채운다.
- */
+// LiteLLM Catalog 응답 → 화면·저장 공통 메타데이터
+// provider·모델 목록을 여기 하드코딩하지 않고 Catalog 응답으로만 채움
 export function providerMeta(type, raw = {}) {
   const model = String(raw.modelId || raw.version || '').trim()
   return {
@@ -26,15 +28,18 @@ export function providerMeta(type, raw = {}) {
   }
 }
 
+// 이 provider 가 API 키를 요구하는지 (로컬 ollama 등은 false)
 export function providerRequiresKey(type, raw = {}) {
   return providerMeta(type, raw).requiresKey !== false
 }
 
+// 표시명 → 모델 ID (매핑에 없으면 소문자·하이픈으로 슬러그화)
 export function versionToModelId(version) {
   if (!version) return ''
   return VERSION_TO_MODEL_ID[version] || String(version).trim().toLowerCase().replace(/\s+/g, '-')
 }
 
+// endpoint 설정 기본값 (프로토콜·타임아웃·재시도 등)
 export function defaultEndpointConfig(type) {
   const meta = providerMeta(type)
   return {
@@ -50,6 +55,7 @@ export function defaultEndpointConfig(type) {
   }
 }
 
+// 저장/로드 시 LLM 레코드를 표준 형태로 정리 (type·version 없으면 버림)
 function normalizeLlm(raw) {
   if (!raw || typeof raw !== 'object') return null
   const type = String(raw.type || '').trim()
@@ -76,6 +82,7 @@ function normalizeLlm(raw) {
   }
 }
 
+// 구 localStorage 키(vlverifier_providers)의 provider 배열 → 현재 LLM 레코드 형태
 function migrateLegacyProviders(legacy) {
   if (!Array.isArray(legacy)) return []
   const migrated = []
@@ -98,6 +105,7 @@ function migrateLegacyProviders(legacy) {
   return migrated
 }
 
+// 등록 LLM 목록 로드 — 현재 키 우선, 없으면 구 키에서 마이그레이션
 export function loadRegisteredLlms() {
   try {
     const raw = JSON.parse(localStorage.getItem(REGISTRY_KEY) || 'null')
@@ -121,12 +129,14 @@ export function loadRegisteredLlms() {
   return []
 }
 
+// 등록 LLM 목록 저장 (정규화 후 기록)
 export function saveRegisteredLlms(llms) {
   const cleaned = (llms || []).map(normalizeLlm).filter(Boolean)
   localStorage.setItem(REGISTRY_KEY, JSON.stringify(cleaned))
   return cleaned
 }
 
+// "provider · version" 표시 라벨
 export function llmLabel(llm) {
   if (!llm) return ''
   const provider = providerMeta(llm.type, llm).name || llm.type
@@ -137,6 +147,7 @@ export function nextLlmId(llms) {
   return nextProviderId(llms || [])
 }
 
+// UI 단계 키 → llm_config 의 stage_bindings 키
 const STAGE_BINDING_KEYS = {
   claim: 'claim_extract',
   detect: 'issue_detect',
@@ -146,6 +157,7 @@ const STAGE_BINDING_KEYS = {
   slide: 'slide',
 }
 
+// LLM 레코드 → llm_config 의 endpoint 객체 (snake_case)
 function endpointFromLlm(llm) {
   const defaults = defaultEndpointConfig(llm.type)
   return {
@@ -170,10 +182,8 @@ function endpointFromLlm(llm) {
   }
 }
 
-/**
- * 등록 모델과 단계 선택을 provider-neutral endpoint/stage binding 계약으로 변환한다.
- * stage_models는 기존 파이프라인 하위 호환을 위해 별도로 계속 생성한다.
- */
+// 등록 모델 + 단계 선택 → provider 중립 endpoint/stage_binding 계약
+// stage_models 는 기존 파이프라인 하위 호환용으로 별도 생성 (stagesToStageModels)
 export function buildLlmConfig(providers, stages, stageOrder = Object.keys(STAGE_BINDING_KEYS)) {
   const endpoints = (providers || []).map(endpointFromLlm)
   const byId = new Map((providers || []).map(provider => [provider.id, provider]))
@@ -184,6 +194,7 @@ export function buildLlmConfig(providers, stages, stageOrder = Object.keys(STAGE
     const bindingKey = STAGE_BINDING_KEYS[stageKey]
     if (!stage || !bindingKey) return
 
+    // single 은 모델 1개(가중치 100), multi 는 선택된 모델별 가중치
     const ids = stage.mode === 'multi' ? (stage.selected || []) : [stage.selected]
     const bindings = ids.map(providerId => {
       const provider = byId.get(providerId)

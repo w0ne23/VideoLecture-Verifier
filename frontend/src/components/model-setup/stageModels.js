@@ -1,4 +1,6 @@
-/** UI 표시명 → 파이프라인이 읽는 모델 ID */
+// Multi-LLM 설정 화면의 단계 상태 ↔ 백엔드 형식(stage_models / editor_state) 변환 유틸
+
+// UI 표시명 → 파이프라인이 읽는 모델 ID
 export const VERSION_TO_MODEL_ID = {
   'GPT-5.4': 'gpt-5.4',
   'GPT-5.4 Mini': 'gpt-5.4-mini',
@@ -19,11 +21,12 @@ export const VERSION_TO_MODEL_ID = {
   'Qwen 3 14B': 'qwen3:14b',
 }
 
+// 모델 ID → UI 표시명 (역방향)
 export const MODEL_ID_TO_VERSION = Object.fromEntries(
   Object.entries(VERSION_TO_MODEL_ID).map(([version, modelId]) => [modelId, version]),
 )
 
-/** UI 단계 → 백엔드 stage_models 키. slide는 동일 값을 두 키에 넣는다. */
+// UI 단계 → 백엔드 stage_models 키 — slide 는 동일 값을 두 키에 넣음
 export const STAGE_ENV_KEYS = {
   claim: ['VERIFIER_CLAIM_EXTRACT_MODEL'],
   detect: ['ISSUE_JUDGE_MODELS'],
@@ -42,6 +45,7 @@ export const STAGE_LABELS = {
   slide: '슬라이드 오류',
 }
 
+// 모델 ID 접두사로 provider 종류 추론 (콜론 포함 = 로컬 ollama)
 export function modelIdToProviderType(modelId) {
   const id = String(modelId || '').trim().toLowerCase()
   if (!id) return null
@@ -61,11 +65,13 @@ export function modelIdToProviderType(modelId) {
   return null
 }
 
+// 표시명 → 모델 ID (매핑에 없으면 소문자·하이픈으로 슬러그화)
 function versionToModelId(version) {
   if (!version) return ''
   return VERSION_TO_MODEL_ID[version] || String(version).trim().toLowerCase().replace(/\s+/g, '-')
 }
 
+// 모델 ID → 표시명 — 매핑에 없으면 provider 메타의 versions 목록에서 역추적
 function modelIdToVersion(modelId, providerType, providersMeta) {
   if (MODEL_ID_TO_VERSION[modelId]) return MODEL_ID_TO_VERSION[modelId]
   const meta = providersMeta?.[providerType]
@@ -74,6 +80,7 @@ function modelIdToVersion(modelId, providerType, providersMeta) {
   return match || meta.versions[0] || modelId
 }
 
+// 쉼표/공백으로 구분된 모델 ID 문자열 → 배열
 function splitModels(raw) {
   return String(raw || '')
     .split(/[,\s]+/)
@@ -81,6 +88,7 @@ function splitModels(raw) {
     .filter(Boolean)
 }
 
+// 기존 provider id(p1, p2, ...) 중 최대값 + 1 로 새 id 생성
 export function nextProviderId(providers) {
   const maxId = providers.reduce((max, provider) => {
     const numericId = Number.parseInt(String(provider.id || '').replace('p', ''), 10)
@@ -89,9 +97,7 @@ export function nextProviderId(providers) {
   return `p${maxId + 1}`
 }
 
-/**
- * React stage 상태 → PUT /admin/model-settings 의 stage_models
- */
+// React 단계 상태 → PUT /admin/model-settings 의 stage_models (envKey → "modelId,modelId" 문자열)
 export function stagesToStageModels(stages, providers, stageOrder) {
   const stageModels = {}
 
@@ -127,10 +133,7 @@ export function stagesToStageModels(stages, providers, stageOrder) {
   return stageModels
 }
 
-/**
- * GET stage_models → React stages 초기값에 반영.
- * 등록된 provider(type)로만 매칭한다.
- */
+// GET stage_models → React 단계 초기값에 반영 — 모델 ID 를 등록된 provider(type)에만 매칭
 export function applyStageModelsToStages(baseStages, stageModels, providers, providersMeta) {
   if (!stageModels || !providers.length) return baseStages
 
@@ -140,11 +143,12 @@ export function applyStageModelsToStages(baseStages, stageModels, providers, pro
     const stage = next[stageKey]
     if (!stage) return
 
-    // slide는 두 키가 같은 값이므로 첫 키만 읽는다.
+    // slide 는 두 키가 같은 값이므로 첫 키만 읽음
     const raw = stageModels[envKeys[0]]
     const modelIds = splitModels(raw)
     if (!modelIds.length) return
 
+    // 같은 종류 provider 가 여러 개면 아직 안 쓴 것을 우선 배정, 없으면 첫 번째 재사용
     const usedInStage = new Set()
     const takeProvider = providerType => {
       const match = providers.find(
@@ -181,6 +185,7 @@ export function applyStageModelsToStages(baseStages, stageModels, providers, pro
     })
     if (!selected.length) return
 
+    // multi 단계는 가중치 정보가 없으므로 균등 분배로 복원 (나머지는 마지막에 몰아줌)
     const count = selected.length
     const base = Math.round(100 / count)
     const weights = selected.reduce((acc, providerId, index) => {
@@ -200,6 +205,7 @@ export function applyStageModelsToStages(baseStages, stageModels, providers, pro
   return next
 }
 
+// 편집 화면 상태 → 저장용 editor_state (provider id 대신 providerType 으로 기록해 재현 가능)
 export function serializeEditorState(stages, retryCounts, providers, stageOrder) {
   const serializedStages = {}
 
@@ -252,6 +258,7 @@ export function serializeEditorState(stages, retryCounts, providers, stageOrder)
   }
 }
 
+// 저장된 editor_state 에 있으나 현재 등록 목록에 없는 provider 를 placeholder 로 채움
 export function ensureProvidersForEditorState(existingProviders, editorState) {
   const nextProviders = [...existingProviders]
   const byType = new Map(nextProviders.map(provider => [provider.type, provider]))
@@ -275,6 +282,7 @@ export function ensureProvidersForEditorState(existingProviders, editorState) {
   return nextProviders
 }
 
+// 저장된 editor_state → React 단계 상태 (providerType 으로 현재 provider 를 재매칭)
 export function applyEditorStateToStages(baseStages, editorState, providers) {
   if (!editorState?.stages || !providers.length) return baseStages
 
@@ -321,8 +329,10 @@ export function applyEditorStateToStages(baseStages, editorState, providers) {
   return next
 }
 
+// 검증 단계 기본 순서
 export const DEFAULT_STAGE_ORDER = ['claim', 'detect', 'classify', 'judge', 'ground', 'slide']
 
+// editor_state → 목록 표시용 요약 (단계별 라벨·모드·재시도·모델)
 export function summarizeEditorState(editorState, stageOrder = DEFAULT_STAGE_ORDER) {
   const stages = editorState?.stages || {}
   const keys = [
@@ -341,6 +351,7 @@ export function summarizeEditorState(editorState, stageOrder = DEFAULT_STAGE_ORD
   })
 }
 
+// 저장 가능 여부 검증 — 문제가 있으면 안내 문구, 없으면 null
 export function validateStagesForSave(stages, stageOrder) {
   for (const stageKey of stageOrder) {
     const stage = stages[stageKey]

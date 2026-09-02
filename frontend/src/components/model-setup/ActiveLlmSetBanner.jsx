@@ -1,3 +1,5 @@
+// 메인 화면 상단 배너 — 현재 "적용 중" 인 Multi-LLM 조합 표시 + 클릭 시 상세 모달
+
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -5,6 +7,7 @@ import { listModelSettingProfiles } from '../../api/modelSetupProfiles'
 import { summarizeEditorState } from './stageModels'
 import { summarizeSetConfig } from './setBuilder'
 
+// 단계 행의 모델 목록을 쉼표로 이은 문자열
 function formatModelText(row) {
   if (!row.models.length) return '미설정'
   return row.models.map(model => model.version || model.modelId || '모델').join(', ')
@@ -18,6 +21,7 @@ export default function ActiveLlmSetBanner() {
     queryFn: listModelSettingProfiles,
   })
 
+  // is_active 플래그가 붙은 프로필 (없으면 null)
   const activeProfile = useMemo(() => {
     const profiles = data?.profiles || []
     return profiles.find(profile => profile.is_active) || null
