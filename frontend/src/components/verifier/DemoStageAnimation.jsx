@@ -1,13 +1,15 @@
+// /dev/verify-demo 전용 단계별 삽화 — 실제 검증 화면(PipelineProgress)에는 미사용
+// 단계마다 전용 그림이 있고, GenericAnim 은 새 단계 추가 시 대체용 안전망
+// 색 언어: 청록=오디오, 보라=이미지, 골드=텍스트, 초록=완료/검증
+//
+// 주의: SVG 의 transform="translate(...)" 속성과 CSS animation 의 transform 을 같은
+// 엘리먼트에 함께 걸면 CSS 가 속성을 통째로 덮어써 위치가 틀어짐
+// → "위치 이동"은 항상 바깥 <g transform="...">, "애니메이션"은 그 안의 클래스 있는 <g> 에 부여
+
 import { PIPELINE_NODES } from './verifierConstants'
 import { DEMO_PHASES } from '../../hooks/useDemoPipelineFlow'
 
-// /dev/verify-demo 전용 큰 삽화. 실제 검증 화면(PipelineProgress)에는 쓰이지 않는다.
-// PIPELINE_NODES 9단계 전부에 전용 그림이 있고, GenericAnim은 새 단계가 추가됐을 때의
-// 대체용 안전망이다. 색 언어: 청록=오디오, 보라=이미지, 골드=텍스트, 초록=완료/검증.
-// 주의: SVG의 transform="translate(...)" 속성과 CSS animation의 transform은 같은
-// 엘리먼트에 함께 걸면 CSS가 속성을 통째로 덮어써 위치가 틀어진다. 그래서 "위치 이동"은
-// 항상 바깥 <g transform="...">, "애니메이션"은 항상 그 안의 클래스 있는 <g>에 건다.
-
+// 여러 삽화에서 재사용하는 입력 매체 아이콘 (이미지 / 오디오 / 텍스트)
 function ImageIconGlyph() {
   return (
     <>
@@ -95,7 +97,7 @@ function ContextAnalysisAnim() {
   return (
     <div className="demo-anim">
       <svg viewBox="0 0 320 150" className="demo-anim-svg" aria-hidden="true">
-        {/* 텍스트 상자를 먼저 그려야 뒤이어 그리는 연결선이 그 위에 겹쳐 보인다(SVG는 그린 순서대로 쌓인다). */}
+        {/* 텍스트 상자를 먼저 그려야 뒤이어 그리는 연결선이 그 위에 겹쳐 보임 (SVG 는 그린 순서대로 쌓임) */}
         <rect x="50" y="95" width="220" height="48" rx="8" className="demo-anim-box" />
         <rect x="64" y="106" width="90" height="5" rx="2.5" className="demo-anim-doc-line" />
         <rect x="64" y="118" width="140" height="5" rx="2.5" className="demo-anim-doc-line" />
@@ -287,7 +289,7 @@ function FinalVerificationAnim() {
           <text x="17" y="21" textAnchor="middle" className="demo-anim-model-label">LLM2</text>
           <path d="M9 17 l5 5 l9 -9" className="demo-anim-check" />
         </g>
-        {/* LLM이 더 있을 수 있다는 뜻의 세로 점 3개 */}
+        {/* LLM 이 더 있을 수 있다는 뜻의 세로 점 3개 */}
         <circle cx="157" cy="93" r="1.8" className="demo-anim-ellipsis-dot" />
         <circle cx="157" cy="100" r="1.8" className="demo-anim-ellipsis-dot" />
         <circle cx="157" cy="107" r="1.8" className="demo-anim-ellipsis-dot" />
@@ -331,6 +333,7 @@ function SlideReviewAnim() {
   )
 }
 
+// 전용 삽화가 없는 단계용 폴백
 function GenericAnim({ label }) {
   return (
     <div className="demo-anim">
@@ -367,6 +370,7 @@ function ErrorAnim() {
   )
 }
 
+// 단계 id → 전용 삽화 컴포넌트 (없으면 GenericAnim)
 const CUSTOM_ANIMS = {
   data_extract: DataExtractAnim,
   content_extract: ContentExtractAnim,
@@ -379,6 +383,7 @@ const CUSTOM_ANIMS = {
   slide_review: SlideReviewAnim,
 }
 
+// 현재 phase/단계에 맞는 삽화 선택 — 완료/오류가 단계별 삽화보다 우선
 export default function DemoStageAnimation({ stageId, phase }) {
   if (phase === DEMO_PHASES.DONE) return <DoneAnim />
   if (phase === DEMO_PHASES.ERROR) return <ErrorAnim />
