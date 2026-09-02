@@ -2528,6 +2528,45 @@ def _call_pre_verifier_web_search(
     provider = str(resolved.get("provider") or "")
     resolved_model = str(resolved.get("resolved_model") or model_spec)
 
+    # When LiteLLM is enabled, the web UI's grounding binding is authoritative
+    # just like every other verifier stage.  Do this before the legacy native
+    # provider dispatch below; otherwise Claude/Grok/Gemini bindings would be
+    # rejected merely because the old adapter only recognized OpenAI/Gemini.
+    try:
+        from .runtime_llm import resolve_runtime_binding
+    except ImportError:
+        from runtime_llm import resolve_runtime_binding
+    runtime_binding = resolve_runtime_binding("grounding", model_spec)
+    if runtime_binding and runtime_binding.get("provider") == "litellm":
+        text, usage, resolved_call = _call_llm(
+            model_spec=model_spec,
+            prompt=_build_pre_verifier_search_prompt(issue, current_date),
+            max_tokens=max_tokens,
+            stage="grounding",
+            web_search=True,
+            web_search_max_calls=_pre_verifier_evidence_max_tool_calls(),
+            web_search_force=False,
+            web_search_context_size=_pre_verifier_evidence_search_context_size(),
+        )
+        resolved_model = str(
+            resolved_call.get("resolved_model")
+            or runtime_binding.get("resolved_model")
+            or model_spec
+        )
+        parse_error = ""
+        try:
+            payload = _parse_response(text or "", require_sources=False)
+        except Exception as exc:
+            parse_error = str(exc)
+            payload = {
+                "match_terms": [],
+                "evidence_sources": [],
+                "evidence_passages": [],
+            }
+        if not isinstance(payload, dict):
+            payload = {}
+        return payload, usage, resolved_model, parse_error, text or ""
+
     if provider == "gemini":
         result, usage = _call_gemini_pre_verifier_search(
             issue=issue,
@@ -3929,9 +3968,18 @@ def _retrieve_pre_verifier_evidence_material(
     run_individual_assessments: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     resolved = _resolve_model_spec(model_spec)
-    if resolved.get("provider") not in {"openai", "gemini"}:
+    try:
+        from .runtime_llm import resolve_runtime_binding
+    except ImportError:
+        from runtime_llm import resolve_runtime_binding
+    runtime_binding = resolve_runtime_binding("grounding", model_spec)
+    uses_litellm = bool(
+        runtime_binding
+        and runtime_binding.get("provider") == "litellm"
+    )
+    if not uses_litellm and resolved.get("provider") not in {"openai", "gemini"}:
         raise ValueError(
-            "pre-verifier web evidence supports OpenAI or Gemini models"
+            "pre-verifier web evidence requires a LiteLLM binding or an OpenAI/Gemini model"
         )
     web_check = (
         issue.get("web_check") is True

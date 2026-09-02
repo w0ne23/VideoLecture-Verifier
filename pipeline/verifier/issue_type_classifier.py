@@ -420,484 +420,6 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     return {"provider": "runtime", "alias": raw, "resolved_model": raw}
 
 
-def _parse_openai_model_spec(model_spec: str) -> tuple[str, str | None]:
-    spec = str(model_spec or "").strip()
-    if not spec:
-        return spec, None
-
-    match = re.match(
-        r"^(?P<model>(?:gpt|o)[A-Za-z0-9.-]*?)-(?P<effort>low|medium|high|xhigh)$",
-        spec,
-    )
-    if match:
-        return match.group("model"), match.group("effort")
-    return spec, None
-
-
-def _usage_value(obj: Any, *names: str) -> int:
-    for name in names:
-        value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
-        if value is not None:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return 0
-    return 0
-
-
-def _openai_like_usage(resp: Any, provider: str, model: str) -> dict[str, Any]:
-    usage = getattr(resp, "usage", None)
-    completion_details = (
-        getattr(usage, "completion_tokens_details", None)
-        or getattr(usage, "output_tokens_details", None)
-    )
-    prompt_details = (
-        getattr(usage, "prompt_tokens_details", None)
-        or getattr(usage, "input_tokens_details", None)
-    )
-    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
-    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
-    total_tokens = _usage_value(usage, "total_tokens")
-    result = {
-        "provider": provider,
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
-        "tool_input_tokens": 0,
-        "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
-        "cache_creation_input_tokens": 0,
-        "total_tokens": total_tokens or input_tokens + output_tokens,
-    }
-    web_search_requests = 0
-    web_search_queries: list[str] = []
-    web_search_sources: list[str] = []
-    for item in getattr(resp, "output", []) or []:
-        if getattr(item, "type", "") != "web_search_call":
-            continue
-        web_search_requests += 1
-        action = getattr(item, "action", None)
-        query = str(getattr(action, "query", "") or "").strip()
-        if query and query not in web_search_queries:
-            web_search_queries.append(query)
-        for candidate in getattr(action, "queries", None) or []:
-            candidate = str(candidate or "").strip()
-            if candidate and candidate not in web_search_queries:
-                web_search_queries.append(candidate)
-        for source in getattr(action, "sources", None) or []:
-            url = str(getattr(source, "url", "") or "").strip()
-            if url and url not in web_search_sources:
-                web_search_sources.append(url)
-    result["web_search_requests"] = web_search_requests
-    result["web_search_queries"] = web_search_queries
-    result["web_search_sources"] = web_search_sources
-    return result
-
-
-def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
-    usage = getattr(resp, "usage", None)
-    input_tokens = _usage_value(usage, "input_tokens")
-    output_tokens = _usage_value(usage, "output_tokens")
-    content_blocks = list(getattr(resp, "content", []) or [])
-    text_length = sum(
-        len(str(getattr(block, "text", "") or ""))
-        for block in content_blocks
-        if getattr(block, "type", "") == "text"
-    )
-    return {
-        "provider": "anthropic",
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "reasoning_tokens": 0,
-        "tool_input_tokens": 0,
-        "cached_input_tokens": _usage_value(usage, "cache_read_input_tokens"),
-        "cache_creation_input_tokens": _usage_value(usage, "cache_creation_input_tokens"),
-        "total_tokens": input_tokens + output_tokens,
-        "response_metadata": {
-            "response_id": str(getattr(resp, "id", "") or ""),
-            "response_model": str(getattr(resp, "model", "") or model),
-            "stop_reason": str(getattr(resp, "stop_reason", "") or ""),
-            "stop_sequence": str(getattr(resp, "stop_sequence", "") or ""),
-            "content_block_types": [
-                str(getattr(block, "type", "") or "") for block in content_blocks
-            ],
-            "text_length": text_length,
-            "text_empty": text_length == 0,
-        },
-    }
-
-
-def _gemini_usage(resp: Any, model: str) -> dict[str, Any]:
-    usage = getattr(resp, "usage_metadata", None) or getattr(resp, "usageMetadata", None)
-    input_tokens = _usage_value(usage, "prompt_token_count", "promptTokenCount")
-    output_tokens = _usage_value(usage, "candidates_token_count", "candidatesTokenCount")
-    reasoning_tokens = _usage_value(usage, "thoughts_token_count", "thoughtsTokenCount")
-    tool_input_tokens = _usage_value(usage, "tool_use_prompt_token_count", "toolUsePromptTokenCount")
-    cached_input_tokens = _usage_value(usage, "cached_content_token_count", "cachedContentTokenCount")
-    total_tokens = _usage_value(usage, "total_token_count", "totalTokenCount")
-    return {
-        "provider": "gemini",
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "reasoning_tokens": reasoning_tokens,
-        "tool_input_tokens": tool_input_tokens,
-        "cached_input_tokens": cached_input_tokens,
-        "cache_creation_input_tokens": 0,
-        "total_tokens": total_tokens or input_tokens + output_tokens + reasoning_tokens + tool_input_tokens,
-    }
-
-
-def _chat_completion_text(resp: Any) -> str:
-    choices = getattr(resp, "choices", []) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    return getattr(message, "content", "") or ""
-
-
-def _call_openai_like(
-    *,
-    provider: str,
-    model: str,
-    prompt: str,
-    max_tokens: int,
-    web_search: bool = False,
-    web_search_max_calls: int = 2,
-    web_search_force: bool = False,
-    web_search_context_size: str | None = None,
-    structured_schema: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any]]:
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.") from exc
-
-    if provider == "openai":
-        from pipeline.config import get_openai_api_config
-
-        api_key, base_url = get_openai_api_config()
-        base_url = base_url or None
-    elif provider == "vllm":
-        api_key = (
-            os.getenv("LOCAL_LLM_API_KEY")
-            or os.getenv("VLLM_API_KEY")
-            or os.getenv("Qwen_3.6")
-        )
-        base_url = (
-            os.getenv("LOCAL_LLM_BASE_URL")
-            or os.getenv("VLLM_BASE_URL")
-            or os.getenv("QWEN_BASE_URL")
-        )
-    elif provider == "xai":
-        api_key = os.getenv("XAI_API_KEY")
-        base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
-    elif provider == "deepseek":
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    elif provider == "ollama":
-        api_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
-    else:
-        raise ValueError(f"지원하지 않는 OpenAI 호환 provider: {provider}")
-    if not api_key:
-        env_name = {
-            "openai": "OPENAI_API_KEY",
-            "vllm": "LOCAL_LLM_API_KEY (또는 VLLM_API_KEY/Qwen_3.6)",
-            "xai": "XAI_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "ollama": "OLLAMA_API_KEY",
-        }[provider]
-        raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
-    if provider == "vllm" and not base_url:
-        raise RuntimeError("LOCAL_LLM_BASE_URL(또는 VLLM_BASE_URL)가 설정되지 않았습니다.")
-    reasoning_effort = None
-    if provider == "openai":
-        model, reasoning_effort = _parse_openai_model_spec(model)
-
-    timeout = _env_float(
-        f"ISSUE_TYPE_CLASSIFIER_{provider.upper()}_TIMEOUT_SEC",
-        _env_float("ISSUE_TYPE_CLASSIFIER_TIMEOUT_SEC", 240.0),
-    )
-    client = (
-        OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
-        if base_url
-        else OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
-    )
-    use_web_search = provider == "openai" and bool(web_search)
-    if use_web_search:
-        # OpenAI rejects web_search combined with JSON mode. The final verifier
-        # therefore relies on its strict JSON-only prompt and existing parser.
-        search_tool: dict[str, Any] = {"type": "web_search"}
-        context_size = str(web_search_context_size or "").strip().lower()
-        if context_size in {"low", "medium", "high"}:
-            search_tool["search_context_size"] = context_size
-        kwargs = {
-            "model": model,
-            "input": prompt,
-            "tools": [search_tool],
-            "tool_choice": "required" if web_search_force else "auto",
-            "max_tool_calls": max(1, int(web_search_max_calls)),
-            "max_output_tokens": max_tokens,
-            "include": ["web_search_call.action.sources"],
-        }
-        if reasoning_effort:
-            kwargs["reasoning"] = {"effort": reasoning_effort}
-    else:
-        messages = [{"role": "user", "content": prompt}]
-        response_format = {"type": "json_object"}
-        if structured_schema:
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_output",
-                    "strict": True,
-                    "schema": structured_schema,
-                },
-            }
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "response_format": response_format,
-        }
-        if not reasoning_effort and model.lower() != "gpt-5.6-luna":
-            kwargs["temperature"] = 0.0
-        seed = _env_seed()
-        if seed is not None:
-            kwargs["seed"] = seed
-        if provider == "openai":
-            kwargs["max_completion_tokens"] = max_tokens
-            if reasoning_effort:
-                kwargs["reasoning_effort"] = reasoning_effort
-        else:
-            kwargs["max_tokens"] = max_tokens
-            if provider == "deepseek":
-                kwargs["extra_body"] = {
-                    "thinking": {
-                        "type": os.getenv("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_THINKING", "disabled")
-                    }
-                }
-            elif provider == "vllm":
-                kwargs["extra_body"] = {
-                    "chat_template_kwargs": {"enable_thinking": False}
-                }
-
-    attempts = _env_int("ISSUE_TYPE_CLASSIFIER_API_RETRIES", 2, min_value=0) + 1
-    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC", 0.0, min_value=0.0)
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            resp = (
-                client.responses.create(**kwargs)
-                if use_web_search
-                else client.chat.completions.create(**kwargs)
-            )
-            break
-        except Exception as exc:
-            message = str(exc)
-            retry_kwargs = dict(kwargs)
-            changed_kwargs = False
-            if "temperature" in message and "temperature" in retry_kwargs:
-                retry_kwargs.pop("temperature", None)
-                changed_kwargs = True
-            if "max_completion_tokens" in message and "max_completion_tokens" in retry_kwargs:
-                retry_kwargs["max_tokens"] = retry_kwargs.pop("max_completion_tokens")
-                changed_kwargs = True
-            if "response_format" in message and "response_format" in retry_kwargs:
-                retry_kwargs.pop("response_format", None)
-                changed_kwargs = True
-            if "seed" in message.lower() and "seed" in retry_kwargs:
-                retry_kwargs.pop("seed", None)
-                changed_kwargs = True
-            if changed_kwargs:
-                kwargs = retry_kwargs
-            last_exc = exc
-            if attempt >= attempts:
-                raise
-            print(
-                f"    [{provider}:{model}] API 재시도 {attempt}/{attempts - 1}: {exc}",
-                flush=True,
-            )
-            if retry_wait:
-                time.sleep(retry_wait)
-    else:
-        raise RuntimeError("LLM API 호출 실패") from last_exc
-    text = str(getattr(resp, "output_text", "") or "") if use_web_search else _chat_completion_text(resp)
-    return text, _openai_like_usage(resp, provider, model)
-
-
-def _call_anthropic(
-    *, model: str, prompt: str, max_tokens: int, structured_schema: dict[str, Any] | None = None
-) -> tuple[str, dict[str, Any]]:
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise RuntimeError("anthropic 패키지가 설치되어 있지 않습니다.") from exc
-    try:
-        from ..utils import anthropic_structured_output_request_kwargs
-    except ImportError:
-        from utils import anthropic_structured_output_request_kwargs
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-    # os.getenv's default only applies when the var is unset — a set-but-empty
-    # ANTHROPIC_BASE_URL (as env_file produces from `ANTHROPIC_BASE_URL=`)
-    # silently built an empty base_url and broke every call from this
-    # classifier specifically (see the equivalent fix in pipeline/config.py).
-    base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
-    client = Anthropic(api_key=api_key, base_url=base_url, max_retries=0)
-    classifier_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "classifications": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "id": {"type": "string"},
-                        "probabilities": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "factual_error": {"type": "number", "minimum": 0, "maximum": 1},
-                                "temporal_error": {"type": "number", "minimum": 0, "maximum": 1},
-                                "confusing_explanation": {"type": "number", "minimum": 0, "maximum": 1},
-                                "scope_overclaim": {"type": "number", "minimum": 0, "maximum": 1},
-                            },
-                            "required": [
-                                "factual_error",
-                                "temporal_error",
-                                "confusing_explanation",
-                                "scope_overclaim",
-                            ],
-                        },
-                        "reason": {"type": "string"},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    },
-                    "required": ["id", "probabilities", "reason", "confidence"],
-                },
-            }
-        },
-        "required": ["classifications"],
-    }
-    schema = structured_schema or classifier_schema
-    try:
-        from anthropic import transform_schema
-
-        schema = transform_schema(schema)
-    except (ImportError, AttributeError, TypeError, ValueError):
-        schema = dict(schema)
-
-    request_kwargs = dict(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-        system="분석 결과를 지정된 JSON Schema에 맞는 JSON 객체로만 반환하세요. 설명 문장이나 markdown fence는 출력하지 마세요.",
-    )
-    request_kwargs.update(
-        anthropic_structured_output_request_kwargs(
-            schema,
-            create_method=client.messages.create,
-        )
-    )
-    # Some Anthropic models/SDK call shapes reject the legacy sampling parameter
-    # (Sonnet 5 with HTTP 400, Opus 4.8 with a client-side TypeError when
-    # combined with Structured Outputs) — which one varies by model and SDK
-    # version, so instead of hardcoding model names we try with it and drop it
-    # on that specific failure.
-    request_kwargs["temperature"] = 0.0
-    try:
-        resp = client.messages.create(**request_kwargs)
-    except Exception as exc:
-        if "temperature" not in request_kwargs or "temperature" not in str(exc).lower():
-            raise
-        request_kwargs.pop("temperature")
-        resp = client.messages.create(**request_kwargs)
-    content_blocks = list(getattr(resp, "content", []) or [])
-    tool_blocks = [
-        block for block in content_blocks
-        if getattr(block, "type", "") == "tool_use"
-    ]
-    if tool_blocks:
-        # Backward-compatible parsing for mocked/legacy responses. Native
-        # Structured Outputs return the JSON in a text content block.
-        tool_input = getattr(tool_blocks[0], "input", None)
-        if isinstance(tool_input, dict):
-            return json.dumps(tool_input, ensure_ascii=False), _anthropic_usage(resp, model)
-    text_blocks = [
-        getattr(block, "text", "")
-        for block in content_blocks
-        if getattr(block, "type", "") == "text"
-    ]
-    return "".join(text_blocks), _anthropic_usage(resp, model)
-
-
-def _call_gemini(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
-    try:
-        from google.genai import types
-    except ImportError as exc:
-        raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다.") from exc
-    try:
-        from ..config import get_gemini_client_sequence
-        from ..utils import api_call_with_retry, is_retryable_api_error
-    except ImportError:
-        from config import get_gemini_client_sequence
-        from utils import api_call_with_retry, is_retryable_api_error
-
-    client_sequence = get_gemini_client_sequence()
-    if not client_sequence:
-        raise RuntimeError("GOOGLE_API_KEY_1, GOOGLE_API_KEY 또는 GEMINI_API_KEY가 설정되지 않았습니다.")
-
-    del max_tokens
-    cfg_kwargs: dict[str, Any] = {
-        "temperature": 0.0,
-        "response_mime_type": "application/json",
-    }
-    thinking_budget = os.getenv("ISSUE_TYPE_CLASSIFIER_GEMINI_THINKING_BUDGET")
-    if thinking_budget is not None and str(thinking_budget).strip() != "":
-        try:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=int(thinking_budget))
-        except ValueError:
-            pass
-
-    contents = [types.Part.from_text(text=prompt)]
-
-    if len(client_sequence) == 1:
-        _client_name, client = client_sequence[0]
-
-        def call_api():
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**cfg_kwargs),
-            )
-
-        resp = api_call_with_retry(call_api)
-        return resp.text or "", _gemini_usage(resp, model)
-
-    last_exc: Exception | None = None
-    for index, (client_name, client) in enumerate(client_sequence):
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**cfg_kwargs),
-            )
-            return resp.text or "", _gemini_usage(resp, model)
-        except Exception as exc:
-            last_exc = exc
-            if is_retryable_api_error(exc) and index < len(client_sequence) - 1:
-                print(f"    [gemini:{model}] API ERROR [{client_name}]: {exc}", flush=True)
-                print("      ↺ 다음 Gemini API 키로 전환", flush=True)
-                continue
-            raise
-
-    raise RuntimeError("Gemini 호출 실패") from last_exc
-
-
 def _call_llm(
     *,
     model_spec: str,
@@ -910,114 +432,50 @@ def _call_llm(
     structured_schema: dict[str, Any] | None = None,
     stage: str = "issue_classify",
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
-    # Web-selected endpoint bindings take precedence for ordinary JSON calls.
-    # OpenAI web-search calls stay on the existing Responses adapter because
-    # the search tool is an OpenAI-specific capability, not a chat endpoint
-    # parameter that can be forwarded to every compatible server.
+    """Call the selected classifier model through the runtime gateway."""
     try:
         from .runtime_llm import call_runtime_llm, resolve_runtime_binding
     except ImportError:
         from runtime_llm import call_runtime_llm, resolve_runtime_binding
 
-    runtime_binding = None if web_search else resolve_runtime_binding(stage, model_spec)
-    if runtime_binding:
-        runtime_result = call_runtime_llm(
-            runtime_binding,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=0.0,
-            response_format=(
-                {
-                    "type": "json_schema",
-                    "schema": structured_schema,
-                }
-                if structured_schema
-                else {"type": "json_object"}
-            ),
-            model_spec=model_spec,
-            stage=stage,
-        )
-        if runtime_result is not None:
-            text, usage = runtime_result
-            resolved = {
-                "provider": runtime_binding.get("provider", ""),
-                "alias": model_spec,
-                "resolved_model": runtime_binding.get("resolved_model", model_spec),
-                "endpoint_ref": runtime_binding.get("endpoint_ref", ""),
-            }
-            return text, usage, resolved
-
-    if stage in {"issue_classify", "classify", "verify", "judge", "issue_detect", "detect"}:
+    runtime_binding = resolve_runtime_binding(stage, model_spec)
+    if not runtime_binding:
         raise RuntimeError(
             f"{stage} 단계의 선택 모델을 런타임 바인딩으로 해석하지 못했습니다: {model_spec}"
         )
-
-    resolved = _resolve_model_spec(model_spec)
-    provider = resolved["provider"]
-    model = resolved["resolved_model"]
-    if provider == "anthropic":
-        text, usage = _call_anthropic(
-            model=model,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            structured_schema=structured_schema,
-        )
-    elif provider == "gemini":
-        text, usage = _call_gemini(model=model, prompt=prompt, max_tokens=max_tokens)
-    else:
-        text, usage = _call_openai_like(
-            provider=provider,
-            model=model,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            web_search=web_search,
-            web_search_max_calls=web_search_max_calls,
-            web_search_force=web_search_force,
-            web_search_context_size=web_search_context_size,
-            structured_schema=structured_schema,
-        )
-    return text, usage, resolved
-
-
-def _call_model_for_batch(
-    *,
-    model: str,
-    batch: list[dict[str, Any]],
-    current_date: str,
-    max_tokens: int,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    prompt = _build_prompt(batch, current_date)
-    text, usage, resolved = _call_llm(
-        model_spec=model,
+    runtime_result = call_runtime_llm(
+        runtime_binding,
         prompt=prompt,
         max_tokens=max_tokens,
+        temperature=0.0,
+        response_format=(
+            None
+            if web_search
+            else (
+                {"type": "json_schema", "schema": structured_schema}
+                if structured_schema
+                else {"type": "json_object"}
+            )
+        ),
+        model_spec=model_spec,
+        stage=stage,
+        web_search=web_search,
+        web_search_max_calls=web_search_max_calls,
+        web_search_force=web_search_force,
+        web_search_context_size=web_search_context_size,
     )
-    rows = _parse_response(text)
-    by_id = {str(row.get("id", "") or ""): row for row in rows if isinstance(row, dict)}
-    normalized_rows = []
-    for ref in batch:
-        row = by_id.get(ref["id"], {})
-        probabilities, parse_error = _normalize_probabilities(row.get("probabilities"))
-        top_issue_type, top_probability = _top_probability_type(probabilities or {})
-        confidence = max(0.0, min(1.0, _safe_float(row.get("confidence"), top_probability)))
-        status = "ok" if probabilities else "parse_failed"
-        normalized_rows.append(
-            {
-                "id": ref["id"],
-                "model": model,
-                "provider": resolved["provider"],
-                "resolved_model": resolved["resolved_model"],
-                "probabilities": probabilities or {issue_type: 0.0 for issue_type in ISSUE_TYPES},
-                "top_issue_type": top_issue_type,
-                "top_issue_type_label": _issue_type_label(top_issue_type),
-                "top_probability": top_probability,
-                "confidence": confidence,
-                "reason": str(row.get("reason", "") or "").strip(),
-                "status": status,
-                "parse_error": parse_error or "",
-            }
+    if runtime_result is None:
+        raise RuntimeError(
+            f"{stage} 단계가 지원하지 않는 런타임 프로토콜입니다: {model_spec}"
         )
-    return normalized_rows, usage
+    text, usage = runtime_result
+    resolved = {
+        "provider": runtime_binding.get("provider", ""),
+        "alias": model_spec,
+        "resolved_model": runtime_binding.get("resolved_model", model_spec),
+        "endpoint_ref": runtime_binding.get("endpoint_ref", ""),
+    }
+    return text, usage, resolved
 
 
 def _model_worker(args: tuple) -> dict[str, Any]:
@@ -1108,18 +566,11 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 time.sleep(retry_wait)
         except Exception as exc:
             last_exc = exc
-            # anthropic.APIConnectionError.__str__() is always the hardcoded
-            # "Connection error." regardless of the real cause — surface the
-            # wrapped cause too so a genuine root cause (TLS, DNS, proxy, ...)
-            # is visible instead of just that generic string.
-            cause = getattr(exc, "__cause__", None)
-            detail = f"{type(exc).__name__}: {exc}" + (f" (caused by {type(cause).__name__}: {cause})" if cause else "")
             if attempt >= attempts:
-                print(f"    [{model}] batch {batch_index}/{total_batches} 최종 실패: {detail}", flush=True)
                 raise
             print(
                 f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
-                f"{attempt}/{attempts - 1}: {detail}",
+                f"{attempt}/{attempts - 1}: {exc}",
                 flush=True,
             )
             if retry_wait:
@@ -1633,12 +1084,6 @@ def classify_issues(
             flush=True,
         )
         failed_batch_args: list[tuple] = []
-        # ``max_workers``는 전체 한도가 아니라 모델당 한도다. 공급자별
-        # executor를 분리해 한 모델의 대기/제한이 다른 모델의 슬롯을 막지 않는다.
-        worker_args_by_model: dict[str, list[tuple]] = defaultdict(list)
-        for args in worker_args:
-            worker_args_by_model[args[0]].append(args)
-
         total_batch_count = len(worker_args)
         progress_lock = threading.Lock()
         progress_done = 0
@@ -1651,6 +1096,11 @@ def classify_issues(
                 progress_done += 1
                 done = progress_done
             progress_notify(done, total_batch_count)
+        # ``max_workers``는 전체 한도가 아니라 모델당 한도다. 공급자별
+        # executor를 분리해 한 모델의 대기/제한이 다른 모델의 슬롯을 막지 않는다.
+        worker_args_by_model: dict[str, list[tuple]] = defaultdict(list)
+        for args in worker_args:
+            worker_args_by_model[args[0]].append(args)
 
         def _run_model_batches(model: str, model_args: list[tuple]) -> tuple[str, list[tuple], list[tuple[tuple, Exception]]]:
             completed: list[tuple] = []

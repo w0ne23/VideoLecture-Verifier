@@ -89,6 +89,7 @@ def _litellm_runtime(model: str, *, source_runtime: dict[str, Any] | None = None
         "model": gateway_model,
         "weight": 100.0,
     }
+    source_provider = _endpoint_provider(source_endpoint) if source_endpoint else ""
     return {
         "binding": binding,
         "endpoint": endpoint,
@@ -96,6 +97,12 @@ def _litellm_runtime(model: str, *, source_runtime: dict[str, Any] | None = None
         "protocol": "openai_chat_completions",
         "resolved_model": gateway_model,
         "endpoint_ref": "litellm",
+        # Keep the original selection next to the gateway binding.  The
+        # gateway endpoint itself is OpenAI-compatible, but web search must
+        # choose the correct LiteLLM request shape from the upstream provider.
+        "source_provider": source_provider,
+        "source_model": model_name,
+        "source_protocol": str(source_endpoint.get("protocol") or "").strip().lower(),
     }
 
 
@@ -198,7 +205,10 @@ def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
         body = json.dumps({
             "model_name": alias,
             "litellm_params": params,
-            "model_info": {"id": alias, "managed_by": "verilec"},
+            "model_info": {
+                "id": alias,
+                "managed_by": "verilec",
+            },
         }).encode("utf-8")
         request = urllib.request.Request(
             f"{_litellm_api_root()}/model/new",
@@ -469,6 +479,74 @@ def _response_text(resp: Any) -> str:
     return str(content)
 
 
+def _jsonable(value: Any) -> Any:
+    """Best-effort conversion of SDK response objects for metadata lookup."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _jsonable(model_dump())
+        except Exception:
+            pass
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _jsonable(to_dict())
+        except Exception:
+            pass
+    return str(value)
+
+
+def _web_search_metadata(resp: Any) -> dict[str, Any]:
+    """Extract provider-normalized search counts and source URLs when present."""
+    payload = _jsonable(resp)
+    queries: list[str] = []
+    sources: list[str] = []
+    request_count = 0
+
+    def walk(value: Any) -> None:
+        nonlocal request_count
+        if isinstance(value, dict):
+            kind = str(value.get("type") or "").lower()
+            if "web_search" in kind or kind in {"search_call", "websearch_call"}:
+                request_count += 1
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered in {"url", "source_url", "sourceurl"}:
+                    url = str(item or "").strip()
+                    if url.startswith(("http://", "https://")) and url not in sources:
+                        sources.append(url)
+                elif lowered in {"query", "search_query", "searchquery"}:
+                    query = str(item or "").strip()
+                    if query and query not in queries:
+                        queries.append(query)
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    usage = getattr(resp, "usage", None)
+    usage_payload = _jsonable(usage)
+    if isinstance(usage_payload, dict):
+        details = usage_payload.get("prompt_tokens_details") or usage_payload.get("input_tokens_details")
+        if isinstance(details, dict):
+            request_count = max(
+                request_count,
+                _usage_value(details, "web_search_requests", "web_search_queries"),
+            )
+    return {
+        "web_search_requests": request_count,
+        "web_search_queries": queries,
+        "web_search_sources": sources,
+    }
+
+
 def _openai_temperature_allowed(model: str) -> bool:
     lowered = str(model or "").strip().lower()
     return not lowered.startswith(("gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"))
@@ -485,6 +563,10 @@ def _call_openai_compatible(
     images: list[bytes],
     model_spec: str,
     stage: str,
+    web_search: bool = False,
+    web_search_max_calls: int = 1,
+    web_search_force: bool = False,
+    web_search_context_size: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     try:
         from openai import OpenAI
@@ -511,6 +593,78 @@ def _call_openai_compatible(
         client_kwargs["default_headers"] = headers
     client = OpenAI(**client_kwargs)
     model = runtime["resolved_model"]
+    source_provider = str(
+        runtime.get("source_provider")
+        or endpoint.get("source_provider")
+        or ""
+    ).strip().lower()
+    source_model = str(
+        runtime.get("source_model")
+        or endpoint.get("source_model")
+        or model_spec
+    ).strip()
+
+    if web_search:
+        context_size = str(web_search_context_size or "medium").strip().lower()
+        if context_size not in {"low", "medium", "high"}:
+            context_size = "medium"
+        max_calls = max(1, int(web_search_max_calls or 1))
+
+        # LiteLLM is the capability boundary for web search. The application
+        # must not maintain a provider allowlist: new providers and provider
+        # model variants should reach the gateway and be accepted or rejected
+        # by LiteLLM's own adapter/capability registry.
+        is_openai_search_model = source_provider == "openai" and any(
+            marker in source_model.lower()
+            for marker in ("search-preview", "search_api", "search-api")
+        )
+        if source_provider == "openai" and not is_openai_search_model:
+            response_kwargs: dict[str, Any] = {
+                "model": model,
+                "input": prompt,
+                "tools": [{
+                    "type": "web_search_preview",
+                    "search_context_size": context_size,
+                }],
+                "tool_choice": "required" if web_search_force else "auto",
+                "max_tool_calls": max_calls,
+                "max_output_tokens": max_tokens,
+                "include": ["web_search_call.action.sources"],
+            }
+            response = api_call_with_retry(
+                lambda: client.responses.create(**response_kwargs)
+            )
+            text = str(getattr(response, "output_text", "") or "")
+            usage = _openai_usage(response, "litellm", model, stage)
+        else:
+            search_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                # OpenAI's SDK requires provider-specific fields to be placed
+                # in extra_body when talking to an OpenAI-compatible proxy.
+                # LiteLLM owns the translation to the selected upstream
+                # provider; this request is intentionally sent for every
+                # configured provider instead of being filtered here.
+                "extra_body": {
+                    "web_search_options": {
+                        "search_context_size": context_size,
+                    }
+                },
+            }
+            response = api_call_with_retry(
+                lambda: client.chat.completions.create(**search_kwargs)
+            )
+            text = _response_text(response)
+            usage = _openai_usage(response, "litellm", model, stage)
+
+        usage.update(_web_search_metadata(response))
+        usage["web_search_provider"] = source_provider
+        usage["web_search_model"] = source_model
+        usage["web_search_mode"] = "litellm_gateway"
+        usage["web_search_requested"] = True
+        return text, usage
+
     options = endpoint.get("provider_options") if isinstance(endpoint.get("provider_options"), dict) else {}
     raw_model = str(model_spec or "").strip()
     effort_match = re.search(r"-(low|medium|high|xhigh)$", raw_model.lower())
@@ -665,6 +819,10 @@ def call_runtime_llm(
     image_bytes_list: list[bytes] | None = None,
     model_spec: str = "",
     stage: str = "default",
+    web_search: bool = False,
+    web_search_max_calls: int = 1,
+    web_search_force: bool = False,
+    web_search_context_size: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Call a configured runtime endpoint, or return None for unsupported protocols."""
     protocol = str(runtime.get("protocol") or "").strip().lower()
@@ -682,6 +840,10 @@ def call_runtime_llm(
             images=images,
             model_spec=model_spec,
             stage=stage,
+            web_search=web_search,
+            web_search_max_calls=web_search_max_calls,
+            web_search_force=web_search_force,
+            web_search_context_size=web_search_context_size,
         )
     if protocol == "anthropic_messages":
         return _call_anthropic_messages(
