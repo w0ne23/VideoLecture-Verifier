@@ -1,4 +1,4 @@
-import { PROCESS_STAGES } from '../../data/mockStats'
+import { PROCESS_STAGES } from '../../config/statsConfig'
 
 const W = 720
 const PAD = { top: 20, right: 24, bottom: 20, left: 108 }

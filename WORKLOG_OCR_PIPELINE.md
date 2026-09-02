@@ -44,7 +44,7 @@
 - If similarity is `>= 0.95`, the candidate can be accepted before VLM review.
 - Lower-similarity candidates still go to VLM.
 - The threshold is controlled by:
-  - `GRAPHLEC_SLIDE_OCR_SIMILARITY_THRESHOLD=0.83`
+  - `VLVERIFIER_SLIDE_OCR_SIMILARITY_THRESHOLD=0.83`
 
 ## Important Files
 - `ocr_service/Dockerfile`

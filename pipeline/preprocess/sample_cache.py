@@ -146,7 +146,7 @@ def _sample_cache_temp_root(
     *,
     estimated_cache_bytes: int,
 ) -> tuple[Path, str, int]:
-    mode = os.getenv("GRAPHLEC_SAMPLE_CACHE_STORAGE_MODE", "auto").strip().lower()
+    mode = os.getenv("VLVERIFIER_SAMPLE_CACHE_STORAGE_MODE", "auto").strip().lower()
     if mode not in {"auto", "ram", "disk"}:
         mode = "auto"
 
@@ -161,7 +161,7 @@ def _sample_cache_temp_root(
 
     total_memory = _available_memory_bytes()
     ram_threshold = 16 * 1024**3
-    ram_root = Path(os.getenv("GRAPHLEC_SAMPLE_CACHE_RAM_DIR", "/dev/shm"))
+    ram_root = Path(os.getenv("VLVERIFIER_SAMPLE_CACHE_RAM_DIR", "/dev/shm"))
     if mode == "ram" or (mode == "auto" and total_memory is not None and total_memory > ram_threshold):
         try:
             ram_root.mkdir(parents=True, exist_ok=True)
@@ -182,39 +182,39 @@ def _sample_cache_temp_root(
 
 @dataclass
 class SampleCacheConfig:
-    sample_every: int = _env_int("GRAPHLEC_SAMPLE_CACHE_EVERY", 2)
-    sample_fps: float = _env_float("GRAPHLEC_SAMPLE_CACHE_FPS", 10.0)
-    resize_width: int = _env_int("GRAPHLEC_SAMPLE_CACHE_RESIZE_WIDTH", 768)
+    sample_every: int = _env_int("VLVERIFIER_SAMPLE_CACHE_EVERY", 2)
+    sample_fps: float = _env_float("VLVERIFIER_SAMPLE_CACHE_FPS", 10.0)
+    resize_width: int = _env_int("VLVERIFIER_SAMPLE_CACHE_RESIZE_WIDTH", 768)
     jpeg_quality: int = 95
-    decode_backend: str = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
-    person_mask_batch_size: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_BATCH_SIZE", 32)
-    person_masks: bool = _env_bool("GRAPHLEC_SAMPLE_CACHE_PERSON_MASKS", True)
-    person_mask_model: str = os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MODEL", "/app/models/yolo26n.pt")
+    decode_backend: str = os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")
+    person_mask_batch_size: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_BATCH_SIZE", 32)
+    person_masks: bool = _env_bool("VLVERIFIER_SAMPLE_CACHE_PERSON_MASKS", True)
+    person_mask_model: str = os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MODEL", "/app/models/yolo26n.pt")
     person_mask_engine: str = os.getenv(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE",
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ENGINE",
         "/app/storage/models/yolo26n-fp16.engine",
     )
-    person_mask_workers: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_WORKERS", 4)
-    person_mask_task_sec: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_SEC", 480.0)
-    person_mask_task_overlap_sec: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TASK_OVERLAP_SEC", 5.0)
-    person_mask_engine_batch_size: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ENGINE_BATCH_SIZE", 32)
-    person_mask_roi_quantile: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_QUANTILE", 0.95)
-    person_mask_roi_recenter_px: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_RECENTER_PX", 120)
-    person_mask_roi_max_gap_sec: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_ROI_MAX_GAP_SEC", 2.0)
-    person_mask_gpu_min_free_mb: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MIN_FREE_MB", 0)
-    person_mask_gpu_stagger_sec: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_STAGGER_SEC", 0.0)
-    person_mask_gpu_wait_sec: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_WAIT_SEC", 0.5)
-    person_mask_conf: float = _env_float("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_CONF", 0.70)
+    person_mask_workers: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_WORKERS", 4)
+    person_mask_task_sec: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_TASK_SEC", 480.0)
+    person_mask_task_overlap_sec: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_TASK_OVERLAP_SEC", 5.0)
+    person_mask_engine_batch_size: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ENGINE_BATCH_SIZE", 32)
+    person_mask_roi_quantile: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ROI_QUANTILE", 0.95)
+    person_mask_roi_recenter_px: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ROI_RECENTER_PX", 120)
+    person_mask_roi_max_gap_sec: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_ROI_MAX_GAP_SEC", 2.0)
+    person_mask_gpu_min_free_mb: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MIN_FREE_MB", 0)
+    person_mask_gpu_stagger_sec: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_STAGGER_SEC", 0.0)
+    person_mask_gpu_wait_sec: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_WAIT_SEC", 0.5)
+    person_mask_conf: float = _env_float("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_CONF", 0.70)
     person_mask_min_bbox_height_ratio: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MIN_BBOX_HEIGHT_RATIO", 0.08
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MIN_BBOX_HEIGHT_RATIO", 0.08
     )
     person_mask_max_bbox_aspect: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_MAX_BBOX_ASPECT", 1.50
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MAX_BBOX_ASPECT", 1.50
     )
     # Detector boxes can miss a presenter's hair or outstretched hand.  The
     # fixed ROI must include this boundary motion or it leaks into annotation
     # detection as a tiny false write.
-    person_mask_dilate_px: int = _env_int("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_DILATE_PX", 48)
+    person_mask_dilate_px: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_DILATE_PX", 48)
     person_mask_static_diff_threshold: float = 1.0
     person_mask_static_changed_ratio_threshold: float = 0.003
     person_mask_match_iou_threshold: float = 0.05
@@ -222,19 +222,19 @@ class SampleCacheConfig:
     # from a single nearby detection turns static false positives into long
     # masks, so this is disabled unless a deployment explicitly opts in.
     person_mask_fill_gap_sec: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC", 0.0
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC", 0.0
     )
     person_mask_fixed_motion_min_mean_diff: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MOTION_MIN_MEAN_DIFF", 2.0
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MOTION_MIN_MEAN_DIFF", 2.0
     )
     person_mask_fixed_motion_min_changed_ratio: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MOTION_MIN_CHANGED_RATIO", 0.01
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MOTION_MIN_CHANGED_RATIO", 0.01
     )
     person_mask_fixed_min_center_shift_px: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX", 4.0
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_CENTER_SHIFT_PX", 4.0
     )
     person_mask_fixed_min_area_change_ratio: float = _env_float(
-        "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO", 0.08
+        "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FIXED_MIN_AREA_CHANGE_RATIO", 0.08
     )
     person_mask_active_ranges: list[tuple[float, float]] | None = field(default=None, repr=False)
     save_person_mask_previews: bool = False
@@ -367,7 +367,7 @@ def _wait_for_person_mask_gpu_gate(cfg: SampleCacheConfig, batch_size: int) -> N
     if min_free_mb <= 0 and stagger_sec <= 0.0:
         return
 
-    lock_path = Path(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_GATE_LOCK", "/tmp/vlverifier_person_mask_gpu_gate.lock"))
+    lock_path = Path(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_GATE_LOCK", "/tmp/vlverifier_person_mask_gpu_gate.lock"))
     stamp_path = lock_path.with_suffix(".stamp")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -420,12 +420,12 @@ def _run_person_model_serialized(model, frames: list[np.ndarray], conf: float):
     dynamic engine.  Queueing only the short inference call avoids CUDA
     dispatch crashes without serializing video decode.
     """
-    if not _env_bool("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_SERIALIZE", True):
+    if not _env_bool("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_SERIALIZE", True):
         return model(frames, classes=[0], conf=conf, verbose=False, stream=False)
 
     lock_path = Path(
         os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_GPU_EXEC_LOCK",
+            "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_EXEC_LOCK",
             "/tmp/vlverifier_person_mask_gpu_execute.lock",
         )
     )
@@ -455,11 +455,11 @@ def _acquire_person_mask_trt_context_slot() -> tuple[object, int]:
     """
     limit = max(
         1,
-        int(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXTS", "2")),
+        int(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXTS", "2")),
     )
     root = Path(
         os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXT_DIR",
+            "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_TRT_CONTEXT_DIR",
             "/tmp/vlverifier_person_mask_trt_context_slots",
         )
     )
@@ -526,18 +526,18 @@ def _run_person_presence_gate(
 
     interval_sec = max(
         1.0,
-        float(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC", "20")),
+        float(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC", "20")),
     )
     # The gate is an activation guard, not the final person-mask decision.
     # Keep it conservative against false negatives: one positive seek sample
     # is enough to enable masking for the whole chunk.
     min_hits = max(
         1,
-        int(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_MIN_HITS", "1")),
+        int(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_MIN_HITS", "1")),
     )
     gate_conf = max(
         0.10,
-        float(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_CONF", "0.45")),
+        float(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_CONF", "0.45")),
     )
     video_duration = float(video_meta.get("duration_sec") or 0.0)
     start_sec = max(0.0, float(start_sec))
@@ -548,7 +548,7 @@ def _run_person_presence_gate(
 
     width = int(video_meta["width"])
     height = int(video_meta["height"])
-    output_width = int(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_WIDTH", "384"))
+    output_width = int(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_WIDTH", "384"))
     output_height = int(height * (output_width / width))
     log.info(
         "person presence gate start: interval=%.1fs min_hits=%s conf=%.2f size=%sx%s mode=seek",
@@ -923,11 +923,11 @@ def _create_sample_cache_impl(
     person_model_warmed = False
     person_gate_interval_sec = max(
         1.0,
-        float(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC", "20")),
+        float(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC", "20")),
     )
     person_gate_conf = max(
         0.10,
-        float(os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_GATE_CONF", "0.45")),
+        float(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_CONF", "0.45")),
     )
     person_gate_next_timestamp = float(start_sec or 0.0)
     person_gate_active = False
@@ -937,7 +937,7 @@ def _create_sample_cache_impl(
     total_frame_count = max(1, int(video_meta.get("frame_count") or 1))
     detection_executor = ThreadPoolExecutor(max_workers=1) if masks_enabled else None
     detection_queue: list[tuple[list[dict], list[int], object]] = []
-    configured_inflight = os.getenv("GRAPHLEC_SAMPLE_CACHE_PERSON_MASK_INFLIGHT_BATCHES")
+    configured_inflight = os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_INFLIGHT_BATCHES")
     if configured_inflight is None:
         total_memory = _system_memory_bytes()
         default_inflight = 2 if total_memory is None or total_memory > 16 * 1024**3 else 1
@@ -2011,8 +2011,8 @@ def _assemble_chunk_caches(
 
     requested_workers = int(
         os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_MERGE_WORKERS",
-            os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2"),
+            "VLVERIFIER_SAMPLE_CACHE_MERGE_WORKERS",
+            os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2"),
         )
     )
     materialize_workers = max(1, min(requested_workers, len(specs) if specs else 1))
@@ -2083,7 +2083,7 @@ def _assemble_chunk_caches(
 
     mask_workers_requested = int(
         os.getenv(
-            "GRAPHLEC_SAMPLE_CACHE_MERGE_MASK_WORKERS",
+            "VLVERIFIER_SAMPLE_CACHE_MERGE_MASK_WORKERS",
             str(max(1, materialize_workers)),
         )
     )
@@ -2330,7 +2330,7 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
     captured before lossy MJPEG encoding with decoded pixels creates false
     mismatches and does not validate the virtual mapping.
     """
-    if os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_ALIGNMENT", "1").strip().lower() in {
+    if os.getenv("VLVERIFIER_SAMPLE_CACHE_VERIFY_ALIGNMENT", "1").strip().lower() in {
         "0", "false", "no", "off",
     }:
         return {"enabled": False, "ok": True, "checked": 0, "mismatches": []}
@@ -2339,8 +2339,8 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
     if not frames:
         return {"enabled": True, "ok": False, "checked": 0, "mismatches": ["empty_manifest"]}
 
-    stride = max(1, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_STRIDE", "25")))
-    max_hash_distance = max(0, int(os.getenv("GRAPHLEC_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")))
+    stride = max(1, int(os.getenv("VLVERIFIER_SAMPLE_CACHE_VERIFY_STRIDE", "25")))
+    max_hash_distance = max(0, int(os.getenv("VLVERIFIER_SAMPLE_CACHE_VERIFY_MAX_HASH_DISTANCE", "14")))
     target_positions = set(range(0, len(frames), stride))
     target_positions.add(len(frames) - 1)
 
@@ -2491,9 +2491,9 @@ def create_sample_cache_chunked(
     cfg.sample_every = max(1, int(cfg.sample_every))
     cfg.sample_fps = max(0.1, float(cfg.sample_fps))
     cfg.resize_width = max(160, int(cfg.resize_width))
-    chunk_sec = float(chunk_sec if chunk_sec is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300"))
-    overlap_sec = float(overlap_sec if overlap_sec is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30"))
-    requested_workers = int(workers if workers is not None else os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2"))
+    chunk_sec = float(chunk_sec if chunk_sec is not None else os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_SEC", "300"))
+    overlap_sec = float(overlap_sec if overlap_sec is not None else os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30"))
+    requested_workers = int(workers if workers is not None else os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2"))
 
     video_meta = read_video_metadata(input_path)
     duration = float(video_meta.get("duration_sec") or 0.0)
@@ -2508,11 +2508,11 @@ def create_sample_cache_chunked(
     workers = max(1, min(requested_workers, len(specs)))
     available_memory = _available_memory_bytes()
     if available_memory is not None:
-        reserve_bytes = int(float(os.getenv("GRAPHLEC_SAMPLE_CACHE_WORKER_MEMORY_RESERVE_GB", "1.5")) * 1024**3)
+        reserve_bytes = int(float(os.getenv("VLVERIFIER_SAMPLE_CACHE_WORKER_MEMORY_RESERVE_GB", "1.5")) * 1024**3)
         default_worker_mb = 2560 if cfg.person_masks else 1024
         worker_bytes = max(
             256 * 1024**2,
-            int(os.getenv("GRAPHLEC_SAMPLE_CACHE_WORKER_MEMORY_MB", str(default_worker_mb))) * 1024**2,
+            int(os.getenv("VLVERIFIER_SAMPLE_CACHE_WORKER_MEMORY_MB", str(default_worker_mb))) * 1024**2,
         )
         memory_workers = max(1, int(max(0, available_memory - reserve_bytes) // worker_bytes))
         if workers > memory_workers:
@@ -2886,9 +2886,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-person-mask-previews", action="store_true", help="Save a few masked sample preview JPGs for debugging")
     parser.add_argument("--person-mask-preview-limit", type=int, default=SampleCacheConfig.person_mask_preview_limit)
     parser.add_argument("--chunked", action="store_true", help="Build sample cache by 5-minute chunks and merge it back")
-    parser.add_argument("--chunk-sec", type=float, default=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300")))
-    parser.add_argument("--chunk-overlap-sec", type=float, default=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")))
-    parser.add_argument("--chunk-workers", type=int, default=int(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2")))
+    parser.add_argument("--chunk-sec", type=float, default=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_SEC", "300")))
+    parser.add_argument("--chunk-overlap-sec", type=float, default=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")))
+    parser.add_argument("--chunk-workers", type=int, default=int(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2")))
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 

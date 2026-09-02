@@ -76,21 +76,21 @@ class Config:
     # ── scene base 구조 비교 ─────────────────────────────────────────
     # 반복 PPT 템플릿에서 pHash만으로 놓치는 장면 전환을 보완한다.
     BASE_HASH_THRESHOLD          = 8     # scene_base_phash ↔ current phash 거리 임계
-    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("GRAPHLEC_SCENE_BASE_MSE_THRESHOLD", "350"))
-    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("GRAPHLEC_SCENE_BASE_CHANGED_RATIO", "0.045"))
-    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("GRAPHLEC_SCENE_STRONG_CHANGED_RATIO", "0.10"))
-    CONTENT_CROP_LEFT            = float(os.getenv("GRAPHLEC_CONTENT_CROP_LEFT", "0.05"))
-    CONTENT_CROP_TOP             = float(os.getenv("GRAPHLEC_CONTENT_CROP_TOP", "0.05"))
-    CONTENT_CROP_RIGHT           = float(os.getenv("GRAPHLEC_CONTENT_CROP_RIGHT", "0.95"))
-    CONTENT_CROP_BOTTOM          = float(os.getenv("GRAPHLEC_CONTENT_CROP_BOTTOM", "0.95"))
+    SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("VLVERIFIER_SCENE_BASE_MSE_THRESHOLD", "350"))
+    SCENE_BASE_CHANGED_RATIO     = float(os.getenv("VLVERIFIER_SCENE_BASE_CHANGED_RATIO", "0.045"))
+    SCENE_STRONG_CHANGED_RATIO   = float(os.getenv("VLVERIFIER_SCENE_STRONG_CHANGED_RATIO", "0.10"))
+    CONTENT_CROP_LEFT            = float(os.getenv("VLVERIFIER_CONTENT_CROP_LEFT", "0.05"))
+    CONTENT_CROP_TOP             = float(os.getenv("VLVERIFIER_CONTENT_CROP_TOP", "0.05"))
+    CONTENT_CROP_RIGHT           = float(os.getenv("VLVERIFIER_CONTENT_CROP_RIGHT", "0.95"))
+    CONTENT_CROP_BOTTOM          = float(os.getenv("VLVERIFIER_CONTENT_CROP_BOTTOM", "0.95"))
     # Clear-reset detection must ignore presentation toolbars, which commonly
     # occupy the lower edge while annotations are being erased.
-    CLEAR_RESET_CROP_BOTTOM      = float(os.getenv("GRAPHLEC_CLEAR_RESET_CROP_BOTTOM", "0.90"))
+    CLEAR_RESET_CROP_BOTTOM      = float(os.getenv("VLVERIFIER_CLEAR_RESET_CROP_BOTTOM", "0.90"))
     SAME_SCENE_EDGE_PRESERVE_THRESHOLD = float(
-        os.getenv("GRAPHLEC_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
+        os.getenv("VLVERIFIER_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
     )
     SAME_SCENE_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
+        os.getenv("VLVERIFIER_SAME_SCENE_CHANGED_RATIO_MAX", "0.32")
     )
 
     # ── 중복 슬라이드 감지 (후처리) ──────────────────────────────────
@@ -99,38 +99,38 @@ class Config:
     #   - 실제 동일 슬라이드 쌍의 dist → 이 값보다 크게
     #   - 실제 다른 슬라이드 쌍의 dist → 이 값보다 작게
     DUPLICATE_HASH_THRESHOLD     = 30    # 초기값, 로그 확인 후 조정 필요
-    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("GRAPHLEC_DUPLICATE_DHASH_THRESHOLD", "34"))
-    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
-    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
+    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("VLVERIFIER_DUPLICATE_DHASH_THRESHOLD", "34"))
+    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("VLVERIFIER_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
+    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("VLVERIFIER_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
     DUPLICATE_CONTENT_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
+        os.getenv("VLVERIFIER_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
     )
     DUPLICATE_CONTENT_EDGE_OVERLAP_MIN = float(
-        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
+        os.getenv("VLVERIFIER_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
     )
-    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
-    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
-    DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
-    AGENDA_TEXT_GUARD_ENABLED = os.getenv("GRAPHLEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
-    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
-    AGENDA_TEXT_XOR_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_XOR_MAX", "0.045"))
+    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("VLVERIFIER_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
+    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("VLVERIFIER_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
+    DUPLICATE_FULL_HIST_MIN = float(os.getenv("VLVERIFIER_DUPLICATE_FULL_HIST_MIN", "0.95"))
+    AGENDA_TEXT_GUARD_ENABLED = os.getenv("VLVERIFIER_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
+    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("VLVERIFIER_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
+    AGENDA_TEXT_XOR_MAX = float(os.getenv("VLVERIFIER_AGENDA_TEXT_XOR_MAX", "0.045"))
     BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
     )
     BUILD_CANDIDATE_CHANGED_RATIO_MAX = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
     )
     BUILD_CANDIDATE_CONTENT_MSE_MAX = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
     )
     BUILD_CANDIDATE_CONTENT_HIST_MIN = float(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
     )
     BUILD_CANDIDATE_CONTENT_HASH_MAX = int(
-        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
+        os.getenv("VLVERIFIER_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
     )
 
     # ── 필기 감지 ────────────────────────────────────────────────────
@@ -141,24 +141,24 @@ class Config:
     # ── 안정화 판단 ──────────────────────────────────────────────────
     STABILITY_WINDOW_SEC         = 0.7
     MIN_ANNOT_DURATION_SEC       = 0.2
-    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("GRAPHLEC_SCENE_CAPTURE_DELAY_SEC", "0.8"))
-    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("GRAPHLEC_SCENE_STABLE_MSE_THRESHOLD", "80"))
-    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("GRAPHLEC_SCENE_STABLE_HASH_THRESHOLD", "4"))
-    SCENE_PENDING_MAX_SEC        = float(os.getenv("GRAPHLEC_SCENE_PENDING_MAX_SEC", "2.0"))
-    MIN_SLIDE_DURATION_SEC       = float(os.getenv("GRAPHLEC_MIN_SLIDE_DURATION_SEC", "3.0"))
+    SCENE_CAPTURE_DELAY_SEC      = float(os.getenv("VLVERIFIER_SCENE_CAPTURE_DELAY_SEC", "0.8"))
+    SCENE_STABLE_MSE_THRESHOLD   = float(os.getenv("VLVERIFIER_SCENE_STABLE_MSE_THRESHOLD", "80"))
+    SCENE_STABLE_HASH_THRESHOLD  = int(os.getenv("VLVERIFIER_SCENE_STABLE_HASH_THRESHOLD", "4"))
+    SCENE_PENDING_MAX_SEC        = float(os.getenv("VLVERIFIER_SCENE_PENDING_MAX_SEC", "2.0"))
+    MIN_SLIDE_DURATION_SEC       = float(os.getenv("VLVERIFIER_MIN_SLIDE_DURATION_SEC", "3.0"))
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
     # 전역 판정/annotation 감지는 이 해상도로 수행한다.
     # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많다.
-    DECISION_RESIZE_WIDTH        = int(os.getenv("GRAPHLEC_SLIDE_DECISION_WIDTH", "768"))
+    DECISION_RESIZE_WIDTH        = int(os.getenv("VLVERIFIER_SLIDE_DECISION_WIDTH", "768"))
     RESIZE_WIDTH                 = 960
-    DECODE_BACKEND               = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
-    FFMPEG_HWACCEL               = os.getenv("GRAPHLEC_FFMPEG_HWACCEL", "cuda")
+    DECODE_BACKEND               = os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")
+    FFMPEG_HWACCEL               = os.getenv("VLVERIFIER_FFMPEG_HWACCEL", "cuda")
     # 서버/로컬 공통 정책: 슬라이드 추출은 항상 5분 단위 청크 병렬 처리
     EXTRACT_CHUNK_SEC            = 300.0
     EXTRACT_CHUNK_OVERLAP_SEC    = 3.0
-    EXTRACT_WORKERS              = int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0"))
+    EXTRACT_WORKERS              = int(os.getenv("VLVERIFIER_SLIDE_EXTRACT_WORKERS", "0"))
 
 
 # ──────────────────────────────────────────────
@@ -754,7 +754,7 @@ def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
                 "-loglevel",
                 "error",
                 "-init_hw_device",
-                "cuda=graphlec_cuda",
+                "cuda=vlverifier_cuda",
                 "-f",
                 "lavfi",
                 "-i",
@@ -1864,7 +1864,7 @@ def _extract_slides_legacy(
         + (" (auto)" if requested_workers <= 0 else "")
     )
 
-    with tempfile.TemporaryDirectory(prefix="graphlec_slide_chunks_") as temp_root:
+    with tempfile.TemporaryDirectory(prefix="vlverifier_slide_chunks_") as temp_root:
         temp_root_path = Path(temp_root)
         manifest_paths: dict[int, Path] = {}
 
@@ -2004,9 +2004,9 @@ def _extract_slides_staged(
         input_path,
         str(cache_dir),
         cfg=sample_cache_cfg,
-        chunk_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_SEC", "300")),
-        overlap_sec=float(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")),
-        workers=int(os.getenv("GRAPHLEC_SAMPLE_CACHE_CHUNK_WORKERS", "2")),
+        chunk_sec=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_SEC", "300")),
+        overlap_sec=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")),
+        workers=int(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2")),
     )
     log.info("  Step 0 done: sample cache 생성 elapsed=%.1fs", _elapsed(step_t0))
 
@@ -2353,7 +2353,7 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
     fps, total_frames, frame_width, frame_height = _video_metadata(input_path)
 
     saved_frame_nos: set[int] = set()
-    random_seek_enabled = os.getenv("GRAPHLEC_FINAL_MATERIALIZE_RANDOM_SEEK", "1") != "0"
+    random_seek_enabled = os.getenv("VLVERIFIER_FINAL_MATERIALIZE_RANDOM_SEEK", "1") != "0"
     sparse_target = total_frames > 0 and len(frame_targets) <= max(500, int(total_frames * 0.02))
     if random_seek_enabled and sparse_target:
         saved_frame_nos = _materialize_by_random_seek(input_path, out_path, frame_targets)
@@ -2440,7 +2440,7 @@ def _verify_materialized_metadata_frames(input_path: str, out_path: Path, metada
     metadata.json still looks internally consistent. Re-read sparse targets,
     compare their pHash with the saved image, and repair mismatches in place.
     """
-    if os.getenv("GRAPHLEC_VERIFY_FINAL_MATERIALIZE", "1") == "0":
+    if os.getenv("VLVERIFIER_VERIFY_FINAL_MATERIALIZE", "1") == "0":
         return
 
     targets: dict[int, list[dict]] = {}
@@ -2577,7 +2577,7 @@ def reparent_annotations_to_next_base(
     allowed to change ownership.  This prevents a normal handwritten frame
     from being moved merely because the next slide shares a template.
     """
-    if os.getenv("GRAPHLEC_REPARENT_MISSED_ANNOTATIONS", "1").strip().lower() in {
+    if os.getenv("VLVERIFIER_REPARENT_MISSED_ANNOTATIONS", "1").strip().lower() in {
         "0", "false", "no", "off",
     }:
         return metadata
@@ -2682,8 +2682,8 @@ def reparent_annotations_to_next_base(
 def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dict]:
     """Optionally run LocalVLM review after candidate generation.
 
-    GRAPHLEC_VLM_ENABLED=1 writes llm_review_results.json.
-    GRAPHLEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
+    VLVERIFIER_VLM_ENABLED=1 writes llm_review_results.json.
+    VLVERIFIER_VLM_APPLY=1 additionally applies confident decisions to metadata.
     """
     try:
         from .local_vlm import (
@@ -2790,8 +2790,8 @@ def collapse_contiguous_same_slide_scenes(
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
-    min_confidence = float(os.getenv("GRAPHLEC_VLM_MIN_CONFIDENCE", "0.75"))
-    merge_min_confidence = float(os.getenv("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", "0.85"))
+    min_confidence = float(os.getenv("VLVERIFIER_VLM_MIN_CONFIDENCE", "0.75"))
+    merge_min_confidence = float(os.getenv("VLVERIFIER_VLM_MERGE_MIN_CONFIDENCE", "0.85"))
     approved_pairs: set[tuple[int, int]] = set()
     approved_build_pairs: set[tuple[int, int]] = set()
     approved_annotation_pairs: set[tuple[int, int]] = set()
@@ -3865,20 +3865,20 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     # implementation. The old implementation is preserved as
     # mark_visual_duplicates_sequential() and is used automatically on failure.
 
-    if os.getenv("GRAPHLEC_DUPLICATE_PARALLEL", "1") == "0":
+    if os.getenv("VLVERIFIER_DUPLICATE_PARALLEL", "1") == "0":
         return mark_visual_duplicates_sequential(metadata, out_path, cfg)
 
     from collections import defaultdict
     import time
 
     started_at = time.perf_counter()
-    requested_workers = max(1, int(os.getenv("GRAPHLEC_DUPLICATE_WORKERS", "100")))
+    requested_workers = max(1, int(os.getenv("VLVERIFIER_DUPLICATE_WORKERS", "100")))
     try:
         available_cpus = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         available_cpus = os.cpu_count() or 1
     workers = min(requested_workers, max(1, available_cpus))
-    log_pairs = os.getenv("GRAPHLEC_DUPLICATE_LOG_PAIRS", "0") == "1"
+    log_pairs = os.getenv("VLVERIFIER_DUPLICATE_LOG_PAIRS", "0") == "1"
 
     try:
         cache_dir = out_path.parent / "sample_cache"
@@ -5212,7 +5212,7 @@ if __name__ == "__main__":
         "--decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
         default=Config.DECODE_BACKEND,
-        help="프레임 디코드 백엔드 선택 (default: 환경변수 GRAPHLEC_SLIDE_DECODE_BACKEND 또는 opencv)",
+        help="프레임 디코드 백엔드 선택 (default: 환경변수 VLVERIFIER_SLIDE_DECODE_BACKEND 또는 opencv)",
     )
     parser.add_argument(
         "--legacy",

@@ -117,39 +117,39 @@ def env_int(name: str, default: int) -> int:
 
 
 def local_vlm_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_ENABLED", False)
+    return env_bool("VLVERIFIER_VLM_ENABLED", False)
 
 
 def local_vlm_apply_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_APPLY", False)
+    return env_bool("VLVERIFIER_VLM_APPLY", False)
 
 
 def local_vlm_worker_count(candidate_count: int) -> int:
     if candidate_count <= 1:
         return 1
-    workers = env_int("GRAPHLEC_VLM_WORKERS", 2)
+    workers = env_int("VLVERIFIER_VLM_WORKERS", 2)
     return max(1, min(workers, candidate_count))
 
 
 def local_vlm_batch_image_limit() -> int:
     timeline_images = local_vlm_timeline_context_images()
-    return max(1, env_int("GRAPHLEC_VLM_BATCH_IMAGES", 10), timeline_images)
+    return max(1, env_int("VLVERIFIER_VLM_BATCH_IMAGES", 10), timeline_images)
 
 
 def local_vlm_batch_overlap_images() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_BATCH_OVERLAP_IMAGES", 0))
+    return max(0, env_int("VLVERIFIER_VLM_BATCH_OVERLAP_IMAGES", 0))
 
 
 def local_vlm_batch_candidate_limit() -> int:
-    return max(1, env_int("GRAPHLEC_VLM_BATCH_CANDIDATES", 5))
+    return max(1, env_int("VLVERIFIER_VLM_BATCH_CANDIDATES", 5))
 
 
 def local_vlm_timeline_context_images() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_TIMELINE_CONTEXT_IMAGES", 10))
+    return max(0, env_int("VLVERIFIER_VLM_TIMELINE_CONTEXT_IMAGES", 10))
 
 
 def local_vlm_auto_build_candidates_enabled() -> bool:
-    return env_bool("GRAPHLEC_VLM_AUTO_BUILD_CANDIDATES", True)
+    return env_bool("VLVERIFIER_VLM_AUTO_BUILD_CANDIDATES", True)
 
 
 def _image_b64(path: Path) -> str:
@@ -157,7 +157,7 @@ def _image_b64(path: Path) -> str:
 
 
 def _vlm_image_width() -> int:
-    return max(0, env_int("GRAPHLEC_VLM_IMAGE_WIDTH", 768))
+    return max(0, env_int("VLVERIFIER_VLM_IMAGE_WIDTH", 768))
 
 
 def _image_b64_for_vlm(path: Path) -> str:
@@ -257,7 +257,7 @@ def adjacent_ocr_similarity_threshold() -> float:
         0.0,
         min(
             1.0,
-            env_float("GRAPHLEC_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD", 0.83),
+            env_float("VLVERIFIER_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD", 0.83),
         ),
     )
 
@@ -1232,12 +1232,12 @@ def _prompt(candidate: dict[str, Any], ocr_hint_text: str = "") -> str:
 class OllamaVLMProvider:
     def __init__(self):
         self.base_url = self._next_base_url()
-        self.model = os.getenv("GRAPHLEC_OLLAMA_MODEL", "qwen3.5:9b")
+        self.model = os.getenv("VLVERIFIER_OLLAMA_MODEL", "qwen3.5:9b")
 
     @staticmethod
     def _base_urls() -> list[str]:
-        raw = os.getenv("GRAPHLEC_OLLAMA_BASE_URLS") or os.getenv(
-            "GRAPHLEC_OLLAMA_BASE_URL",
+        raw = os.getenv("VLVERIFIER_OLLAMA_BASE_URLS") or os.getenv(
+            "VLVERIFIER_OLLAMA_BASE_URL",
             "http://host.docker.internal:11434",
         )
         urls = [url.strip().rstrip("/") for url in raw.split(",") if url.strip()]
@@ -1277,8 +1277,8 @@ class OllamaVLMProvider:
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("VLVERIFIER_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("VLVERIFIER_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1288,7 +1288,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("VLVERIFIER_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1326,8 +1326,8 @@ class OllamaVLMProvider:
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0),
-                "num_predict": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+                "temperature": env_float("VLVERIFIER_VLM_TEMPERATURE", 0.0),
+                "num_predict": env_int("VLVERIFIER_VLM_NUM_PREDICT", 1024),
             },
         }
         data = json.dumps(payload).encode("utf-8")
@@ -1337,7 +1337,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 180.0)
+        timeout = env_float("VLVERIFIER_VLM_TIMEOUT_SEC", 180.0)
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = _response_content(body)
@@ -1402,11 +1402,11 @@ class OllamaVLMProvider:
 
 class OpenAICompatibleVLMProvider:
     def __init__(self):
-        self.base_url = os.getenv("GRAPHLEC_OPENAI_BASE_URL", "http://host.docker.internal:8000/v1").rstrip("/")
-        self.api_key = os.getenv("GRAPHLEC_OPENAI_API_KEY", "none")
+        self.base_url = os.getenv("VLVERIFIER_OPENAI_BASE_URL", "http://host.docker.internal:8000/v1").rstrip("/")
+        self.api_key = os.getenv("VLVERIFIER_OPENAI_API_KEY", "none")
         self.model = os.getenv(
-            "GRAPHLEC_OPENAI_MODEL",
-            os.getenv("GRAPHLEC_OLLAMA_MODEL", "google/diffusiongemma-26B-A4B-it"),
+            "VLVERIFIER_OPENAI_MODEL",
+            os.getenv("VLVERIFIER_OLLAMA_MODEL", "google/diffusiongemma-26B-A4B-it"),
         )
 
     @staticmethod
@@ -1435,14 +1435,14 @@ class OpenAICompatibleVLMProvider:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
-            "max_completion_tokens": env_int("GRAPHLEC_VLM_NUM_PREDICT", 1024),
+            "max_completion_tokens": env_int("VLVERIFIER_VLM_NUM_PREDICT", 1024),
         }
         # GPT-5.6 models accept only their server-side default temperature.
         # Sending the inherited LocalVLM default (0.0) makes every request,
         # including the single-candidate fallback, fail with HTTP 400.
         if not self.model.strip().lower().startswith("gpt-5.6"):
-            payload["temperature"] = env_float("GRAPHLEC_VLM_TEMPERATURE", 0.0)
-        if env_bool("GRAPHLEC_OPENAI_RESPONSE_FORMAT", True):
+            payload["temperature"] = env_float("VLVERIFIER_VLM_TEMPERATURE", 0.0)
+        if env_bool("VLVERIFIER_OPENAI_RESPONSE_FORMAT", True):
             payload["response_format"] = {"type": "json_object"}
 
         data = json.dumps(payload).encode("utf-8")
@@ -1455,7 +1455,7 @@ class OpenAICompatibleVLMProvider:
             },
             method="POST",
         )
-        timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 600.0)
+        timeout = env_float("VLVERIFIER_VLM_TIMEOUT_SEC", 600.0)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
@@ -1556,13 +1556,13 @@ class OpenAICompatibleVLMProvider:
 
 
 def load_provider():
-    provider = os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama").strip().lower()
+    provider = os.getenv("VLVERIFIER_VLM_PROVIDER", "ollama").strip().lower()
     if provider == "ollama":
         return OllamaVLMProvider()
     if provider in {"openai", "openai-compatible", "openai_compatible", "vllm", "sglang"}:
         return OpenAICompatibleVLMProvider()
     raise ValueError(
-        f"unsupported GRAPHLEC_VLM_PROVIDER={provider!r}; "
+        f"unsupported VLVERIFIER_VLM_PROVIDER={provider!r}; "
         "supported providers: 'ollama', 'openai'"
     )
 
@@ -2160,7 +2160,7 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
             and _is_adjacent_scene_pair({"scene_indices": scenes})
             and decision in {"same_slide_build", "same_slide_annotation", "same_slide_duplicate"}
             and result.get("should_merge_slide_group")
-            and confidence >= env_float("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", 0.95)
+            and confidence >= env_float("VLVERIFIER_VLM_MERGE_MIN_CONFIDENCE", 0.95)
         ):
             provisional_union(scenes[0], scenes[1])
             adjacent_vlm_merges += 1
@@ -2236,8 +2236,8 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
     payload = {
         "status": "ok" if not errors else "partial",
-        "provider": os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama"),
-        "model": os.getenv("GRAPHLEC_OLLAMA_MODEL", "qwen3.5:9b"),
+        "provider": os.getenv("VLVERIFIER_VLM_PROVIDER", "ollama"),
+        "model": os.getenv("VLVERIFIER_OLLAMA_MODEL", "qwen3.5:9b"),
         "candidate_count": len(candidates),
         "reviewed_candidate_count": total_candidates,
         "prefiltered_count": len(prefiltered_results),
@@ -2291,8 +2291,8 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
 
 def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    min_confidence = env_float("GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE", 0.65)
-    merge_min_confidence = max(min_confidence, env_float("GRAPHLEC_VLM_MERGE_MIN_CONFIDENCE", 0.95))
+    min_confidence = env_float("VLVERIFIER_VLM_APPLY_MIN_CONFIDENCE", 0.65)
+    merge_min_confidence = max(min_confidence, env_float("VLVERIFIER_VLM_MERGE_MIN_CONFIDENCE", 0.95))
     results = review_payload.get("results", [])
 
     scenes = sorted({int(item.get("scene_index")) for item in metadata if item.get("scene_index") is not None})

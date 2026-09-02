@@ -305,11 +305,11 @@ def _openai_prompt_cache_key(stage: str) -> str | None:
     base = (
         os.getenv("VERIFIER_OPENAI_PROMPT_CACHE_KEY", "")
         or os.getenv("OPENAI_PROMPT_CACHE_KEY", "")
-        or "graphlec-verifier"
+        or "vlverifier-verifier"
     ).strip()
     if base.lower() in {"", "0", "false", "off", "none"}:
         return None
-    safe_base = re.sub(r"[^A-Za-z0-9_.:-]+", "-", base).strip("-") or "graphlec-verifier"
+    safe_base = re.sub(r"[^A-Za-z0-9_.:-]+", "-", base).strip("-") or "vlverifier-verifier"
     safe_stage = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(stage or "default")).strip("-") or "default"
     return f"{safe_base}:{safe_stage}"[:128]
 
