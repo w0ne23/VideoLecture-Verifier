@@ -202,22 +202,12 @@ def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
         base_url = str(source_endpoint.get("base_url") or "").strip()
         if base_url:
             params["api_base"] = base_url
-        source_provider = _endpoint_provider(source_endpoint)
-        web_search_supported = source_provider in {
-            "openai",
-            "xai",
-            "anthropic",
-            "gemini",
-            "vertex_ai",
-            "perplexity",
-        }
         body = json.dumps({
             "model_name": alias,
             "litellm_params": params,
             "model_info": {
                 "id": alias,
                 "managed_by": "verilec",
-                "supports_web_search": web_search_supported,
             },
         }).encode("utf-8")
         request = urllib.request.Request(
@@ -614,22 +604,16 @@ def _call_openai_compatible(
         or model_spec
     ).strip()
 
-    if web_search and source_provider in {
-        "openai",
-        "xai",
-        "anthropic",
-        "gemini",
-        "vertex_ai",
-        "perplexity",
-    }:
+    if web_search:
         context_size = str(web_search_context_size or "medium").strip().lower()
         if context_size not in {"low", "medium", "high"}:
             context_size = "medium"
         max_calls = max(1, int(web_search_max_calls or 1))
 
-        # LiteLLM exposes provider-native web-search forms. Regular OpenAI
-        # models use Responses; dedicated search models and other supported
-        # providers use Chat Completions with provider-specific search options.
+        # LiteLLM is the capability boundary for web search. The application
+        # must not maintain a provider allowlist: new providers and provider
+        # model variants should reach the gateway and be accepted or rejected
+        # by LiteLLM's own adapter/capability registry.
         is_openai_search_model = source_provider == "openai" and any(
             marker in source_model.lower()
             for marker in ("search-preview", "search_api", "search-api")
@@ -657,10 +641,11 @@ def _call_openai_compatible(
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_tokens,
-                # OpenAI's SDK requires provider-specific unknown fields to be
-                # placed in extra_body when talking to an OpenAI-compatible
-                # proxy. LiteLLM then translates this for xAI/Anthropic/Gemini
-                # and supported OpenAI search models.
+                # OpenAI's SDK requires provider-specific fields to be placed
+                # in extra_body when talking to an OpenAI-compatible proxy.
+                # LiteLLM owns the translation to the selected upstream
+                # provider; this request is intentionally sent for every
+                # configured provider instead of being filtered here.
                 "extra_body": {
                     "web_search_options": {
                         "search_context_size": context_size,
@@ -676,7 +661,8 @@ def _call_openai_compatible(
         usage.update(_web_search_metadata(response))
         usage["web_search_provider"] = source_provider
         usage["web_search_model"] = source_model
-        usage["web_search_mode"] = "native"
+        usage["web_search_mode"] = "litellm_gateway"
+        usage["web_search_requested"] = True
         return text, usage
 
     options = endpoint.get("provider_options") if isinstance(endpoint.get("provider_options"), dict) else {}
