@@ -1,3 +1,4 @@
+# 이미지 빌드 컨텍스트에서 제외 — node_modules 는 컨테이너에서 npm ci 로 새로 설치
 node_modules
 dist
 .DS_Store
