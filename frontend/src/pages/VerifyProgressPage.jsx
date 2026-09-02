@@ -1,3 +1,6 @@
+// 검증 진행 화면 — 다이어그램(DiagramPipeline) + 진행 중 단계별 진행 바 + 경과 시간
+// job 상태는 useJobStream(SSE), 완료되면 결과 화면으로 리다이렉트
+
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { PHASES } from '../components/verifier/verifierConstants'
@@ -14,22 +17,19 @@ import {
 import { useJobStream } from '../hooks/useJobStream'
 import { useElapsedStopwatch } from '../hooks/useElapsedStopwatch'
 
-// done으로 바뀐 단계를 곧바로 목록에서 빼면 "끝까지 채워졌다"는 걸 확인할 틈이 없다.
-// HOLD_MS 동안 100%로 붙잡아 두고, 그 다음 FADE_MS 동안 옵아시티를 0으로 내린 뒤에야
-// 목록에서 뺀다.
+// done 된 단계를 곧바로 목록에서 빼면 "끝까지 채워졌다"를 볼 틈이 없음
+// → HOLD_MS 동안 100% 로 붙잡고, FADE_MS 동안 투명도를 0 으로 내린 뒤 목록에서 제거
 const HOLD_MS = 900
 const FADE_MS = 350
-// 실측 진행률이 없는 단계가 진행 중에 도달할 수 있는 최대치. 100으로 두면 실제로는
-// 안 끝났는데 "완료"처럼 보이는 순간이 생기므로, 진행 중에는 여기서 멈춘다.
+// 실측 진행률이 없는 단계가 진행 중 도달할 수 있는 최대치
+// 100 이면 실제로 안 끝났는데 "완료"처럼 보이는 순간이 생기므로 진행 중에는 여기서 멈춤
 const SIMULATED_CAP_PCT = 92
 
-// 배치 진행률을 실제로 보고하는 단계들(pipeline/*.py에서 progress 튜플을 보내는 stage에
-// 대응하는 노드 id). 이 목록에 있는 단계는 "아직 첫 진행 신호가 안 왔을 뿐"이지 배치가
-// 없는 게 아니다 — 이 차이를 구분하지 않으면, 아직 첫 신호가 오기 전(예: 첫 슬라이드
-// VLM 응답이 6초 넘게 걸리는 동안)에는 progress가 null이라서 "배치 없는 단계"로 오인해
-// SIMULATED_CAP_PCT까지 채워버리고, 막상 첫 실측값(예: 1/12=8%)이 도착하면 갑자기
-// 아래로 떨어지는 것처럼 보인다. 그래서 이 목록에 있는 단계는 progress가 아직 없어도
-// 0%로 대기할 뿐 가짜로 채우지 않는다.
+// 배치 진행률을 실제로 보고하는 단계들 (pipeline/*.py 가 progress 튜플을 보내는 stage 노드 id)
+// 이 목록의 단계는 "아직 첫 진행 신호가 안 왔을 뿐" 배치가 없는 게 아님 —
+// 구분하지 않으면 첫 신호 전(예: 첫 슬라이드 VLM 응답 대기 중)에 progress 가 null 이라
+// "배치 없는 단계"로 오인해 SIMULATED_CAP_PCT 까지 채웠다가, 첫 실측값(1/12=8%)이 오면 뚝 떨어져 보임
+// → 이 목록의 단계는 progress 가 없어도 0% 로 대기, 가짜로 채우지 않음
 const STAGES_WITH_BATCH_PROGRESS = new Set([
   'slide_extract',
   'audio_quality',
@@ -44,9 +44,8 @@ const STAGES_WITH_BATCH_PROGRESS = new Set([
   'syntax_verify',
 ])
 
-// 진행 바가 처음 나타날 때 이미 몇 %가 찬 상태로 "툭" 등장하지 않도록, 마운트 첫 프레임은
-// 항상 0에서 시작해서 다음 프레임에 실제 값으로 옮겨간다 — 이후 값이 바뀔 때는 그냥 그대로
-// 반영하면 같은 DOM 노드라 CSS transition이 자연스럽게 애니메이션한다.
+// 진행 바가 몇 % 찬 상태로 "툭" 등장하지 않도록, 마운트 첫 프레임은 0 에서 시작해
+// 다음 프레임에 실제 값으로 이동 — 이후 값 변경은 같은 DOM 노드라 CSS transition 이 처리
 function useMountGrowth(target) {
   const [display, setDisplay] = useState(0)
   const mountedRef = useRef(false)
@@ -61,14 +60,11 @@ function useMountGrowth(target) {
   return display
 }
 
-// 하나의 진행 바가 겪는 모든 상태(실측 %로 채워짐 / 배치 정보 없이 0→100%로 채워짐 /
-// 완료 유예)를 전부 이 컴포넌트 하나로 그린다 — 상태가 바뀌어도 같은 DOM 노드를 그대로
-// 쓰기 때문에 폭이 바뀔 때마다 CSS transition이 자연스럽게 애니메이션한다.
-// - 배치가 있는 단계: 완료/전체 비율로 pct가 오고, 값이 바뀔 때마다 짧게(450ms) 움직인다.
-// - 배치가 없는 단계(예: 검증 입력 데이터 구성): 실측 %를 모르므로 정해진 시간에 걸쳐
-//   0%에서 100%까지 채운다 — 짧게 끝나는 실제 단계는 100%에 먼저 도달해 잠깐 멈춰
-//   있을 수 있지만, 특정 %에서 멈춰 서있는 것보다는 계속 차오르는 쪽이 자연스럽다.
-// - 완료 유예(hold): pct=100으로 고정, 항상 빠른(450ms) transition으로 마무리한다.
+// 진행 바 하나 — 여러 상태(실측 % / 배치 없이 0→100% / 완료 유예)를 이 컴포넌트 하나로 처리
+// 상태가 바뀌어도 같은 DOM 노드라 폭 변경 시 CSS transition 이 자연스럽게 이어짐
+// - 배치 있는 단계: 완료/전체 비율 pct, 값 바뀔 때마다 짧게(450ms) 이동
+// - 배치 없는 단계(예: 검증 입력 데이터 구성): 실측 % 없어 정해진 시간에 걸쳐 0→100%
+// - 완료 유예(hold): pct=100 고정, 빠른 transition 으로 마무리
 function FillBar({ toneClass, pct, transitionClass, fading }) {
   const displayPct = useMountGrowth(pct)
   return (
@@ -78,43 +74,34 @@ function FillBar({ toneClass, pct, transitionClass, fading }) {
   )
 }
 
+// 단계 상태(completed / 실측 progress / 배치 대기 / 배치 없음)에 따라 FillBar 의 pct 결정
 function StageProgressBar({ id, toneClass, progress, completed, fading }) {
   if (completed) {
     return <FillBar toneClass={toneClass} pct={100} transitionClass="vf-stage-bar-fill--metered" fading={fading} />
   }
   if (progress) {
-    // 100은 "완료됨"으로 읽히므로 실제로 done이 와서 completed 분기로 넘어가기 전까지는
-    // 99에서 멈춘다. 대부분의 단계는 마지막 배치 항목이 끝나자마자 done도 같이 오니 거의
-    // 안 보이지만, 음성 전사(voice_transcribe)처럼 배치(P2B 전사)가 다 끝난 뒤에도 done 안
-    // 나는 후처리(P3 오디오 context 후처리)가 남아있는 단계는 이 캡이 없으면 배치가 끝난
-    // 순간부터 done이 올 때까지 한참 100%에 멈춰 있는 것처럼 보인다.
+    // 100 은 "완료"로 읽히므로 done 이 와서 completed 분기로 넘어가기 전까지는 99 에서 멈춤
+    // 음성 전사처럼 배치(P2B 전사) 종료 후에도 done 안 나는 후처리(P3)가 남은 단계는
+    // 이 캡이 없으면 한참 100% 에 멈춰 있는 것처럼 보임
     const pct = Math.min(99, Math.round((progress[0] / Math.max(1, progress[1])) * 100))
     return <FillBar toneClass={toneClass} pct={pct} transitionClass="vf-stage-bar-fill--metered" fading={false} />
   }
   if (STAGES_WITH_BATCH_PROGRESS.has(id)) {
-    // 배치는 있지만 아직 첫 진행 신호가 도착하지 않은 상태(예: 첫 슬라이드 VLM 응답
-    // 대기 중) — 배치가 아예 없는 단계와 달리, 가짜로 채우면 첫 실측값이 도착하는
-    // 순간 아래로 떨어지는 것처럼 보이므로 0%에서 정직하게 대기한다.
+    // 배치는 있으나 첫 진행 신호 대기 중 — 가짜로 채우면 첫 실측값 도착 시 뚝 떨어져 보이므로 0% 대기
     return <FillBar toneClass={toneClass} pct={0} transitionClass="vf-stage-bar-fill--metered" fading={false} />
   }
-  // 이 단계는 배치 자체가 없어서(예: 검증 입력 데이터 구성 — LLM 호출도 병렬 워커도 없는
-  // 단순 조립) "몇 개 중 몇 개"라는 실측값이 원천적으로 없다. 그래서 진행 중에는 100%
-  // 직전(SIMULATED_CAP_PCT)까지만 채워서 "아직 안 끝났다"는 걸 거짓말하지 않고,
-  // 실제로 done이 오는 순간에만(completed 분기) 100%로 넘어간다.
+  // 배치 자체가 없는 단계(예: 검증 입력 데이터 구성 — LLM·병렬 워커 없는 단순 조립)
+  // → 진행 중에는 SIMULATED_CAP_PCT 까지만, done 이 올 때만 100%
   return <FillBar toneClass={toneClass} pct={SIMULATED_CAP_PCT} transitionClass="vf-stage-bar-fill--simulated" fading={false} />
 }
 
-// diagramStatus에서 'run'이던 노드가 다른 상태(done/error)로 바뀌는 순간을 감지해,
-// HOLD_MS 동안은 'hold'(100% 고정 표시), 그 다음 FADE_MS 동안은 'fade'(옵아시티 감소)로
-// 표시하고 나서야 목록에서 뺀다.
+// 'run' 이던 노드가 다른 상태(done/error)로 바뀌는 순간을 감지해, HOLD_MS 동안 'hold'(100% 고정),
+// 이어서 FADE_MS 동안 'fade'(투명도 감소) 처리 후 목록에서 제거
 //
-// 방금 run에서 벗어난 id를 "이 렌더에서 곧바로" settling에 포함시키는 게 핵심이다.
-// 예전 버전처럼 useEffect가 실행된 뒤에야(한 렌더 늦게) settling state에 반영하면, 그
-// 사이의 한 렌더에서 diagramStatus도 'run'이 아니고 settling에도 아직 없어서 activeIds가
-// 그 id를 빼먹는다 — 그 순간 FillBar가 언마운트됐다가 다음 렌더에서 다시 마운트되면서
-// useMountGrowth가 처음부터(0%) 다시 애니메이션을 트는 것처럼 보인다("완료되면 한 번 더
-// 0→100으로 채워짐"). 그래서 prevStatusRef를 렌더 중에 직접 갱신하고, 방금 끝난 id를
-// 그 자리에서 만든 Map에 즉시 포함시켜 반환한다 — 언마운트되는 렌더가 아예 없다.
+// 핵심: 방금 run 에서 벗어난 id 를 "이 렌더에서 곧바로" settling 에 포함
+// useEffect 실행 후(한 렌더 늦게) 반영하면, 그 사이 렌더에서 diagramStatus 도 settling 도 그 id 를
+// 빼먹어 FillBar 가 언마운트→재마운트되며 useMountGrowth 가 0% 부터 다시 애니메이션됨("완료 후 한 번 더 참")
+// → prevStatusRef 를 렌더 중 직접 갱신하고, 방금 끝난 id 를 즉석 Map 에 포함해 반환 (언마운트 렌더 없음)
 function useSettlingIds(diagramStatus) {
   const [settling, setSettling] = useState(() => new Map())
   const prevStatusRef = useRef({})
@@ -194,21 +181,21 @@ export default function VerifyProgressPage() {
     actions,
   } = useJobStream(lectureId, { onExit: goToList })
 
-  // job.created_at은 서버가 찍은, 이 작업이 실제로 시작된 시각이다 — 컴포넌트 마운트
-  // 시각이 아니라 이걸 기준으로 삼아야 새로고침해도 경과 시간이 0으로 돌아가지 않는다.
+  // job.created_at = 서버가 찍은 실제 작업 시작 시각 — 마운트 시각이 아니라 이걸 기준으로 해야
+  // 새로고침해도 경과 시간이 0 으로 돌아가지 않음
   const jobStartedAtMs = lecture.job?.created_at ? new Date(lecture.job.created_at).getTime() : undefined
   const elapsedMs = useElapsedStopwatch(!isLoading && phase === PHASES.PIPELINE, jobStartedAtMs)
 
-  // 파이프라인이 완료되면 결과 화면으로 이동한다. 이미 완료된 강의로 바로 진입한 경우도
-  // 여기서 즉시 리다이렉트되므로, 목록에서는 상태와 무관하게 항상 이 라우트로 보내면 된다.
+  // 완료되면 결과 화면으로 이동 — 이미 완료된 강의로 진입해도 여기서 즉시 리다이렉트되므로
+  // 목록에서는 상태 무관하게 항상 이 라우트로 보내면 됨
   useEffect(() => {
     if (phase === PHASES.VERIFY_READY) {
       navigate(`/result/${lectureId}`, { replace: true })
     }
   }, [phase, lectureId, navigate])
 
-  // 훅은 항상 같은 순서로 호출되어야 하므로, 아래 isLoading 이른 반환보다 앞에서 계산한다.
-  // isLoading일 때는 pipelineStages가 비어 있어도 각 함수의 기본값(빈 배열)이 안전하게 처리한다.
+  // 훅 호출 순서 고정을 위해 아래 isLoading 이른 반환보다 앞에서 계산
+  // isLoading 이면 pipelineStages 가 비어도 각 함수의 기본값(빈 배열)이 안전 처리
   const diagramStatus = statusMapFromPipelineStages(pipelineStages)
   const progressMap = progressMapFromPipelineStages(pipelineStages)
   const settlingIds = useSettlingIds(diagramStatus)
@@ -223,13 +210,10 @@ export default function VerifyProgressPage() {
       </div>
 
       {phase === PHASES.PIPELINE && (() => {
-        // 같은 레인(예: 발화검증 체인의 claim 추출→오류 탐지) 안의 단계들은 백엔드에서
-        // 실제로 순차 실행이라 절대 동시에 진행되지 않는다 — 지금 겹쳐 보이는 건 완료
-        // 유예(hold/fade) 중인 이전 단계와 막 시작한 다음 단계가 잠깐 같이 목록에 있어서
-        // 생기는 시각적 잔상일 뿐이다. 그래서 새로 'run'이 된 단계는, 같은 레인에 아직
-        // 유예 중인(사라지는 중인) 단계가 남아있으면 그게 다 사라질 때까지 표시를 미룬다.
-        // 레인이 다른 단계(영상/오디오, 발화검증/슬라이드검사)는 실제로 동시에 진행되므로
-        // 이 지연을 적용하지 않는다 — 그러면 진짜 진행 중인 바가 가려지는 문제가 생긴다.
+        // 같은 레인 안 단계들은 백엔드에서 순차 실행이라 동시에 진행되지 않음 —
+        // 겹쳐 보이는 건 완료 유예 중인 이전 단계 + 막 시작한 다음 단계의 시각적 잔상
+        // → 새로 'run' 된 단계는 같은 레인에 유예 중인 단계가 남아있으면 사라질 때까지 표시 보류
+        // 레인이 다른 단계(영상/오디오, 발화검증/슬라이드검사)는 실제 동시 진행이라 이 지연 미적용
         const activeIds = NODE_IDS.filter(id => {
           if (settlingIds.has(id)) return true
           if (diagramStatus[id] !== 'run') return false

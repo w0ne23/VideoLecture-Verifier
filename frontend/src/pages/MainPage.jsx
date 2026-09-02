@@ -1,3 +1,5 @@
+// 홈 화면 — 히어로 + 적용 중 LLM 조합 배너 + 3개 진입 카드(설정/검증/통계)
+
 import { useNavigate } from 'react-router-dom'
 import ActiveLlmSetBanner from '../components/model-setup/ActiveLlmSetBanner'
 

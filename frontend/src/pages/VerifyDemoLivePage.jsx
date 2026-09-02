@@ -8,30 +8,21 @@ import { useVideoThumbnail } from '../hooks/useVideoThumbnail'
 import { getLectureResult } from '../api/pipeline'
 import { NODE_BY_ID, NODE_SCHEDULE, bigPhaseFor, formatDuration, laneToneFor } from '../components/verifier/diagramPipelineConstants'
 
-// 실제 흐름(/upload → /verify/:id → /result/:id)과 화면·문구가 동일하게 보이도록 만든
-// 발표용 데모. 실제 백엔드 파이프라인을 타지 않고도 어떤 영상을 넣어도 다이어그램
-// 파이프라인이 자동으로 진행된 뒤 결과 화면을 보여준다("데모"라는 표시를 화면에 노출하지
-// 않는다). 개발자만 직접 URL로 들어가서 확인하는 용도라 메인 페이지 등 어디에도 링크하지
-// 않는다.
-// 방향키로 넘기던 방식 대신, diagramPipelineConstants의 NODE_SCHEDULE(노드별 시작·소요
-// 시간)을 기준으로 자동 재생된다. 화면의 스톱워치는 그냥 경과 시간을 보여줄 뿐 목표
-// 총 시간은 없고, 마지막 노드(피드백)까지 끝나면 자동으로 멈춘다.
-// 완료 화면에 보여줄 결과물은 아직 실제 파이프라인이 없어서, 이미 검증이 끝난 강의 하나의
-// 실제 결과를 그대로 재사용한다. 매번 /api/lectures/{id}/result를 호출하므로 그 강의의
-// 결과가 바뀌면 데모에도 그대로 반영되고, 다른 강의로 바꾸고 싶을 땐 이 상수만 바꾸면 된다.
+// [개발용] 발표용 데모 (/dev/verify-demo) — 실제 흐름(/upload → /verify/:id → /result/:id)과
+// 화면·문구가 동일하게 보이도록 만듦. 백엔드 파이프라인 없이 어떤 영상을 넣어도 다이어그램이
+// 자동 진행 후 결과 화면 표시 ("데모" 표시는 화면에 노출 안 함). 어디에도 링크 안 함
+//
+// - diagramPipelineConstants 의 NODE_SCHEDULE(노드별 시작·소요 시간) 기준으로 자동 재생,
+//   마지막 노드(피드백) 끝나면 자동 정지. 스톱워치는 경과 시간만 표시(목표 총 시간 없음)
+// - 완료 화면 결과물은 실제 파이프라인이 없어 이미 검증 끝난 강의 하나의 결과를 재사용
+//   (매번 /api/lectures/{id}/result 호출 → 그 강의 결과가 바뀌면 데모에도 반영, 강의 교체는 아래 상수만 변경)
 const DEMO_RESULT_LECTURE_ID = '9018dee3-a130-4c0e-a4a2-45caaf8c4136'
 
-// 통합 텍스트·피드백은 "무언가를 만들어내는" 단계라 다른 단계와 달리 "진행 중" 대신
-// "생성 중"으로 표현한다.
+// 통합 텍스트·피드백은 "만들어내는" 단계라 "진행 중" 대신 "생성 중" 으로 표현
 const GENERATION_STAGE_LABELS = new Set(['멀티모달 통합 텍스트', '피드백'])
 
-// 위쪽엔 "큰 분류: 단계명 진행중" 텍스트 한 줄(+스톱워치)만 있고, 그 아래 구분선을 두고
-// 활성 노드 수만큼(보통 1~2개, 한 단계만 진행 중이면 1개) 진행 바가 세로로 쌓인다. 바
-// 앞엔 어떤 단계의 바인지 짧은 라벨을 붙인다 — CSS grid(2열)로 배치해서 라벨 길이가
-// 서로 달라도(예: "슬라이드 추출" vs "오디오 품질 분석") 바들은 항상 같은 x에서 시작한다.
-// 각 노드는 NODE_SCHEDULE에 정해진 자기 소요 시간만큼 채워지므로, 같은 구간에서 나란히
-// 도는 두 바도 서로 다른 속도로 끝날 수 있다. key를 노드 id로 주면 다음 노드로 바뀔 때
-// 컴포넌트가 새로 마운트되어 0%부터 다시 채워진다.
+// 진행 중 단계 하나의 진행 바 — NODE_SCHEDULE 의 소요 시간만큼 CSS transition 으로 채워짐
+// key 를 노드 id 로 주면 다음 노드로 바뀔 때 재마운트되어 0% 부터 다시 채워짐
 function StageBar({ id }) {
   const [filled, setFilled] = useState(false)
   useEffect(() => {
@@ -131,8 +122,7 @@ function DemoPipelineStep({ flow, onViewResult }) {
     : activeLabels.length === 1 && GENERATION_STAGE_LABELS.has(activeLabels[0])
       ? `${activeLabels[0]} 생성중`
       : `${activeLabels.join(' · ')} 진행중`
-  // 진행 중인 노드가 전처리 쪽인지 검증 쪽인지로 큰 분류를 정하고, 완료 후에는
-  // 마지막 구간(검증)의 분류를 그대로 보여준다.
+  // 진행 중 노드가 전처리 쪽인지 검증 쪽인지로 큰 분류 결정, 완료 후엔 마지막 구간(검증) 분류 유지
   const bigPhase = bigPhaseFor(activeIds[0] || 'error_output')
 
   return (
@@ -223,8 +213,8 @@ export default function VerifyDemoLivePage() {
   const navigate = useNavigate()
   const flow = useTimedDiagramFlow()
   const { file, phase } = flow
-  // 파이프라인이 다 끝나도 바로 결과 화면으로 넘어가지 않고, "피드백 보기"를 눌러야만
-  // 넘어가게 한다. "다시하기"로 reset하면 phase가 UPLOAD로 돌아가면서 이 상태도 초기화된다.
+  // 파이프라인이 끝나도 바로 결과로 안 넘어가고 "피드백 보기"를 눌러야 전환
+  // "다시하기"로 reset 하면 phase 가 UPLOAD 로 돌아가며 이 상태도 초기화
   const [showResult, setShowResult] = useState(false)
 
   const videoUrl = useMemo(() => (file ? URL.createObjectURL(file) : ''), [file])

@@ -1,3 +1,6 @@
+// Multi-LLM 구성하기 화면 — 조합(프로필) 목록 조회·적용·삭제 + 새 조합 만들기/수정 폼
+// 조합 하나 = 등록 LLM 중 선택 + 대표 모델 + 웹 그라운딩 포함 여부, 그중 하나만 "적용 중"
+
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -13,6 +16,7 @@ import { summarizeEditorState } from '../../components/model-setup/stageModels'
 import { loadRegisteredLlms } from '../../components/model-setup/llmRegistry'
 import { buildSetPayload, parseSetEditorState, summarizeSetConfig } from '../../components/model-setup/setBuilder'
 
+// 적용 중인 프로필을 목록 맨 앞으로
 function sortProfilesActiveFirst(list) {
   const active = list.filter(profile => profile.is_active)
   const inactive = list.filter(profile => !profile.is_active)
@@ -22,6 +26,8 @@ function sortProfilesActiveFirst(list) {
 function formatModelLabel(model) {
   return model.version || model.modelId || '모델'
 }
+
+// --- 아이콘 -----------------------------------------------------------------
 
 function IconEdit() {
   return (
@@ -77,6 +83,9 @@ const PREPROCESS_AUDIO_LABEL = '오디오 분석'
 const PREPROCESS_VIDEO_STEPS = ['전처리', '슬라이드\n추출', '슬라이드\n중복 처리', '슬라이드\n분석']
 const PREPROCESS_AUDIO_STEPS = ['오디오 분리 및\n품질 분석', '음성 전사 및\n텍스트 교정', '발화 구간\n재구성', '발화 내\n강조 신호 분석']
 
+// --- 프리셋 상세 모달의 파이프라인 다이어그램 -------------------------------
+
+// 단계 요약 행 → 다이어그램 노드 (slide 단계는 발화 체인과 병렬로 분리)
 function buildDetailFlow(llmRows = []) {
   const toNode = row => ({
     stageKey: row.stageKey,
@@ -190,6 +199,7 @@ function PipeLanesTable() {
   )
 }
 
+// 프리셋 상세 — 전처리(고정) + 검증 체인(선택 모델) + 슬라이드 검사(병렬) 전체 흐름 그림
 function PresetFlow({ flow }) {
   const scrollRef = useRef(null)
 
@@ -287,10 +297,11 @@ export default function ModelSetsPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const [selectedId, setSelectedId] = useState(null)
-  const [detailId, setDetailId] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)   // "적용" 대상으로 고른 프로필
+  const [detailId, setDetailId] = useState(null)        // 상세 모달로 연 프로필
   const builderRef = useRef(null)
 
+  // ?edit=<id> 쿼리로 수정 모드 진입 (없으면 새 조합 만들기)
   const [editingProfileId, setEditingProfileId] = useState(() => searchParams.get('edit'))
   const [registeredLlms] = useState(() => loadRegisteredLlms())
   const [name, setName] = useState('')
@@ -322,6 +333,7 @@ export default function ModelSetsPage() {
     },
   })
 
+  // 수정 모드면 update, 아니면 create
   const saveMutation = useMutation({
     mutationFn: payload => (
       editingProfileId
@@ -335,6 +347,7 @@ export default function ModelSetsPage() {
 
   const allProfiles = useMemo(() => data?.profiles || [], [data])
 
+  // 상세 모달 열림 동안 배경 스크롤 잠금 + Esc 닫기
   useEffect(() => {
     if (!detailId) return undefined
     const onKeyDown = event => {
@@ -370,6 +383,7 @@ export default function ModelSetsPage() {
     [allProfiles, editingProfileId],
   )
 
+  // 선택 가능한 LLM = 현재 등록 목록 + 수정 중인 프로필이 참조하던(지금은 미등록) 모델
   const availableLlms = useMemo(() => {
     if (!editingProfile) return registeredLlms
     const parsed = parseSetEditorState(editingProfile.editor_state, registeredLlms)
@@ -385,6 +399,7 @@ export default function ModelSetsPage() {
     [availableLlms, selectedIds],
   )
 
+  // 수정 모드 진입 시 폼을 저장된 프로필 값으로 채움
   useEffect(() => {
     if (!editingProfileId) return
     if (!editingProfile) return
@@ -395,7 +410,7 @@ export default function ModelSetsPage() {
     setIncludeGrounding(parsed.includeGrounding)
   }, [editingProfileId, editingProfile, registeredLlms])
 
-
+  // 대표 모델이 선택 목록에서 빠지면 첫 번째로 자동 교체
   useEffect(() => {
     if (!selectedIds.length) {
       if (mainLlmId) setMainLlmId('')
@@ -423,6 +438,7 @@ export default function ModelSetsPage() {
     builderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
+  // 폼 초기화 + ?edit 쿼리 제거 (새 조합 만들기 상태로)
   function startCreate() {
     setEditingProfileId(null)
     setName('')
@@ -454,6 +470,7 @@ export default function ModelSetsPage() {
     ))
   }
 
+  // 폼 검증 후 저장 payload 생성 — 문제가 있으면 alert 하고 null 반환
   const buildPayloadOrAlert = () => {
     if (!(name || '').trim()) {
       window.alert('LLM 조합 이름을 입력해주세요.')
@@ -480,12 +497,14 @@ export default function ModelSetsPage() {
     }
   }
 
+  // 저장 버튼 → 검증 통과하면 확인 모달 오픈
   const handleSave = () => {
     if (saveMutation.isPending) return
     if (!buildPayloadOrAlert()) return
     setConfirmOpen(true)
   }
 
+  // 확인 모달에서 저장 실행 → 성공 시 폼 초기화 (실패는 saveMutation.error 로 표시)
   const handleConfirmSave = async () => {
     const payload = buildPayloadOrAlert()
     if (!payload) return
@@ -494,7 +513,7 @@ export default function ModelSetsPage() {
       await saveMutation.mutateAsync(payload)
       startCreate()
     } catch {
-      // saveMutation.error로 표시
+      // saveMutation.error 로 표시
     }
   }
 
