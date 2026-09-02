@@ -93,7 +93,6 @@ export const NODE_SCHEDULE = {
 }
 
 export const TOTAL_DURATION_MS = feedbackLane.endMs
-export const PREPROCESS_END_MS = integratedLane.endMs
 
 // "멀티모달 강의 영상 분석(전처리)" / "지식 오류 탐지(검증)" 큰 분류 — 진행 텍스트에 표시
 const PRE_PHASE_IDS = new Set(['slide_extract', 'slide_analyze', 'audio_quality', 'voice_transcribe', 'integrated_text'])

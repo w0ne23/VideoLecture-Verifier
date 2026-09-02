@@ -10,13 +10,6 @@ export async function listModelSettingProfiles() {
   return res.json()
 }
 
-// 프로필 단건 조회
-export async function getModelSettingProfile(profileId) {
-  const res = await fetch(`${API_BASE}/admin/model-settings/profiles/${profileId}`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to fetch model setting profile'))
-  return res.json()
-}
-
 // 프로필 생성
 export async function createModelSettingProfile(payload) {
   const res = await fetch(`${API_BASE}/admin/model-settings/profiles`, {

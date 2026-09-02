@@ -21,11 +21,6 @@ export const VERSION_TO_MODEL_ID = {
   'Qwen 3 14B': 'qwen3:14b',
 }
 
-// 모델 ID → UI 표시명 (역방향)
-export const MODEL_ID_TO_VERSION = Object.fromEntries(
-  Object.entries(VERSION_TO_MODEL_ID).map(([version, modelId]) => [modelId, version]),
-)
-
 // UI 단계 → 백엔드 stage_models 키 — slide 는 동일 값을 두 키에 넣음
 export const STAGE_ENV_KEYS = {
   claim: ['VERIFIER_CLAIM_EXTRACT_MODEL'],
@@ -45,47 +40,10 @@ export const STAGE_LABELS = {
   slide: '슬라이드 오류',
 }
 
-// 모델 ID 접두사로 provider 종류 추론 (콜론 포함 = 로컬 ollama)
-export function modelIdToProviderType(modelId) {
-  const id = String(modelId || '').trim().toLowerCase()
-  if (!id) return null
-  if (id.startsWith('gpt') || id.startsWith('o1') || id.startsWith('o3')) return 'openai'
-  if (
-    id.startsWith('claude')
-    || id.startsWith('sonnet')
-    || id.startsWith('haiku')
-    || id.startsWith('opus')
-  ) {
-    return 'anthropic'
-  }
-  if (id.startsWith('grok') || id.startsWith('xai')) return 'xai'
-  if (id.startsWith('gemini')) return 'gemini'
-  if (id.startsWith('deepseek')) return 'deepseek'
-  if (id.includes(':')) return 'ollama'
-  return null
-}
-
 // 표시명 → 모델 ID (매핑에 없으면 소문자·하이픈으로 슬러그화)
 function versionToModelId(version) {
   if (!version) return ''
   return VERSION_TO_MODEL_ID[version] || String(version).trim().toLowerCase().replace(/\s+/g, '-')
-}
-
-// 모델 ID → 표시명 — 매핑에 없으면 provider 메타의 versions 목록에서 역추적
-function modelIdToVersion(modelId, providerType, providersMeta) {
-  if (MODEL_ID_TO_VERSION[modelId]) return MODEL_ID_TO_VERSION[modelId]
-  const meta = providersMeta?.[providerType]
-  if (!meta) return modelId
-  const match = meta.versions.find(version => versionToModelId(version) === modelId)
-  return match || meta.versions[0] || modelId
-}
-
-// 쉼표/공백으로 구분된 모델 ID 문자열 → 배열
-function splitModels(raw) {
-  return String(raw || '')
-    .split(/[,\s]+/)
-    .map(part => part.trim())
-    .filter(Boolean)
 }
 
 // 기존 provider id(p1, p2, ...) 중 최대값 + 1 로 새 id 생성
@@ -131,78 +89,6 @@ export function stagesToStageModels(stages, providers, stageOrder) {
   })
 
   return stageModels
-}
-
-// GET stage_models → React 단계 초기값에 반영 — 모델 ID 를 등록된 provider(type)에만 매칭
-export function applyStageModelsToStages(baseStages, stageModels, providers, providersMeta) {
-  if (!stageModels || !providers.length) return baseStages
-
-  const next = { ...baseStages }
-
-  Object.entries(STAGE_ENV_KEYS).forEach(([stageKey, envKeys]) => {
-    const stage = next[stageKey]
-    if (!stage) return
-
-    // slide 는 두 키가 같은 값이므로 첫 키만 읽음
-    const raw = stageModels[envKeys[0]]
-    const modelIds = splitModels(raw)
-    if (!modelIds.length) return
-
-    // 같은 종류 provider 가 여러 개면 아직 안 쓴 것을 우선 배정, 없으면 첫 번째 재사용
-    const usedInStage = new Set()
-    const takeProvider = providerType => {
-      const match = providers.find(
-        provider => provider.type === providerType && !usedInStage.has(provider.id),
-      )
-      if (match) {
-        usedInStage.add(match.id)
-        return match
-      }
-      return providers.find(provider => provider.type === providerType) || null
-    }
-
-    if (stage.mode === 'single') {
-      const modelId = modelIds[0]
-      const providerType = modelIdToProviderType(modelId)
-      const provider = providerType ? takeProvider(providerType) : null
-      if (!provider) return
-      next[stageKey] = {
-        ...stage,
-        selected: provider.id,
-        version: modelIdToVersion(modelId, provider.type, providersMeta),
-      }
-      return
-    }
-
-    const selected = []
-    const versions = {}
-    modelIds.forEach(modelId => {
-      const providerType = modelIdToProviderType(modelId)
-      const provider = providerType ? takeProvider(providerType) : null
-      if (!provider) return
-      selected.push(provider.id)
-      versions[provider.id] = modelIdToVersion(modelId, provider.type, providersMeta)
-    })
-    if (!selected.length) return
-
-    // multi 단계는 가중치 정보가 없으므로 균등 분배로 복원 (나머지는 마지막에 몰아줌)
-    const count = selected.length
-    const base = Math.round(100 / count)
-    const weights = selected.reduce((acc, providerId, index) => {
-      acc[providerId] = index === count - 1 ? 100 - base * (count - 1) : base
-      return acc
-    }, {})
-
-    next[stageKey] = {
-      ...stage,
-      selected,
-      versions,
-      weights,
-      confirmed: true,
-    }
-  })
-
-  return next
 }
 
 // 검증 단계 기본 순서

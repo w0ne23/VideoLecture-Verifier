@@ -10,9 +10,6 @@ export const ISSUE_TYPES = [
   { key: 'composite_issue', label: '슬라이드 오류', color: '#64748b' },
 ]
 
-export const ISSUE_TYPE_LABELS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.label]))
-export const ISSUE_TYPE_COLORS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.color]))
-
 // 파이프라인 도메인 키 → 한글, 불명/미분류는 'etc'(기타)로 유입
 export const DOMAIN_LABELS = {
   engineering: '공학',
