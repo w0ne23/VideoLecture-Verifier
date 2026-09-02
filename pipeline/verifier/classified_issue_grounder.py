@@ -19,7 +19,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -5002,6 +5002,7 @@ def collect_pre_verifier_evidence_batched(
     max_workers: int = 20,
     max_tokens: int = 600,
     unique_claim_limit: int | None = None,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Retrieve claims independently, then assess fetched evidence per slide.
 
@@ -5119,8 +5120,13 @@ def collect_pre_verifier_evidence_batched(
             ): (slide_key, batch_index, batch_targets)
             for slide_key, batch_index, batch_targets in query_plan_batches
         }
+        query_plan_done = 0
+        query_plan_total = len(query_plan_batches)
         for future in as_completed(futures):
             slide_key, batch_index, batch_targets = futures[future]
+            query_plan_done += 1
+            if progress_notify:
+                progress_notify(query_plan_done, query_plan_total)
             try:
                 (
                     _,
@@ -5233,8 +5239,13 @@ def collect_pre_verifier_evidence_batched(
             executor.submit(retrieval_worker, issue): issue
             for issue in retrieval_targets
         }
+        retrieval_done = 0
+        retrieval_total = len(retrieval_targets)
         for future in as_completed(futures):
             issue = futures[future]
+            retrieval_done += 1
+            if progress_notify:
+                progress_notify(retrieval_done, retrieval_total)
             candidate_id = str(issue.get("candidate_id") or "")
             try:
                 material, usage = future.result()
@@ -5370,6 +5381,8 @@ def collect_pre_verifier_evidence_batched(
                 slide_entries,
             ) in assessment_batches
         }
+        assessment_done = 0
+        assessment_total = len(assessment_batches)
         for future in as_completed(futures):
             (
                 slide_key,
@@ -5377,6 +5390,9 @@ def collect_pre_verifier_evidence_batched(
                 slide_batch_count,
                 slide_entries,
             ) = futures[future]
+            assessment_done += 1
+            if progress_notify:
+                progress_notify(assessment_done, assessment_total)
             try:
                 (
                     _,

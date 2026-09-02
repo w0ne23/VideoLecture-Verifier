@@ -20,7 +20,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import groq_client
 
@@ -345,62 +345,70 @@ def _transcribe_chunks_from_audio(
     time_offset: float,
     base_dir: Path,
     label_prefix: str = "",
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> list[dict]:
     """
     이미 추출된 audio_path에서 무음 제거 후 묶은 chunks를 Groq에 전송한다.
     time_offset은 audio_path 기준 시간을 영상 절대 시간으로 변환하는 값.
+    chunks 개수는 루프 시작 전에 이미 확정돼 있으므로, progress_callback으로
+    실제 (완료 개수, 전체 개수)를 보고할 수 있다.
     """
     segments: list[dict] = []
+    total = len(chunks)
     for i, ranges in enumerate(chunks):
-        dur = _range_group_duration(ranges)
-        if dur <= 0:
-            continue
-        chunk_path = base_dir / f"temp_chunk_{label_prefix}{i}.wav"
-        time_map = _time_map_for_ranges(ranges)
-        label = f"{label_prefix}{i}"
-        if not _concat_audio_slices(audio_path, ranges, chunk_path, base_dir, label):
-            continue
-        p = Path(chunk_path)
-        if not p.exists() or p.stat().st_size == 0:
-            continue
-
-        transcription = _call_groq(str(chunk_path))
         try:
-            from .cost_report import record_audio_call
+            dur = _range_group_duration(ranges)
+            if dur <= 0:
+                continue
+            chunk_path = base_dir / f"temp_chunk_{label_prefix}{i}.wav"
+            time_map = _time_map_for_ranges(ranges)
+            label = f"{label_prefix}{i}"
+            if not _concat_audio_slices(audio_path, ranges, chunk_path, base_dir, label):
+                continue
+            p = Path(chunk_path)
+            if not p.exists() or p.stat().st_size == 0:
+                continue
 
-            metadata = {
-                "chunk_index": i,
-                "chunk_start": ranges[0][0],
-                "chunk_end": ranges[-1][1],
-                "stitched_audio_seconds": dur,
-                "source_span_seconds": ranges[-1][1] - ranges[0][0],
-                "speech_range_count": len(ranges),
-                "speech_ranges": [{"start": s, "end": e} for s, e in ranges],
-            }
-            record_audio_call(
-                stage="stage2b_transcriber",
-                provider="groq",
-                model="whisper-large-v3-turbo",
-                audio_seconds=dur,
-                metadata=metadata,
-            )
-        except Exception:
-            pass
-        if transcription is not None:
-            for seg in transcription.segments:
-                # seg["start"]/seg["end"]는 stitched chunk 내 상대 시간
-                # → 무음 제거 전 audio_path 기준 시간으로 되돌린 뒤 영상 절대 시간으로 변환
-                abs_start = time_offset + _map_stitched_time(float(seg["start"]), time_map)
-                abs_end = time_offset + _map_stitched_time(float(seg["end"]), time_map)
-                words = _normalize_words_mapped(seg.get("words"), time_map, time_offset=time_offset)
-                segments.append({
-                    "start": abs_start,
-                    "end":   max(abs_start, abs_end),
-                    "text":  (seg["text"] or "").strip(),
-                    "words": words,
-                })
+            transcription = _call_groq(str(chunk_path))
+            try:
+                from .cost_report import record_audio_call
 
-        p.unlink(missing_ok=True)
+                metadata = {
+                    "chunk_index": i,
+                    "chunk_start": ranges[0][0],
+                    "chunk_end": ranges[-1][1],
+                    "stitched_audio_seconds": dur,
+                    "source_span_seconds": ranges[-1][1] - ranges[0][0],
+                    "speech_range_count": len(ranges),
+                    "speech_ranges": [{"start": s, "end": e} for s, e in ranges],
+                }
+                record_audio_call(
+                    stage="stage2b_transcriber",
+                    provider="groq",
+                    model="whisper-large-v3-turbo",
+                    audio_seconds=dur,
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+            if transcription is not None:
+                for seg in transcription.segments:
+                    # seg["start"]/seg["end"]는 stitched chunk 내 상대 시간
+                    # → 무음 제거 전 audio_path 기준 시간으로 되돌린 뒤 영상 절대 시간으로 변환
+                    abs_start = time_offset + _map_stitched_time(float(seg["start"]), time_map)
+                    abs_end = time_offset + _map_stitched_time(float(seg["end"]), time_map)
+                    words = _normalize_words_mapped(seg.get("words"), time_map, time_offset=time_offset)
+                    segments.append({
+                        "start": abs_start,
+                        "end":   max(abs_start, abs_end),
+                        "text":  (seg["text"] or "").strip(),
+                        "words": words,
+                    })
+
+            p.unlink(missing_ok=True)
+        finally:
+            if progress_callback:
+                progress_callback(i + 1, total)
 
     return segments
 
@@ -412,6 +420,7 @@ def transcribe_range(
     start_sec: float,
     end_sec: float,
     output_dir: Path,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """
     영상의 [start_sec, end_sec] 구간을 전사한다.
@@ -460,6 +469,7 @@ def transcribe_range(
             time_offset=start_sec,
             base_dir=base_dir,
             label_prefix=f"{int(start_sec)}_",
+            progress_callback=progress_callback,
         )
 
         # silences를 영상 절대 시간으로 변환
@@ -477,7 +487,12 @@ def transcribe_range(
         Path(audio_path).unlink(missing_ok=True)
 
 
-def transcribe_video(video_path: str, duration: float, output_dir=None) -> dict:
+def transcribe_video(
+    video_path: str,
+    duration: float,
+    output_dir=None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> dict:
     """
     영상 전체를 전사한다 (metadata 없이 fallback 경로).
 
@@ -494,4 +509,5 @@ def transcribe_video(video_path: str, duration: float, output_dir=None) -> dict:
         start_sec=0.0,
         end_sec=duration,
         output_dir=Path(output_dir) if output_dir else Path("."),
+        progress_callback=progress_callback,
     )

@@ -951,18 +951,30 @@ def _call_llm(
                     create_method=client.messages.create,
                 )
             )
-            # Sonnet 5 rejects the legacy sampling parameter with HTTP 400.
-            # Keep it for older Anthropic models, whose behaviour already relies
-            # on the configured verifier temperature.
-            if "sonnet-5" not in resolved_model.lower():
-                kwargs["temperature"] = temp
+            # Some Anthropic models/SDK call shapes reject the legacy sampling
+            # parameter (Sonnet 5 with HTTP 400, Opus 4.8 with a client-side
+            # TypeError when combined with Structured Outputs) — which one
+            # varies by model and SDK version, so instead of hardcoding model
+            # names we just try with it and drop it on that specific failure.
+            kwargs["temperature"] = temp
             if system_prompt:
                 system_block = {"type": "text", "text": system_prompt}
                 cache_control = _anthropic_prompt_cache_control()
                 if cache_control:
                     system_block["cache_control"] = cache_control
                 kwargs["system"] = [system_block]
-            return client.messages.create(**kwargs)
+            try:
+                return client.messages.create(**kwargs)
+            except Exception as exc:
+                # Sonnet 5 rejects it with an HTTP 400 (APIStatusError); Opus 4.8
+                # rejects it client-side (TypeError) when combined with Structured
+                # Outputs. Catch broadly and only swallow-and-retry when the
+                # error is actually about this parameter — anything else
+                # (network, auth, rate limit, ...) still propagates normally.
+                if "temperature" not in kwargs or "temperature" not in str(exc).lower():
+                    raise
+                kwargs.pop("temperature")
+                return client.messages.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
         content_blocks = list(getattr(resp, "content", []) or [])

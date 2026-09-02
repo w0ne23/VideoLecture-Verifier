@@ -451,23 +451,30 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 /* 구분선 아래로 활성 노드 수만큼(보통 1~2개, 한 단계만 진행 중이면 1개) 쌓이는 진행 바.
    라벨 열의 너비가 가장 긴 라벨에 맞춰 고정되므로("슬라이드 추출"보다 "오디오 품질
    분석"이 길어도) 바들은 항상 같은 x에서 나란히 시작한다. */
-.vf-stage-bars { display: grid; grid-template-columns: max-content 1fr; align-items: center; column-gap: 12px; row-gap: 10px; margin-top: 14px; }
-.vf-stage-bar-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); white-space: nowrap; }
+/* 라벨 열을 max-content로 두면 지금 떠 있는 라벨의 글자 수에 따라 열 너비가 늘었다
+   줄었다 해서 바 길이도 같이 흔들린다. 실제 나올 수 있는 라벨 중 가장 긴 것("멀티모달
+   통합 텍스트", 11자, 실측 약 109px)을 기준으로 고정 폭을 줘서, 어떤 라벨이 떠도 바
+   시작 위치와 길이가 항상 같게 한다 — 7.5em(120px)은 그 실측값에 여유 11px만 더한
+   값이라, 이전의 10em(160px)처럼 라벨 앞에 불필요한 공백이 남지 않는다. */
+.vf-stage-bars { display: grid; grid-template-columns: 7.5em 1fr; align-items: center; column-gap: 12px; row-gap: 10px; margin-top: 14px; }
+/* 고정폭 칸 안에서 오른쪽 정렬 — 짧은 라벨의 남는 공간이 글자 앞(왼쪽)으로 가서,
+   글자 끝과 바 시작 사이 간격이 라벨 길이와 무관하게 항상 동일해진다. */
+.vf-stage-bar-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); white-space: nowrap; text-align: right; }
 .vf-stage-bar-track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .vf-stage-bar-fill { height: 100%; width: 0%; border-radius: 2px; transition-property: width; transition-timing-function: linear; }
 .vf-stage-bar-fill--pre { background: var(--primary); }
 .vf-stage-bar-fill--utterance { background: var(--rose); }
 .vf-stage-bar-fill--slide { background: var(--amber); }
 .vf-stage-bar-fill--done { background: var(--primary); }
-/* 실제 진행 화면은 각 단계가 얼마나 걸릴지 미리 알 수 없어서(데모처럼 고정 시간을
-   기다렸다 0→100%로 채우는 연출이 불가능하다), 진행 중인 단계는 처음부터 가득 찬
-   상태로 두고 밝기만 깜빡여 "지금 진행 중"임을 보여준다 — 아주 짧게 끝나는 단계도
-   중간에 끊긴 것처럼 보이지 않는다. */
-.vf-stage-bar-fill--indeterminate { width: 100%; animation: vf-stage-bar-pulse 1.3s ease-in-out infinite; }
-@keyframes vf-stage-bar-pulse {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
-}
+/* 배치가 있는 단계(대부분)는 백엔드가 보내는 실제 (완료/전체)로 폭을 채운다 — 마운트
+   직후 0에서 실제 값으로, 이후로는 값이 바뀔 때마다 이 duration으로 애니메이션된다.
+   완료 유예(hold) 중에는 이 폭이 100으로 고정되므로 마지막 % → 100% 전환도 같은
+   transition을 그대로 탄다. */
+.vf-stage-bar-fill--metered { transition-duration: 450ms; }
+/* 배치 단위가 없는 단계(예: 검증 입력 데이터 구성)는 실측 %를 모르므로, 정해진 시간에
+   걸쳐 0%에서 100%까지 실제로 채운다(펄스로 깜빡이지 않는다) — 짧게 끝나는 단계는
+   100%에 먼저 도달해 잠깐 멈춰 있을 수 있다. */
+.vf-stage-bar-fill--simulated { transition-duration: 6000ms; }
 .vf-flow { display: flex; }
 .vf-flow-item { flex: 1; position: relative; text-align: center; padding-top: 4px; }
 .vf-flow-node {
@@ -749,6 +756,19 @@ main { margin-top: 12px; display: flex; flex-direction: column; gap: 20px; }
 .diag-node--wait { fill: var(--surface-2); stroke: var(--border); }
 .diag-node--run { fill: var(--primary); stroke: var(--primary); }
 .diag-node--done { fill: var(--primary); stroke: var(--primary); opacity: 0.85; }
+/* 진행 중인 노드에서 바깥으로 퍼져나가는 파동 링 — 노드 원 위에 겹쳐 그리는 별도
+   원(diag-node-wave)을 키우면서 옅어지게 한다. box-shadow는 SVG 도형에서 애니메이션이
+   실제로 재생되지 않아서(정적으로만 적용), transform-box: fill-box로 SVG 도형에도
+   transform 애니메이션이 먹는 이 파일의 기존 패턴(.demo-anim-package)을 그대로 쓴다. */
+.diag-node-wave {
+  fill: none; stroke: var(--primary); stroke-width: 2.5;
+  transform-box: fill-box; transform-origin: center;
+  animation: diag-node-wave 1.5s ease-out infinite;
+}
+@keyframes diag-node-wave {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
 .diag-node--error { fill: var(--red); stroke: var(--red); }
 .diag-connector { fill: none; stroke-width: 2.5; }
 .diag-connector--wait { stroke: var(--border); stroke-dasharray: 6 6; }

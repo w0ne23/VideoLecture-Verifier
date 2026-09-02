@@ -147,6 +147,7 @@ def _transcribe_by_scene(
     meta_path: Optional[str],
     slide_ranges: list[dict],
     output_dir: Path,
+    progress_callback=None,
 ) -> dict:
     """
     전역 전사 후 scene 시간축에 매핑하기 위한 세그먼트를 생성한다.
@@ -161,18 +162,18 @@ def _transcribe_by_scene(
 
     if not meta_path or not slide_ranges:
         print("  ℹ️ metadata 없음 → 전체 전사 방식 사용")
-        return transcribe_video(video_path, duration, output_dir=output_dir)
+        return transcribe_video(video_path, duration, output_dir=output_dir, progress_callback=progress_callback)
 
     unique_scenes = len(slide_ranges)
     print(f"  ℹ️ scene {unique_scenes}개 기준 시간 매핑용 전체 전사 사용")
-    return transcribe_video(video_path, duration, output_dir=output_dir)
+    return transcribe_video(video_path, duration, output_dir=output_dir, progress_callback=progress_callback)
 
 
 # ──────────────────────────────────────────────────────────────
 # 파이프라인 스테이지
 # ──────────────────────────────────────────────────────────────
 
-def extract_slides(args, slides_dir: Path, output_dir: Path) -> dict:
+def extract_slides(args, slides_dir: Path, output_dir: Path, notify_stage=None) -> dict:
     from .slide_extractor import (
         build_canonical_slide_annotations,
         build_scene_slide_map,
@@ -194,12 +195,16 @@ def extract_slides(args, slides_dir: Path, output_dir: Path) -> dict:
 
     _banner("P1A extract_slides — 슬라이드 추출  (slide_extractor)")
     t0 = time.time()
+    progress_callback = None
+    if notify_stage:
+        progress_callback = lambda done, total: notify_stage("preprocess_slide_extract", "run", (done, total))
     metadata = extract_slides(
         input_path=args.input,
         output_dir=str(slides_dir),
         debug=args.debug,
         decode_backend=getattr(args, "slide_decode_backend", None),
         extract_workers=getattr(args, "slide_extract_workers", None),
+        progress_callback=progress_callback,
     )
     elapsed = time.time() - t0
 
@@ -223,8 +228,13 @@ def extract_slides(args, slides_dir: Path, output_dir: Path) -> dict:
     }
 
 
-def analyze_audio_quality(args, output_dir: Path) -> dict:
-    """P1B analyze_audio_quality: 오디오 품질 분석 (slide_extractor와 병렬)."""
+def analyze_audio_quality(args, output_dir: Path, notify_stage=None) -> dict:
+    """P1B analyze_audio_quality: 오디오 품질 분석 (slide_extractor와 병렬).
+
+    내부에 배치/아이템 단위가 없는 단일 파이프라인(오디오 추출 → 특성 분석 → 품질
+    채점)이라, 이 세 경계를 진행도 1/3씩으로 보고한다 — 각 경계가 실제 작업
+    구간이라 시간 기반으로 흉내 내는 게 아니라 진짜 진행 상태다.
+    """
     from .audio_analyzer import extract_audio_from_video, analyze_audio_features, evaluate_audio_quality
     from .utils import get_video_duration
 
@@ -246,14 +256,21 @@ def analyze_audio_quality(args, output_dir: Path) -> dict:
 
     video_path = args.input
 
+    def _tick(step: int) -> None:
+        if notify_stage:
+            notify_stage("preprocess_audio_quality", "run", (step, 3))
+
     _banner("P1B analyze_audio_quality — 오디오 품질 분석  (audio_analyzer)")
     t0 = time.time()
     duration = get_video_duration(video_path)
     audio_path = str(output_dir / "temp_full_audio.wav")
     extract_audio_from_video(video_path, audio_path)
+    _tick(1)
     try:
         audio_features = analyze_audio_features(audio_path)
+        _tick(2)
         audio_quality = evaluate_audio_quality(audio_features)
+        _tick(3)
         _save_json(output_dir / f"{stem}_audio_features.json", audio_features)
         _save_json(audio_quality_path, audio_quality)
         print(f"  ✓ 품질: {audio_quality['overall_score']}/100 ({audio_quality['overall_grade']})")
@@ -264,7 +281,7 @@ def analyze_audio_quality(args, output_dir: Path) -> dict:
     return {"duration": duration, "elapsed": elapsed}
 
 
-def textualize_slides(args, slides_dir: Path, output_dir: Path) -> dict:
+def textualize_slides(args, slides_dir: Path, output_dir: Path, notify_stage=None) -> dict:
     from .slide_textualizer import TextualizationPipeline, Config as TextConfig
 
     stem = Path(args.input).stem
@@ -281,7 +298,10 @@ def textualize_slides(args, slides_dir: Path, output_dir: Path) -> dict:
         output_filename=textualized_path.name,
         max_retries=args.retries,
     )
-    text_result = TextualizationPipeline(text_config).run()
+    progress_callback = None
+    if notify_stage:
+        progress_callback = lambda done, total: notify_stage("preprocess_slide_analyze", "run", (done, total))
+    text_result = TextualizationPipeline(text_config, progress_callback=progress_callback).run()
     elapsed = time.time() - t0
 
     meta = text_result["metadata"]
@@ -289,19 +309,26 @@ def textualize_slides(args, slides_dir: Path, output_dir: Path) -> dict:
     return {"textualized_path": str(textualized_path), "elapsed": elapsed}
 
 
-def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path) -> dict:
+def transcribe_audio(args, meta_path: str, duration: float, output_dir: Path, band_progress=None) -> dict:
     from .segment_grouper import load_slide_ranges
 
     stem = Path(args.input).stem
     transcript_raw_path = output_dir / f"{stem}_transcript_raw.json"
 
     if _is_done(transcript_raw_path, "P2B transcribe_audio — 전체 전사", args.force):
+        if band_progress is not None:
+            band_progress.report("transcribe", 1, 1)
         return {"transcript_raw_path": str(transcript_raw_path), "elapsed": 0.0}
 
     _banner("P2B transcribe_audio — 전체 전사  (Groq Whisper)")
     t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-    transcribe_result = _transcribe_by_scene(args.input, duration, meta_path, slide_ranges, output_dir)
+    progress_callback = None
+    if band_progress is not None:
+        progress_callback = lambda done, total: band_progress.report("transcribe", done, total)
+    transcribe_result = _transcribe_by_scene(
+        args.input, duration, meta_path, slide_ranges, output_dir, progress_callback=progress_callback
+    )
     payload = {
         "video_path": args.input,
         "segment_count": len(transcribe_result.get("segments", [])),
@@ -326,6 +353,7 @@ def process_audio(
     output_dir: Path,
     transcript_raw_path: Optional[str] = None,
     on_contexts_ready: Optional[Callable[[dict], None]] = None,
+    band_progress=None,
 ) -> dict:
     from .text_processor import correct_segments_three_pass
     from .segment_grouper import (
@@ -372,11 +400,15 @@ def process_audio(
     print("  [3B-2] 텍스트 교정 (3-pass)...")
     t0 = time.time()
     textualized_dir = Path(textualized_path).parent if textualized_path else output_dir
+    correction_progress_callback = None
+    if band_progress is not None:
+        correction_progress_callback = lambda band, done, total: band_progress.report(band, done, total)
     segments = correct_segments_three_pass(
         segments=segments_raw,
         metadata=metadata,
         textualized_data=textualized_data,
         textualized_dir=textualized_dir,
+        progress_callback=correction_progress_callback,
     )
     segments_clean = [{k: v for k, v in s.items() if k != "words"} for s in segments]
     _save_json(segments_path, {
@@ -393,9 +425,16 @@ def process_audio(
     t0 = time.time()
     scenes_structure = None
     if slide_ranges:
+        group_progress_callback = None
+        if band_progress is not None:
+            group_progress_callback = lambda done, total: band_progress.report("context_group", done, total)
         _, scenes_structure = group_segments_by_scene_and_context(
-            segments_clean, slide_ranges, duration, use_pause_sentence=False, use_llm_merge=True
+            segments_clean, slide_ranges, duration, use_pause_sentence=False, use_llm_merge=True,
+            progress_callback=group_progress_callback,
         )
+    elif band_progress is not None:
+        # slide_ranges가 없으면 그룹화 자체를 안 하니 band를 즉시 완료 처리한다.
+        band_progress.report("context_group", 0, 0)
     print(f"    ✓ context {sum(len(s.get('contexts', [])) for s in scenes_structure or [])}개  ({time.time()-t0:.1f}초)")
 
     if on_contexts_ready and scenes_structure:
@@ -884,7 +923,7 @@ def run_verifier(
     args,
     merged_clean_path: str,
     output_dir: Path,
-    notify_stage: Callable[[str, str], None] | None = None,
+    notify_stage: Callable[..., None] | None = None,
 ) -> dict:
     """Run the verifier synchronously for approval-gated uploads."""
     from .analyzer.run_all import run_classified_issue_pipeline
@@ -989,7 +1028,7 @@ def run_verifier_pipeline(
     paths: dict,
     timings: dict[str, float],
     background: bool = True,
-    notify_stage=lambda _stage, _status: None,
+    notify_stage=lambda _stage, _status, _progress=None: None,
 ) -> dict:
     """Build verifier input and run the verifier path."""
     from .orchestration.verifier import run_verifier_pipeline as _run_verifier_pipeline

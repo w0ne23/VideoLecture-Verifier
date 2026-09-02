@@ -4,6 +4,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
+class _AudioTranscribeBandProgress:
+    """"음성 전사" 노드(preprocess_audio_transcribe) 하나에 전사(P2B) + 텍스트 교정
+    Pass1/2/3(P3) + 컨텍스트 그룹화(P3)까지 묶여 있어서, 각 band의 총량을 이 노드
+    시작 시점에 한 번에 알 수 없다 — 예를 들어 Pass1/2 job 개수는 전사가 다 끝나
+    segments가 나와야 알고, Pass3 후보 개수는 Pass1/2가 다 끝나야 안다.
+
+    그래서 5개 band(전사/Pass1/Pass2/Pass3/컨텍스트 그룹화)에 20%씩 고정 배분해두고,
+    각 band는 자기 band가 시작되는 시점에만 총량을 알면 되게 한다. 고정 칸이라 다음
+    band의 총량이 나중에 밝혀져도 이미 채워진 앞 band의 %가 줄어들지 않는다 — 항상
+    위로만 채워진다.
+    """
+
+    BANDS = ("transcribe", "pass1", "pass2", "pass3", "context_group")
+    BAND_PCT = 100 // len(BANDS)  # 20
+
+    def __init__(self, notify_stage, stage_key: str = "preprocess_audio_transcribe"):
+        self._notify_stage = notify_stage
+        self._stage_key = stage_key
+
+    def report(self, band: str, done: int, total: int) -> None:
+        if not self._notify_stage:
+            return
+        band_index = self.BANDS.index(band)
+        frac = 1.0 if total <= 0 else min(1.0, done / total)
+        overall = min(100, band_index * self.BAND_PCT + round(frac * self.BAND_PCT))
+        self._notify_stage(self._stage_key, "run", (overall, 100))
+
+
 def run_preprocess_pipeline(
     args,
     *,
@@ -33,13 +61,13 @@ def run_preprocess_pipeline(
         meta_path = str(paths["metadata"])
         timings["P1A extract_slides — 슬라이드 추출"] = 0.0
         notify_stage("preprocess_slide_extract", "done")
-        audio_analyze_result = helpers.analyze_audio_quality(args, output_dir)
+        audio_analyze_result = helpers.analyze_audio_quality(args, output_dir, notify_stage=notify_stage)
         timings["P1B analyze_audio_quality — 오디오 품질 분석"] = audio_analyze_result["elapsed"]
         notify_stage("preprocess_audio_quality", "done")
     else:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_1a = executor.submit(helpers.extract_slides, args, slides_dir, output_dir)
-            future_1b = executor.submit(helpers.analyze_audio_quality, args, output_dir)
+            future_1a = executor.submit(helpers.extract_slides, args, slides_dir, output_dir, notify_stage=notify_stage)
+            future_1b = executor.submit(helpers.analyze_audio_quality, args, output_dir, notify_stage=notify_stage)
             for future in as_completed([future_1a, future_1b]):
                 if future is future_1a:
                     r1 = future.result()
@@ -70,10 +98,11 @@ def run_preprocess_pipeline(
     # done 처리하지 않고 P3까지 끝난 뒤에 done을 보고한다.
     notify_stage("preprocess_slide_analyze", "run")
     notify_stage("preprocess_audio_transcribe", "run")
+    audio_progress = _AudioTranscribeBandProgress(notify_stage)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        future_2a = executor.submit(helpers.textualize_slides, args, slides_dir, output_dir)
-        future_2b = executor.submit(helpers.transcribe_audio, args, meta_path, duration, output_dir)
+        future_2a = executor.submit(helpers.textualize_slides, args, slides_dir, output_dir, notify_stage=notify_stage)
+        future_2b = executor.submit(helpers.transcribe_audio, args, meta_path, duration, output_dir, band_progress=audio_progress)
         for future in as_completed([future_2a, future_2b]):
             if future is future_2a:
                 r2 = future.result()
@@ -103,6 +132,7 @@ def run_preprocess_pipeline(
         duration,
         output_dir,
         transcript_raw_path,
+        band_progress=audio_progress,
     )
     timings["P3 process_audio — 오디오 context 후처리"] = audio_result.get("elapsed", 0.0)
 

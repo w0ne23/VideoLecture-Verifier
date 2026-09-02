@@ -884,7 +884,7 @@ class T1Extractor:
 
         return slide
 
-    def extract_batch(self, slides: List[Dict]) -> List[Dict]:
+    def extract_batch(self, slides: List[Dict], progress_callback=None) -> List[Dict]:
         unique_slides = len({s.get("slide_canonical_number", s["slide_number"]) for s in slides})
         workers = max(1, min(self.config.workers, unique_slides))
         logger.info(
@@ -900,6 +900,8 @@ class T1Extractor:
             cache_key = int(slide.get("slide_canonical_number", slide["slide_number"]))
             canonical_representatives.setdefault(cache_key, slide)
 
+        total = len(canonical_representatives)
+        done = 0
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="t1") as executor:
             futures = {
                 executor.submit(self.extract, slide): cache_key
@@ -908,6 +910,9 @@ class T1Extractor:
             for future in as_completed(futures):
                 cache_key = futures[future]
                 future.result()
+                done += 1
+                if progress_callback:
+                    progress_callback(done, total)
                 slide = canonical_representatives[cache_key]
                 logger.info(
                     "  [t1 complete] Scene %s (slide %s): t1=%s chars, structure=%s chars, visual_assets=%s개",
@@ -965,8 +970,9 @@ class T1Extractor:
 class TextualizationPipeline:
     """슬라이드 텍스트화 파이프라인"""
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config = None, progress_callback=None):
         self.config = config or Config()
+        self.progress_callback = progress_callback
 
     def run(self) -> Dict:
         start_time = time.time()
@@ -989,7 +995,7 @@ class TextualizationPipeline:
         print("Stage 2: 텍스트화 (OpenAI Vision)")
         print("-"*70)
 
-        slides = T1Extractor(self.config).extract_batch(slides)
+        slides = T1Extractor(self.config).extract_batch(slides, progress_callback=self.progress_callback)
 
         # Stage 3: 결과 저장
         print("\n" + "-"*70)

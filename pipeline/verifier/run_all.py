@@ -938,6 +938,7 @@ def run_issue_judge_only(
     issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     current_date: str | None = None,
     issue_judge_max_workers: int = DEFAULT_ISSUE_JUDGE_MAX_WORKERS,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
@@ -1036,6 +1037,7 @@ def run_issue_judge_only(
             ): model
             for model in models
         }
+        judge_done_count = 0
         for future in as_completed(futures):
             model = futures[future]
             try:
@@ -1050,6 +1052,9 @@ def run_issue_judge_only(
                     "api_calls": 0,
                     "token_usage": _empty_token_usage(),
                 }
+            judge_done_count += 1
+            if progress_notify:
+                progress_notify(judge_done_count, len(models))
 
     issue_judge_paths = _write_issue_judge_model_outputs(
         output_dir=out_dir,
@@ -1145,6 +1150,7 @@ def _extract_or_reuse_claims_for_classified_pipeline(
     reuse_claims: bool = False,
     current_date: str | None = None,
     claim_batch_size: int = CLAIM_EXTRACT_BATCH_SIZE,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict:
     base_stem = _base_stem(merged_file)
     result_json_path = out_dir / f"{base_stem}_verification_final.json"
@@ -1181,6 +1187,7 @@ def _extract_or_reuse_claims_for_classified_pipeline(
         ctx["hint"],
         ctx["slide_ctx"],
         batch_size=claim_batch_size,
+        progress_notify=progress_notify,
     )
     claims: list[dict] = []
     for _, batch_claims in claims_by_batch:
@@ -1410,9 +1417,9 @@ def run_classified_issue_pipeline(
     _stage_started_at: dict[str, float] = {}
     _notify_lock = threading.Lock()
 
-    def notify(stage: str, status: str) -> None:
+    def notify(stage: str, status: str, progress: tuple[int, int] | None = None) -> None:
         with _notify_lock:
-            if status == "run":
+            if status == "run" and progress is None:
                 _stage_started_at[stage] = time.time()
             elif status in ("done", "error"):
                 started_at = _stage_started_at.pop(stage, None)
@@ -1420,7 +1427,13 @@ def run_classified_issue_pipeline(
                     stage_timings[stage] = time.time() - started_at
             if not stage_notify:
                 return
-            stage_notify(stage, status)
+            stage_notify(stage, status, progress)
+
+    def make_progress_notify(stage: str) -> Callable[[int, int], None]:
+        """배치 루프에 그대로 넘길 수 있는 (done, total) 콜백. stage는 이미 "run"으로
+        notify된 뒤에만 쓴다 — progress가 있는 "run" 호출은 시작 시각을 다시 찍지
+        않도록 notify()가 걸러준다."""
+        return lambda done, total: notify(stage, "run", (done, total))
 
     # 슬라이드 오류 검사가 읽는 입력(merged_clean/slide_textualized/slide_classified)은
     # 모두 전처리 산출물이라 claim_extraction ~ final_verification 체인의 결과물을
@@ -1517,6 +1530,7 @@ def run_classified_issue_pipeline(
             reuse_claims=reuse_claims,
             current_date=current_date,
             claim_batch_size=claim_batch_size,
+            progress_notify=make_progress_notify("verifier_claim_extraction"),
         )
     except Exception as exc:
         _llm_stage_failed("L1", "extract_claims — Claim 추출", claim_stage_started, exc)
@@ -1556,6 +1570,7 @@ def run_classified_issue_pipeline(
             current_date=current_date,
             issue_judge_batch_size=issue_judge_batch_size,
             issue_judge_max_workers=shared_max_workers,
+            progress_notify=make_progress_notify("verifier_issue_judge"),
         )
     except Exception as exc:
         _llm_stage_failed("L2", "detect_issues — Detector 앙상블", issue_judge_stage_started, exc)
@@ -1649,6 +1664,7 @@ def run_classified_issue_pipeline(
                 max_tokens=max(256, max_tokens),
                 max_workers=issue_type_max_workers,
                 model_weights_spec=issue_type_model_weights,
+                progress_notify=make_progress_notify("verifier_issue_classification"),
             )
             issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
             classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
@@ -1718,6 +1734,7 @@ def run_classified_issue_pipeline(
                     current_date=current_date or datetime.now().date().isoformat(),
                     max_workers=evidence_max_workers,
                     max_tokens=int(os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MAX_TOKENS", "600")),
+                    progress_notify=make_progress_notify("verifier_web_grounding"),
                 )
                 evidence_output_path.write_text(
                     json.dumps(evidence_result, ensure_ascii=False, indent=2),
@@ -1788,6 +1805,7 @@ def run_classified_issue_pipeline(
                 model_weights_spec=verifier_model_weights,
                 web_evidence_payload=evidence_result,
                 web_evidence_path=evidence_output_path if evidence_enabled else None,
+                progress_notify=make_progress_notify("verifier_final_verification"),
             )
             verifier_result["output_path"] = str(verifier_output_path)
             verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")

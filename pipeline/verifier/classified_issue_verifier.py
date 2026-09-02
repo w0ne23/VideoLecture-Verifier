@@ -14,8 +14,9 @@ from datetime import datetime
 import json
 import os
 import re
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .issue_type_classifier import (
     ALL_ISSUE_TYPES,
@@ -1615,6 +1616,7 @@ def judge_classified_issues(
     model_weights_spec: str | None = None,
     web_evidence_payload: dict[str, Any] | None = None,
     web_evidence_path: str | Path | None = None,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     _load_env()
     if not models:
@@ -1697,6 +1699,19 @@ def judge_classified_issues(
                 category = _batch_category_label(batch)
                 work_items_by_model[model].append((model, category, batch, batch_index, len(batches), current_date, max_tokens))
 
+        total_batch_count = sum(len(items) for items in work_items_by_model.values())
+        progress_lock = threading.Lock()
+        progress_done = 0
+
+        def _tick_progress() -> None:
+            nonlocal progress_done
+            if not progress_notify:
+                return
+            with progress_lock:
+                progress_done += 1
+                done = progress_done
+            progress_notify(done, total_batch_count)
+
         # ``max_workers``는 모델별 한도다. 모델마다 별도 pool을 두어 한
         # 공급자의 느린 요청이 다른 모델의 동시성을 줄이지 않게 한다.
         def _run_model_batches(model: str, work_items: list[tuple]) -> tuple[str, list[dict[str, Any]], list[tuple[tuple, Exception]]]:
@@ -1710,6 +1725,7 @@ def judge_classified_issues(
                         completed.append(future.result())
                     except Exception as exc:
                         failed.append((args, exc))
+                    _tick_progress()
             return model, completed, failed
 
         with ThreadPoolExecutor(max_workers=max(1, len(work_items_by_model))) as model_executor:

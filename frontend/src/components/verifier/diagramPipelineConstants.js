@@ -157,3 +157,20 @@ export function statusMapFromPipelineStages(pipelineStages = []) {
 
   return status
 }
+
+// statusMapFromPipelineStages와 같은 stageKey→노드 매핑으로, 배치가 있는 stage가 보낸
+// [완료, 전체] 진행도를 노드별로 뽑아낸다. 배치가 없는 stage(예: 검증 입력 데이터 구성)는
+// 백엔드가 애초에 progress를 안 보내므로 여기서도 null로 남는다 — 그 노드는 프론트에서
+// 시간 기반 흉내 애니메이션으로 대신 채운다.
+export function progressMapFromPipelineStages(pipelineStages = []) {
+  const progress = Object.fromEntries(NODE_IDS.map(id => [id, null]))
+
+  for (const item of pipelineStages) {
+    const nodeId = STAGE_KEY_TO_NODE_ID[item?.stage]
+    if (nodeId && Array.isArray(item.progress) && item.progress.length === 2) {
+      progress[nodeId] = item.progress
+    }
+  }
+
+  return progress
+}

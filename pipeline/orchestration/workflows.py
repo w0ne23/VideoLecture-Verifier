@@ -31,10 +31,10 @@ class _TimingsDict(dict):
 def run_pipeline(args, progress_callback=None, *, helpers):
     total_start = time.time()
 
-    def notify_stage(stage_key, status):
+    def notify_stage(stage_key, status, progress=None):
         if progress_callback:
             try:
-                progress_callback(stage_key, status)
+                progress_callback(stage_key, status, progress)
             except Exception as exc:
                 helpers.log.warning('progress_callback failed for %s: %s', stage_key, exc)
 
