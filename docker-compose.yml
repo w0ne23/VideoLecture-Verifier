@@ -30,6 +30,10 @@ services:
       dockerfile: backend/Dockerfile
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # numba/torch 등 native 세그폴트 발생 시 코어 덤프가 ./backend에 수십 GB씩
+    # 쌓이는 걸 막는다 (core.<pid> 파일 자체를 아예 안 만들게 함).
+    ulimits:
+      core: 0
 
     env_file:
       - .env
@@ -52,11 +56,11 @@ services:
       #   VLVERIFIER_OPENAI_BASE_URL: "https://api.openai.com/v1"
       #   VLVERIFIER_OPENAI_API_KEY: "${OPENAI_API_KEY}"
       #   VLVERIFIER_OPENAI_MODEL: "gpt-5.6-luna"
-      VLVERIFIER_VLM_ENABLED: "1"
-      VLVERIFIER_VLM_APPLY: "1"
-      VLVERIFIER_VLM_PROVIDER: "ollama"
-      VLVERIFIER_OLLAMA_BASE_URL: "http://ollama:11434"
-      VLVERIFIER_OLLAMA_MODEL: "${VLVERIFIER_VLM_MODEL:-gemma4:12b}"
+      VLVERIFIER_VLM_ENABLED: "${VLVERIFIER_VLM_ENABLED:-1}"
+      VLVERIFIER_VLM_APPLY: "${VLVERIFIER_VLM_APPLY:-1}"
+      VLVERIFIER_VLM_PROVIDER: "${VLVERIFIER_VLM_PROVIDER:-ollama}"
+      VLVERIFIER_OLLAMA_BASE_URL: "${VLVERIFIER_OLLAMA_BASE_URL:-http://ollama:11434}"
+      VLVERIFIER_OLLAMA_MODEL: "${VLVERIFIER_OLLAMA_MODEL:-gemma4:12b}"
       VLVERIFIER_VLM_WORKERS: "15"
       VLVERIFIER_VLM_BATCH_IMAGES: "2"
       VLVERIFIER_VLM_BATCH_CANDIDATES: "1"
@@ -66,8 +70,8 @@ services:
       VLVERIFIER_VLM_IMAGE_WIDTH: "768"
       # P2A base slide t1/t1_structure — 속도보다 정확도 우선이라 로컬 모델 중
       # qwen3-vl:30b 사용. gpt-5.4-mini로 되돌리려면 provider만 openai로 바꾸면 됨.
-      VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER: "${VLVERIFIER_TEXTUALIZER_PROVIDER:-ollama}"
-      VLVERIFIER_SLIDE_TEXTUALIZER_MODEL: "${VLVERIFIER_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
+      VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER: "${VLVERIFIER_SLIDE_TEXTUALIZER_PROVIDER:-ollama}"
+      VLVERIFIER_SLIDE_TEXTUALIZER_MODEL: "${VLVERIFIER_SLIDE_TEXTUALIZER_MODEL:-qwen3-vl:30b}"
       VLVERIFIER_SLIDE_TEXTUALIZER_WORKERS: "12"
 
       # Verifier concurrency. Each multi-model stage applies this limit per
