@@ -76,7 +76,7 @@ async def create_lecture(
         video_path=storage_relpath(input_path),
         output_dir=storage_relpath(output_dir),
     )
-    job = lecture_service.build_job(lecture_id, workflow_mode)
+    job = await lecture_service.build_job(db, lecture_id, workflow_mode)
     db.add(lecture)
     db.add(job)
     await db.commit()

@@ -30,6 +30,20 @@ const NODE_POS = {
   error_output: { x: 799, y: 260 },
 }
 
+// 적용된 LLM 셋이 "웹그라운딩 미포함"이면 백엔드가 오류 필터링(verifier_web_grounding)
+// stage 자체를 건너뛴다(worker.py가 시작 시점에 바로 status: 'skip'으로 표시). 이 노드는
+// 아예 그리지 않고 오류 판단이 그 x좌표(721)로 당겨온다. 피드백은 원래 y좌표(260, 슬라이드
+// 검증과 같은 행)는 그대로 두고 x좌표만 오류 판단과 같은 721로 당겨서, 두 노드가 원래처럼
+// 위아래로 정렬된 마지막 열을 그대로 유지한다(원래도 둘 다 x=799로 같은 열이었다).
+const NODE_POS_NO_GROUNDING = {
+  issue_judge: { x: 721, y: 60 },
+  error_output: { x: 721, y: 260 },
+}
+
+function posFor(id, groundingEnabled) {
+  return (!groundingEnabled && NODE_POS_NO_GROUNDING[id]) || NODE_POS[id]
+}
+
 // 레인마다 노드 사이 간격이 달라서(발화검증 5개는 빽빽, 슬라이드검증 2개는 넉넉) 한 줄로
 // 표시 가능한 최대 폭도 다르게 잡는다.
 const LANE_MAX_WIDTH = { video: 100, audio: 100, utterance: 68, slide: 68 }
@@ -47,20 +61,36 @@ const ICON_COLOR = 'var(--charcoal)'
 // 아니라 lane이 없다.
 // 같은 레인 안에서 노드끼리 이어지던 연결선은 이제 알약 배경(LaneCapsule)이 그 역할을
 // 대신하므로 제거했다. 레인을 넘나드는 연결선만 남긴다.
-const CONNECTORS = [
+// 전처리 구간과 발화·슬라이드 검증 진입부는 그라운딩 포함 여부와 무관하게 항상 같은 자리에
+// 있으므로 공용으로 둔다. 피드백(error_output)으로 들어가는 두 연결선만 그라운딩 여부에 따라
+// error_output의 좌표가 달라져(y=260 vs y=60) 별도 버전이 필요하다.
+const COMMON_CONNECTORS = [
   { target: 'slide_extract', d: 'M79 138 C 110 100, 130 78, 146 70' },
   { target: 'audio_quality', d: 'M79 182 C 110 220, 126 245, 146 250' },
   { target: 'integrated_text', d: 'M270 68 C 297 85, 314 110, 328 138' },
   { target: 'integrated_text', d: 'M270 252 C 297 230, 314 205, 328 182' },
   { target: 'claim_extract', d: 'M406 138 C 432 100, 456 75, 480 64', lane: 'utterance' },
   { target: 'slide_inspect', d: 'M406 182 C 424 210, 452 245, 479 258', lane: 'slide' },
+]
+
+// 오류 판단·피드백 모두 x좌표만 799→721로 당겨왔을 뿐 서로의 상대 위치(같은 열, 위/아래
+// 200px 간격)는 그대로라, 그라운딩 있을 때 곡선을 x축으로 78(=799-721)만큼 그대로 평행이동
+// 하면 된다.
+const FEEDBACK_CONNECTORS = {
   // 곧바로 아래로 내려가면 이슈 판단 라벨 글자 위를 지나가므로, 노드 오른쪽으로 살짝
   // 빠져나와 라벨을 비켜간 뒤 완만한 곡선 하나로 내려온다.
-  { target: 'error_output', d: 'M813 58 C 855 62, 855 190, 818 227', lane: 'utterance' },
-  // 슬라이드 검증(문법 검증)은 발화 검증보다 먼저 끝나므로, 이 엣지는 error_output이 아니라
-  // syntax_verify 자신의 완료 여부로 상태를 잡아 발화 검증이 끝나기 전에 먼저 뻗어나가 있게 한다.
-  { target: 'error_output', source: 'syntax_verify', d: 'M576 260 L765 260', lane: 'slide' },
-]
+  withGrounding: { target: 'error_output', d: 'M813 58 C 855 62, 855 190, 818 227', lane: 'utterance' },
+  noGrounding: { target: 'error_output', d: 'M735 58 C 777 62, 777 190, 740 227', lane: 'utterance' },
+}
+
+// 슬라이드 검증(문법 검증)은 발화 검증보다 먼저 끝나므로, 이 엣지는 error_output이 아니라
+// syntax_verify 자신의 완료 여부로 상태를 잡아 발화 검증이 끝나기 전에 먼저 뻗어나가 있게 한다.
+// error_output의 y좌표는 그라운딩 여부와 무관하게 항상 260이므로, 이 연결선은 끝점 x좌표만
+// 799 근방(765)에서 721 근방(687)으로 당기면 된다.
+const SYNTAX_TO_FEEDBACK_CONNECTORS = {
+  withGrounding: { target: 'error_output', source: 'syntax_verify', d: 'M576 260 L765 260', lane: 'slide' },
+  noGrounding: { target: 'error_output', source: 'syntax_verify', d: 'M576 260 L687 260', lane: 'slide' },
+}
 
 // source가 target보다 먼저 끝나는 엣지(예: 슬라이드 검증→피드백)는 source가 끝나기 전엔
 // wait(연결 전) 그대로 두고, source가 끝나면 target이 끝나기 전까지는 "이미 도착해서
@@ -109,8 +139,8 @@ function DiagLabel({ label, x, y, maxWidth = 100, forceWrap = false }) {
 // 슬라이드 추출·슬라이드 분석은 폭에 여유가 있어도 "슬라이드"에서 줄바꿈해 두 줄로 고정한다.
 const FORCE_WRAP_IDS = new Set(['slide_extract', 'slide_analyze'])
 
-function PlainNode({ id, label, lane, status, diffNode }) {
-  const { x, y } = NODE_POS[id]
+function PlainNode({ id, label, lane, status, diffNode, pos }) {
+  const { x, y } = pos
   let style
   if (diffNode && (lane === 'utterance' || lane === 'slide') && (status === 'run' || status === 'done')) {
     const color = LANE_COLORS[lane]
@@ -211,8 +241,8 @@ function TextIcon({ status }) {
 
 // 피드백은 문서 한 장이 아니라 여러 건이므로 뒤에 종이 두 장을 더 겹쳐 "여러 개"임을
 // 보여주고, 안에는 줄글 대신 경고 표시 하나로 "오류"라는 걸 바로 알아보게 한다.
-function StackIcon({ status }) {
-  const { x, y } = NODE_POS.error_output
+function StackIcon({ status, pos }) {
+  const { x, y } = pos
   const s = iconStyles(status)
   const w = 62
   const h = 76
@@ -261,6 +291,24 @@ function isLaneActive(status, ids) {
 }
 
 export default function DiagramPipeline({ status, diffLine = false, diffNode = false, compact = false }) {
+  // "웹그라운딩 미포함" 셋으로 실행된 잡은 worker.py가 verifier_web_grounding stage를
+  // 시작 시점부터 'skip'으로 못박아 두므로, 이 값 하나로 오류 필터링 노드 표시 여부와
+  // 그에 딸린 레이아웃(오류 판단·피드백 위치, 연결선)을 전부 결정할 수 있다.
+  const groundingEnabled = status.issue_filter !== 'skip'
+  const visibleNodes = groundingEnabled ? NODES : NODES.filter(node => node.id !== 'issue_filter')
+  const connectors = [
+    ...COMMON_CONNECTORS,
+    groundingEnabled ? FEEDBACK_CONNECTORS.withGrounding : FEEDBACK_CONNECTORS.noGrounding,
+    groundingEnabled ? SYNTAX_TO_FEEDBACK_CONNECTORS.withGrounding : SYNTAX_TO_FEEDBACK_CONNECTORS.noGrounding,
+  ]
+  // 그라운딩이 없으면 발화 검증 레인은 오류 판단(721)에서 끝난다. 피드백은 이제 그
+  // 아래(y=260) 별도 행에 있으므로 "발화 검증" 알약에는 포함되지 않는다.
+  const utteranceCapsuleEnd = groundingEnabled ? 799 : 721
+  // 오류 필터링 노드 하나가 빠지면서 오류 판단·피드백이 78px 왼쪽으로 당겨진 만큼 전체
+  // 그림이 캔버스 왼쪽으로 쏠려 보인다. 노드 좌표는 그대로 두고 보이는 창(viewBox)만
+  // 왼쪽으로 패닝해서, 줄어든 콘텐츠 폭(getBBox 기준)이 다시 캔버스 한가운데 오도록 맞춘다.
+  const viewBox = groundingEnabled ? '0 0 880 360' : '-52 0 880 360'
+
   const videoLaneActive = isLaneActive(status, ['slide_extract', 'slide_analyze'])
   const audioLaneActive = isLaneActive(status, ['audio_quality', 'voice_transcribe'])
   const utteranceLaneActive = isLaneActive(status, ['claim_extract', 'issue_detect', 'issue_classify', 'issue_filter', 'issue_judge'])
@@ -268,7 +316,7 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
 
   return (
     <svg
-      viewBox="0 0 880 360"
+      viewBox={viewBox}
       className={compact ? 'diag-svg diag-svg--compact' : 'diag-svg'}
       aria-hidden="true"
     >
@@ -279,10 +327,10 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
 
       <LaneCapsule x1={155} x2={261} y={68} tone="pre" active={videoLaneActive} />
       <LaneCapsule x1={155} x2={261} y={252} tone="pre" active={audioLaneActive} />
-      <LaneCapsule x1={489} x2={799} y={60} tone="utterance" active={utteranceLaneActive} />
+      <LaneCapsule x1={489} x2={utteranceCapsuleEnd} y={60} tone="utterance" active={utteranceLaneActive} />
       <LaneCapsule x1={489} x2={566} y={260} tone="slide" active={slideLaneActive} />
 
-      {CONNECTORS.map((c, i) => {
+      {connectors.map((c, i) => {
         const rawStatus = c.source
           ? edgeStatus(status[c.source], status[c.target])
           : status[c.target]
@@ -290,10 +338,11 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
         return <path key={i} d={c.d} className={className} style={style} />
       })}
 
-      {NODES.map(node => {
+      {visibleNodes.map(node => {
+        const pos = posFor(node.id, groundingEnabled)
         if (node.icon) {
           const Icon = ICON_COMPONENTS[node.id]
-          return <Icon key={node.id} status={status[node.id]} />
+          return <Icon key={node.id} status={status[node.id]} pos={pos} />
         }
         return (
           <PlainNode
@@ -303,6 +352,7 @@ export default function DiagramPipeline({ status, diffLine = false, diffNode = f
             lane={node.lane}
             status={status[node.id]}
             diffNode={diffNode}
+            pos={pos}
           />
         )
       })}
