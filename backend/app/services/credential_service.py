@@ -1,5 +1,4 @@
-"""Encrypted storage and runtime resolution for user-provided LLM credentials."""
-
+# 사용자가 등록한 LLM credential의 암호화 저장과 런타임 복호화
 from __future__ import annotations
 
 import base64
@@ -14,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import LlmCredential
 
 
+# API 키 일부만 노출하는 마스킹 문자열 생성
 def mask_secret(value: str) -> str:
     value = str(value or "")
     if len(value) <= 8:
@@ -21,14 +21,14 @@ def mask_secret(value: str) -> str:
     return f"{value[:8]}******{value[-4:]}"
 
 
+# credential row를 참조 문자열(credential:<uuid>)로 변환
 def credential_ref(credential: LlmCredential) -> str:
     return f"credential:{credential.id}"
 
 
+# 암호화/복호화에 쓸 Fernet cipher 생성, 전용 키 우선 사용 후 master key로 폴백
 def _cipher() -> Fernet:
-    # A dedicated key is preferred. The master key fallback keeps existing local
-    # Docker setups usable while allowing production deployments to provide a
-    # separate encryption key.
+    # 전용 암호화 키 사용을 권장하되, 미설정 시 master key로 폴백해 기존 로컬 Docker 구성 호환 유지, 운영 환경은 별도 키 지정 가능
     raw = str(
         os.getenv("VLVERIFIER_CREDENTIAL_ENCRYPTION_KEY", "")
         or os.getenv("LITELLM_MASTER_KEY", "")
@@ -41,12 +41,12 @@ def _cipher() -> Fernet:
     try:
         return Fernet(raw.encode("utf-8"))
     except (ValueError, TypeError):
-        # Human-readable development secrets (for example sk-...) are converted
-        # to a stable Fernet key without storing the original value in the DB.
+        # sk-... 같은 사람이 읽기 쉬운 개발용 비밀값은 원본을 DB에 저장하지 않고 고정된 Fernet 키로 변환
         derived = base64.urlsafe_b64encode(hashlib.sha256(raw.encode("utf-8")).digest())
         return Fernet(derived)
 
 
+# credential 저장, 동일 provider+api_key 조합이 있으면 기존 행 재사용
 async def save_credential(
     db: AsyncSession,
     *,
@@ -93,6 +93,7 @@ async def save_credential(
     return row
 
 
+# credential_ref 문자열(credential:<uuid>)을 UUID로 파싱, 형식이 맞지 않으면 None
 def _parse_ref(value: str) -> UUID | None:
     prefix, _, raw_id = str(value or "").partition(":")
     if prefix != "credential" or not raw_id:
@@ -103,6 +104,7 @@ def _parse_ref(value: str) -> UUID | None:
         return None
 
 
+# 저장된 credential 복호화, 실패 시 RuntimeError
 def decrypt_credential(row: LlmCredential) -> str:
     try:
         return _cipher().decrypt(row.encrypted_api_key.encode("ascii")).decode("utf-8")
@@ -110,6 +112,7 @@ def decrypt_credential(row: LlmCredential) -> str:
         raise RuntimeError(f"credential을 복호화하지 못했습니다: {row.id}") from exc
 
 
+# credential_ref 집합을 실제 API 키 값으로 일괄 복호화
 async def load_runtime_credentials(db: AsyncSession, refs: set[str]) -> dict[str, str]:
     parsed = {ref: _parse_ref(ref) for ref in refs}
     ids = [value for value in parsed.values() if value is not None]

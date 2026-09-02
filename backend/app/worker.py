@@ -1,3 +1,4 @@
+# 파이프라인 실행 워커, DB에서 pending job을 꺼내 자식 프로세스로 파이프라인 실행
 import asyncio
 import concurrent.futures
 import logging
@@ -43,7 +44,7 @@ PIPELINE_STAGE_LABELS = {
     'preprocess_audio_quality': '오디오 품질 분석',
     'preprocess_slide_analyze': '슬라이드 분석',
     # transcribe_audio(P2B)에 이어 P3 process_audio(오디오 맥락 후처리)까지 끝나야
-    # done으로 보고된다 — 다이어그램의 "음성 전사" 노드에 맞춰 P3를 이 단계에 묶었다.
+    # done으로 보고 — 다이어그램의 "음성 전사" 노드에 맞춰 P3를 이 단계에 결합
     'preprocess_audio_transcribe': '음성 전사',
     'verifier_build_analyzer_input': '검증 입력 데이터 구성',
     'verifier_claim_extraction': '주장 후보 추출',
@@ -56,6 +57,7 @@ PIPELINE_STAGE_LABELS = {
 }
 
 
+# 파이프라인 stage 키/상태/진행률을 사람이 읽을 수 있는 문구로 변환
 def _stage_text(stage_key: str, status: str, progress: tuple[int, int] | None = None) -> str:
     label = PIPELINE_STAGE_LABELS.get(stage_key, stage_key)
     suffix = f' ({progress[0]}/{progress[1]})' if progress else ''
@@ -68,6 +70,7 @@ def _stage_text(stage_key: str, status: str, progress: tuple[int, int] | None = 
     return f'{label} 대기 중'
 
 
+# 자식 프로세스에서 실행되는 파이프라인 본체, 모델 설정/credential을 env로 주입 후 pipeline.main 실행
 def pipeline_process(
     job_id: str,
     lecture_id: str,
@@ -85,27 +88,25 @@ def pipeline_process(
 
     try:
         # 관리자가 설정 화면에서 지정한 모델이 있으면 그 값을, 없으면 지금까지처럼
-        # .env 기본값을 쓴다. 이 프로세스 안에서만 os.environ을 갱신하므로 다른
-        # 동시 작업이나 부모 프로세스에는 영향을 주지 않는다.
+        # .env 기본값을 사용, 이 프로세스 안에서만 os.environ을 갱신하므로 다른
+        # 동시 작업이나 부모 프로세스에는 영향 없음
         runtime_model_settings = fetch_runtime_model_settings_sync()
         stage_models = runtime_model_settings.get('stage_models', {})
-        # 이전 잡에서 남은 stage env가 남지 않도록 허용 키를 먼저 비운다.
+        # 이전 잡에서 남은 stage env가 남지 않도록 허용 키를 먼저 비움
         for env_key in STAGE_MODEL_ENV_KEYS:
             os.environ.pop(env_key, None)
         for env_key, value in stage_models.items():
             os.environ[env_key] = value
-        # The legacy env map remains available to old pipeline paths.  New
-        # adapters can resolve endpoint/base URL/credentials from this single
-        # provider-neutral document.
+        # 레거시 env map은 기존 파이프라인 경로에서 계속 사용 가능, 새 어댑터는
+        # 이 provider 중립 문서 하나로 endpoint/base URL/credential을 해석 가능
         import json
         os.environ['VLVERIFIER_LLM_CONFIG_JSON'] = json.dumps(
             runtime_model_settings.get('llm_config', {}),
             ensure_ascii=False,
             separators=(',', ':'),
         )
-        # Decrypted credentials exist only in this child process for the
-        # lifetime of the job. They are never returned by the settings API or
-        # persisted in the model configuration JSON.
+        # 복호화된 credential은 이 job의 수명 동안 이 자식 프로세스에만 존재,
+        # 설정 API 응답이나 모델 설정 JSON에는 절대 포함하지 않음
         os.environ.pop('VLVERIFIER_CREDENTIALS_JSON', None)
         os.environ['VLVERIFIER_CREDENTIALS_JSON'] = json.dumps(
             runtime_model_settings.get('credentials', {}),
@@ -121,22 +122,22 @@ def pipeline_process(
         slides_dir = output_dir / 'slides'
         slides_dir.mkdir(parents=True, exist_ok=True)
 
-        # 각 stage는 {'status', 'progress'} 딕셔너리다. progress는 배치 처리가 있는
+        # 각 stage는 {'status', 'progress'} 딕셔너리, progress는 배치 처리가 있는
         # stage에서만 (완료 개수, 전체 개수) 튜플로 채워지고, 그 외(예: 검증 입력
-        # 데이터 구성처럼 내부에 세부 단위가 없는 stage)는 None으로 남는다 — 프론트가
-        # progress 유무로 실측 진행 바와 그냥 "진행 중" 표시를 구분한다.
+        # 데이터 구성처럼 내부에 세부 단위가 없는 stage)는 None으로 유지 — 프론트가
+        # progress 유무로 실측 진행 바와 그냥 "진행 중" 표시를 구분
         stages_state = {key: {'status': 'wait', 'progress': None} for key in PIPELINE_STAGE_KEYS}
         # 적용된 LLM 셋이 "웹그라운딩 미포함"이면 run_all.py가 이 stage를 아예 건너뛰고
-        # 한 번도 notify하지 않는다 — 그대로 두면 프론트에 영원히 'wait'(대기 중)로 남아
-        # 있는 것처럼 보이므로, 시작 시점에 바로 'skip'으로 표시해 프론트가 이 stage가
-        # 이번 실행에 존재하지 않는다는 걸 처음부터 알 수 있게 한다.
+        # 한 번도 notify하지 않음 — 그대로 두면 프론트에 영원히 'wait'(대기 중)로 남아있는
+        # 것처럼 보이므로, 시작 시점에 바로 'skip'으로 표시해 프론트가 이 stage가
+        # 이번 실행에 존재하지 않는다는 걸 처음부터 인지하도록 함
         if os.environ.get('CLASSIFIED_ISSUE_EVIDENCE_ENABLED', '1').strip().lower() in {'0', 'false', 'no', 'off'}:
             stages_state['verifier_web_grounding'] = {'status': 'skip', 'progress': None}
         if job_type == JOB_TYPE_VERIFY_ONLY:
             # verify_only는 이전 실행이 남긴 전처리 산출물을 그대로 재사용하는 것이
-            # 전제라, 전처리 단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로
+            # 전제라 전처리 단계는 이번 실행에서 아예 호출되지 않음, 'wait'로
             # 영원히 남겨두면 프론트에 전처리가 안 끝난 것처럼 보이므로 시작 시점에
-            # 바로 완료 처리한다.
+            # 바로 완료 처리
             for key in (
                 'preprocess_slide_extract',
                 'preprocess_audio_quality',
@@ -153,9 +154,9 @@ def pipeline_process(
 
         # 슬라이드 오류 검사(verify_slide_inspect/verify_slide_syntax) 단계가
         # verifier_claim_extraction 체인과 별도 스레드에서 동시에 진행되므로
-        # (pipeline/verifier/run_all.py), 두 스레드가 동시에 이 콜백을 호출할 수 있다.
+        # (pipeline/verifier/run_all.py), 두 스레드가 동시에 이 콜백을 호출할 수 있음
         # 락 없이 두면 스냅샷을 만들어 DB에 쓰는 순서가 뒤집혀 먼저 만든(더 오래된)
-        # 스냅샷이 나중 것을 덮어쓸 수 있으므로 락으로 직렬화한다.
+        # 스냅샷이 나중 것을 덮어쓸 수 있으므로 락으로 직렬화
         on_progress_lock = threading.Lock()
 
         def on_progress(stage_key: str, status: str, progress: tuple[int, int] | None = None):
@@ -163,8 +164,8 @@ def pipeline_process(
                 if stage_key in stages_state:
                     stages_state[stage_key] = {
                         'status': status,
-                        # done/error에서는 progress를 안 지워야 마지막 %가 화면에
-                        # 남아있다가 자연스럽게 상태만 바뀐다.
+                        # done/error에서는 progress를 유지해야 마지막 %가 화면에
+                        # 남아있다가 자연스럽게 상태만 전환
                         'progress': list(progress) if progress else stages_state[stage_key]['progress'],
                     }
                 update_job_stage_sync(job_id, _stages_array(), _stage_text(stage_key, status, progress))
@@ -200,12 +201,12 @@ def pipeline_process(
                 log_file.write(f'\n[{job_id}] Pipeline failed: {details}\n')
         return False, None, str(exc)
     finally:
-        # ProcessPool workers can be reused for another job. Never leave a
-        # decrypted credential map in a long-lived child process after this
-        # pipeline run, including when the run fails.
+        # ProcessPool 워커는 다른 job에서 재사용될 수 있음, 이 파이프라인 실행이
+        # 끝난 뒤(실패 시 포함) 오래 사는 자식 프로세스에 복호화된 credential map을 남기지 않음
         os.environ.pop('VLVERIFIER_CREDENTIALS_JSON', None)
 
 
+# DB를 폴링해 pending job을 하나씩 가져와 자식 프로세스에서 실행하는 무한 루프
 async def worker_loop(worker_index: int = 0, worker_count: int = 1):
     mp_context = multiprocessing.get_context('spawn')
     executor = ProcessPoolExecutor(max_workers=1, mp_context=mp_context)
@@ -276,9 +277,9 @@ async def worker_loop(worker_index: int = 0, worker_count: int = 1):
             error = f'시스템/프로세스 오류: {exc}'
             success = False
 
-        # 통계 페이지용 요약 적재. verify(실사용) 완료 건만, 실패는 삼킨다.
-        # job 을 done 으로 표시하기 "전에" 넣어서, 프론트가 done 을 보고 통계를
-        # 리페치하는 순간 이미 행이 존재하도록 한다.
+        # 통계 페이지용 요약 적재, verify(실사용) 완료 건만 대상이고 실패는 무시
+        # job을 done으로 표시하기 "전에" 넣어서, 프론트가 done을 보고 통계를
+        # 리페치하는 순간 이미 행이 존재하도록 함
         if success and job_type_val == JOB_TYPE_VERIFY:
             try:
                 from app.services import stats_service

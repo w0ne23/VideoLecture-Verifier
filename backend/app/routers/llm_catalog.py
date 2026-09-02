@@ -1,3 +1,4 @@
+# LiteLLM 모델 카탈로그 조회 및 캐싱
 from __future__ import annotations
 
 import asyncio
@@ -18,10 +19,12 @@ _MAX_PAGES = 20
 _catalog_cache: tuple[float, dict] | None = None
 
 
+# provider 식별자를 표시용 문자열로 변환 (예: openai_chat -> Openai Chat)
 def _provider_label(provider: str) -> str:
     return provider.replace('_', ' ').replace('-', ' ').strip().title()
 
 
+# 지정 URL에 GET 요청 후 JSON 파싱, scheme/host가 없거나 응답이 object가 아니면 예외
 def _request_json(url: str) -> dict:
     parsed = urlparse(url)
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
@@ -34,6 +37,7 @@ def _request_json(url: str) -> dict:
     return payload
 
 
+# 카탈로그 원본 모델 항목을 표준 필드로 정규화, id/provider 없으면 None
 def _normalise_model(item: object) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -61,6 +65,7 @@ def _normalise_model(item: object) -> dict | None:
     return result
 
 
+# LiteLLM 카탈로그를 페이지 단위로 전체 조회해 provider별로 그룹화
 def _load_catalog() -> dict:
     models: dict[tuple[str, str], dict] = {}
     page = 1
@@ -95,6 +100,7 @@ def _load_catalog() -> dict:
     }
 
 
+# 캐시된 카탈로그 반환, TTL 만료 또는 강제 새로고침이면 재조회 후 캐시 갱신
 async def _get_catalog(force_refresh: bool) -> dict:
     global _catalog_cache
     now = time.time()
@@ -108,6 +114,7 @@ async def _get_catalog(force_refresh: bool) -> dict:
     return catalog
 
 
+# LLM 모델 카탈로그 조회 API, refresh=true면 캐시 무시하고 재조회
 @router.get('/admin/llm-catalog')
 async def get_llm_catalog(refresh: bool = Query(False)):
     return await _get_catalog(refresh)

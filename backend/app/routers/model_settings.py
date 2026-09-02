@@ -1,3 +1,4 @@
+# 검증 파이프라인 모델/endpoint 설정 및 프리셋 관리 API
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,11 +11,13 @@ from app.services import model_settings_service
 router = APIRouter()
 
 
+# 현재 적용 중인 모델 설정 갱신 요청 바디
 class ModelSettingsIn(BaseModel):
     stage_models: dict[str, str] = {}
     llm_config: dict = {}
 
 
+# 모델 설정 프리셋 생성/수정 요청 바디
 class ModelSettingProfileIn(BaseModel):
     name: str
     stage_models: dict[str, str] = {}
@@ -22,12 +25,14 @@ class ModelSettingProfileIn(BaseModel):
     editor_state: dict = {}
 
 
+# 현재 적용 중인 모델 설정 조회, stage_models 존재 여부로 mode(generic/fixed) 계산
 @router.get('/admin/model-settings')
 async def get_model_settings(db: AsyncSession = Depends(get_db)):
     payload = await model_settings_service.get_runtime_model_settings(db)
     return {**payload, 'mode': 'generic' if payload['stage_models'] else 'fixed'}
 
 
+# 현재 적용 중인 모델 설정 갱신
 @router.put('/admin/model-settings')
 async def update_model_settings(payload: ModelSettingsIn, db: AsyncSession = Depends(get_db)):
     stage_models = await model_settings_service.update_model_settings(db, payload.stage_models, payload.llm_config)
@@ -35,11 +40,13 @@ async def update_model_settings(payload: ModelSettingsIn, db: AsyncSession = Dep
     return {**saved, 'mode': 'generic' if stage_models else 'fixed'}
 
 
+# 저장된 모델 설정 프리셋 목록 조회
 @router.get('/admin/model-settings/profiles')
 async def list_profiles(db: AsyncSession = Depends(get_db)):
     return await model_settings_service.list_profiles(db)
 
 
+# 모델 설정 프리셋 상세 조회
 @router.get('/admin/model-settings/profiles/{profile_id}')
 async def get_profile(profile_id: str, db: AsyncSession = Depends(get_db)):
     profile = await model_settings_service.get_profile(db, profile_id)
@@ -48,6 +55,7 @@ async def get_profile(profile_id: str, db: AsyncSession = Depends(get_db)):
     return profile
 
 
+# 새 모델 설정 프리셋 생성
 @router.post('/admin/model-settings/profiles')
 async def create_profile(payload: ModelSettingProfileIn, db: AsyncSession = Depends(get_db)):
     try:
@@ -62,6 +70,7 @@ async def create_profile(payload: ModelSettingProfileIn, db: AsyncSession = Depe
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# 모델 설정 프리셋 수정
 @router.put('/admin/model-settings/profiles/{profile_id}')
 async def update_profile(profile_id: str, payload: ModelSettingProfileIn, db: AsyncSession = Depends(get_db)):
     try:
@@ -79,6 +88,7 @@ async def update_profile(profile_id: str, payload: ModelSettingProfileIn, db: As
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# 모델 설정 프리셋 삭제
 @router.delete('/admin/model-settings/profiles/{profile_id}')
 async def delete_profile(profile_id: str, db: AsyncSession = Depends(get_db)):
     try:
@@ -88,6 +98,7 @@ async def delete_profile(profile_id: str, db: AsyncSession = Depends(get_db)):
     return {'ok': True}
 
 
+# 프리셋을 현재 적용 중인 모델 설정으로 반영
 @router.post('/admin/model-settings/profiles/{profile_id}/apply')
 async def apply_profile(profile_id: str, db: AsyncSession = Depends(get_db)):
     try:

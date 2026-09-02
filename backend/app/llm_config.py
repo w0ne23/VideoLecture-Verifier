@@ -1,18 +1,16 @@
-"""Provider-neutral LLM endpoint configuration.
-
-This module only normalizes and validates configuration data.  It deliberately
-does not contain provider SDK calls; the pipeline adapters can consume the
-same contract without making the API/UI know how a provider is implemented.
-"""
-
+# Provider 중립적인 LLM endpoint 설정
+# 이 모듈은 설정 데이터의 정규화와 검증만 담당, provider SDK 호출은 포함하지 않음
+# API/UI가 provider 구현 방식을 몰라도 파이프라인 어댑터가 동일한 규격을 그대로 쓸 수 있도록 분리
 from __future__ import annotations
 
 from copy import deepcopy
 from urllib.parse import urlparse
 
 
+# llm_config 스키마 버전, 저장된 값 마이그레이션 판단에 사용
 LLM_CONFIG_VERSION = 1
 
+# endpoint가 지원할 수 있는 프로토콜 목록
 SUPPORTED_PROTOCOLS = {
     "openai_chat_completions",
     "openai_responses",
@@ -22,6 +20,7 @@ SUPPORTED_PROTOCOLS = {
     "custom",
 }
 
+# stage 바인딩에서 허용하는 파이프라인 stage 식별자 목록
 STAGE_KEYS = {
     "claim",
     "claim_extract",
@@ -37,11 +36,13 @@ STAGE_KEYS = {
 }
 
 
+# 문자열 정규화, 공백 제거 후 최대 길이 초과분 제거
 def _text(value, *, default: str = "", max_length: int = 512) -> str:
     value = str(value or "").strip()
     return value[:max_length] if value else default
 
 
+# 숫자 정규화, 변환 실패 시 기본값, 성공 시 min~max 범위로 제한
 def _number(value, *, default: float, minimum: float, maximum: float) -> float:
     try:
         number = float(value)
@@ -50,6 +51,7 @@ def _number(value, *, default: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, number))
 
 
+# http/https 스킴과 host를 갖춘 URL만 통과, 그 외는 빈 문자열
 def _safe_url(value: object) -> str:
     url = _text(value, max_length=2048).rstrip("/")
     if not url:
@@ -60,6 +62,7 @@ def _safe_url(value: object) -> str:
     return url
 
 
+# 문자열 dict 정규화, 항목 수와 값 길이를 제한
 def _string_map(value: object, *, max_items: int = 32, max_length: int = 2048) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -72,10 +75,12 @@ def _string_map(value: object, *, max_items: int = 32, max_length: int = 2048) -
     return result
 
 
+# dict 형태 값만 깊은 복사로 통과, 아니면 빈 dict
 def _json_object(value: object) -> dict:
     return deepcopy(value) if isinstance(value, dict) else {}
 
 
+# 허용된 capability 키만 골라 상태(status)를 검증해 통과
 def _sanitize_capabilities(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
@@ -92,6 +97,7 @@ def _sanitize_capabilities(value: object) -> dict[str, object]:
     return result
 
 
+# endpoint 원본 데이터를 검증된 형태로 정규화, id가 비어있으면 index 기반으로 생성
 def _sanitize_endpoint(raw: object, index: int) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     endpoint_id = _text(raw.get("id") or raw.get("endpoint_id"), max_length=128)
@@ -111,8 +117,7 @@ def _sanitize_endpoint(raw: object, index: int) -> dict:
         "protocol": protocol,
         "base_url": _safe_url(raw.get("base_url")),
         "credential_ref": _text(raw.get("credential_ref"), max_length=160),
-        # API secrets must never be placed in this object.  The value is only
-        # a reference to a server-side secret or environment variable.
+        # API 비밀값은 이 객체에 절대 담지 않음, 서버 측 secret이나 환경 변수를 가리키는 참조만 저장
         "headers": _string_map(raw.get("headers"), max_length=512),
         "timeout": {
             "connect_sec": _number(timeout.get("connect_sec"), default=10.0, minimum=1.0, maximum=120.0),
@@ -128,6 +133,7 @@ def _sanitize_endpoint(raw: object, index: int) -> dict:
     }
 
 
+# stage-endpoint 바인딩 원본을 검증된 형태로 정규화, endpoint_ref/model이 없으면 None
 def _sanitize_binding(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
@@ -142,8 +148,8 @@ def _sanitize_binding(raw: object) -> dict | None:
     }
 
 
+# endpoints/stage_bindings 전체를 검증된 형태로 정규화해 반환하는 최상위 진입점
 def normalize_llm_config(raw: object) -> dict:
-    """Return a bounded, JSON-serializable endpoint/stage configuration."""
     raw = raw if isinstance(raw, dict) else {}
     endpoints = []
     seen_ids: set[str] = set()
