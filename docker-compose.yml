@@ -29,6 +29,10 @@ services:
       dockerfile: backend/Dockerfile
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # numba/torch 등 native 세그폴트 발생 시 코어 덤프가 ./backend에 수십 GB씩
+    # 쌓이는 걸 막는다 (core.<pid> 파일 자체를 아예 안 만들게 함).
+    ulimits:
+      core: 0
 
     env_file:
       - .env
