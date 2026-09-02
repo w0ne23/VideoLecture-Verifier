@@ -1,11 +1,10 @@
-"""Runtime LLM endpoint routing for model settings saved by the web UI.
+"""웹 UI가 저장한 모델 설정을 읽어 런타임 LLM endpoint를 라우팅
 
-The web application stores a provider-neutral endpoint document in
-``VLVERIFIER_LLM_CONFIG_JSON``.  This module resolves one stage/model binding and
-adapts the two protocols used by the current UI (OpenAI-compatible chat and
-Anthropic Messages). Secrets are never read from the document itself; the
-endpoint's ``credential_ref`` resolves to a job-scoped credential map or, for
-legacy jobs, a server-side environment variable.
+웹 애플리케이션은 provider 중립적인 endpoint 문서를 ``VLVERIFIER_LLM_CONFIG_JSON``에
+저장, 이 모듈은 하나의 stage/model 바인딩을 해석해 현재 UI가 지원하는 두 프로토콜
+(OpenAI 호환 chat, Anthropic Messages)에 맞게 어댑팅
+비밀값은 이 문서 자체에서 절대 읽지 않고, endpoint의 ``credential_ref``가 job 범위
+credential map 또는(레거시 job의 경우) 서버 측 환경변수로 해석됨
 """
 
 from __future__ import annotations
@@ -26,10 +25,11 @@ except ImportError:
     from utils import anthropic_structured_output_request_kwargs, api_call_with_retry
 
 
+# 파이프라인 stage 이름을 llm_config의 stage_bindings 키 후보 목록으로 매핑
 _STAGE_ALIASES = {
     "extract": ("claim_extract", "claim"),
     "claim": ("claim_extract", "claim"),
-    # claim_common calls the first issue judge with stage="judge".
+    # claim_common은 1차 issue judge를 stage="judge"로 호출
     "judge": ("issue_detect", "detect", "judge"),
     "detect": ("issue_detect", "detect", "judge"),
     "classify": ("issue_classify", "classify"),
@@ -45,6 +45,7 @@ _DYNAMIC_LITELLM_LOCK = threading.Lock()
 _DYNAMIC_LITELLM_MODELS: set[str] = set()
 
 
+# LiteLLM 게이트웨이 사용 여부, LITELLM_ENABLED 환경변수로 제어
 def _litellm_enabled() -> bool:
     return (os.getenv("LITELLM_ENABLED") or "0").strip().lower() in {
         "1", "true", "yes", "on"
@@ -52,16 +53,16 @@ def _litellm_enabled() -> bool:
 
 
 def _gateway_model_name(model: str) -> str:
-    """Return the concrete model selected for the stage.
+    """stage에 선택된 구체적인 모델명 반환
 
-    Provider aliases and provider-specific fallback models are deliberately
-    not resolved here.  The selected stage binding must contain the concrete
-    model identifier that LiteLLM should call.
+    provider 별칭이나 provider별 폴백 모델은 의도적으로 여기서 해석하지 않음,
+    선택된 stage 바인딩에는 LiteLLM이 호출할 구체적인 모델 식별자가 이미 들어있어야 함
     """
     raw = str(model or "").strip()
     return raw
 
 
+# LiteLLM 게이트웨이 경유용 runtime 딕셔너리 생성, 원본 endpoint를 LiteLLM 동적 모델로 등록
 def _litellm_runtime(model: str, *, source_runtime: dict[str, Any] | None = None) -> dict[str, Any] | None:
     model_name = _gateway_model_name(model)
     if not model_name:
@@ -79,8 +80,8 @@ def _litellm_runtime(model: str, *, source_runtime: dict[str, Any] | None = None
         "timeout": source_endpoint.get("timeout") or {"read_sec": 180},
         "retry": source_endpoint.get("retry") or {"max_attempts": 3, "backoff_sec": 2},
         "capabilities": source_endpoint.get("capabilities") or {},
-        # LiteLLM receives the normalized OpenAI-compatible request. Provider-
-        # specific options from the direct endpoint must not leak into it.
+        # LiteLLM은 정규화된 OpenAI 호환 요청만 받음, 원본 endpoint의 provider별
+        # 옵션이 여기로 새어 들어가면 안 됨
         "provider_options": {},
         "enabled": True,
     }
@@ -97,15 +98,16 @@ def _litellm_runtime(model: str, *, source_runtime: dict[str, Any] | None = None
         "protocol": "openai_chat_completions",
         "resolved_model": gateway_model,
         "endpoint_ref": "litellm",
-        # Keep the original selection next to the gateway binding.  The
-        # gateway endpoint itself is OpenAI-compatible, but web search must
-        # choose the correct LiteLLM request shape from the upstream provider.
+        # 원래 선택 정보를 게이트웨이 바인딩과 함께 유지, 게이트웨이 엔드포인트
+        # 자체는 OpenAI 호환이지만 web search는 상위 provider에 맞는 올바른
+        # LiteLLM 요청 형태를 선택해야 함
         "source_provider": source_provider,
         "source_model": model_name,
         "source_protocol": str(source_endpoint.get("protocol") or "").strip().lower(),
     }
 
 
+# 워커 프로세스 환경변수(VLVERIFIER_CREDENTIALS_JSON)에서 복호화된 credential map 로드
 def _load_runtime_credentials() -> dict[str, str]:
     raw = str(os.getenv("VLVERIFIER_CREDENTIALS_JSON", "") or "").strip()
     if not raw:
@@ -121,13 +123,14 @@ def _load_runtime_credentials() -> dict[str, str]:
     } if isinstance(value, dict) else {}
 
 
+# LiteLLM base URL에서 /v1 접미사를 제거한 관리 API 루트 URL
 def _litellm_api_root() -> str:
     base_url = (os.getenv("LITELLM_BASE_URL") or "http://litellm:4000/v1").rstrip("/")
     return re.sub(r"/v1$", "", base_url, flags=re.IGNORECASE)
 
 
 def _provider_model_name(model: str, endpoint: dict[str, Any]) -> str:
-    """Turn a catalog model id into LiteLLM's provider-qualified model id."""
+    """카탈로그 모델 id를 LiteLLM의 provider 접두사 붙은 모델 id로 변환"""
     raw = str(model or "").strip()
     if not raw:
         return raw
@@ -159,7 +162,7 @@ def _provider_model_name(model: str, endpoint: dict[str, Any]) -> str:
 
 
 def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
-    """Register the selected endpoint/model as an opaque LiteLLM deployment."""
+    """선택된 endpoint/model을 불투명한 LiteLLM deployment로 등록"""
     reference = str(source_endpoint.get("credential_ref") or "").strip()
     secret = (
         _load_runtime_credentials().get(reference, "")
@@ -226,9 +229,8 @@ def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
                         f"LiteLLM 동적 모델 등록 실패 (HTTP {response.status})"
                     )
         except urllib.error.HTTPError as exc:
-            # A previous worker/process may already have registered the same
-            # deterministic alias. Do not expose the response body, which can
-            # contain provider configuration details.
+            # 이전 워커/프로세스가 이미 같은 결정적(deterministic) alias를 등록했을 수 있음,
+            # provider 설정 정보를 담을 수 있는 응답 본문은 노출하지 않음
             if exc.code not in {400, 409}:
                 raise RuntimeError(
                     f"LiteLLM 동적 모델 등록 실패 (HTTP {exc.code})"
@@ -240,9 +242,10 @@ def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
     return alias
 
 
+# 저장된 llm_config JSON 로드, 파싱 실패/미설정 시 빈 dict
 def _load_config() -> dict[str, Any]:
-    # VLVerifier is the runtime-wide name used by the backend worker.  Keep
-    # the old VeriLec spelling as a read-only fallback for older jobs.
+    # VLVerifier는 백엔드 워커가 쓰는 런타임 전역 이름, 예전 VeriLec 표기는
+    # 과거 job을 위한 읽기 전용 폴백으로 유지
     raw = str(
         os.getenv("VLVERIFIER_LLM_CONFIG_JSON", "")
         or os.getenv("VERILEC_LLM_CONFIG_JSON", "")
@@ -258,7 +261,7 @@ def _load_config() -> dict[str, Any]:
 
 
 def configured_stage_models(stage: str) -> list[str]:
-    """Return concrete model IDs selected for a verifier stage."""
+    """verifier stage에 선택된 구체적인 모델 ID 목록 반환"""
     config = _load_config()
     raw_bindings = config.get("stage_bindings")
     if not isinstance(raw_bindings, dict):
@@ -277,6 +280,7 @@ def configured_stage_models(stage: str) -> list[str]:
     return []
 
 
+# 모델명/provider 문자열을 표준 provider family로 정규화
 def _provider_family(value: str) -> str:
     lowered = str(value or "").strip().lower()
     if lowered in {"gpt", "openai"} or lowered.startswith(("gpt", "o1", "o3")):
@@ -294,10 +298,12 @@ def _provider_family(value: str) -> str:
     return lowered
 
 
+# endpoint의 provider 필드를 표준 provider family로 정규화
 def _endpoint_provider(endpoint: dict[str, Any]) -> str:
     return _provider_family(str(endpoint.get("provider") or ""))
 
 
+# 대소문자 무시하고 모델명이 정확히 일치하는지 확인
 def _model_matches(binding_model: str, requested_model: str) -> bool:
     left = str(binding_model or "").strip().lower()
     right = str(requested_model or "").strip().lower()
@@ -309,10 +315,10 @@ def _model_matches(binding_model: str, requested_model: str) -> bool:
 
 
 def resolve_runtime_binding(stage: str, model_spec: str = "") -> dict[str, Any] | None:
-    """Resolve a configured endpoint binding for a pipeline stage.
+    """파이프라인 stage에 설정된 endpoint 바인딩 해석
 
-    Exact model matches are required when a model is specified. This prevents
-    provider aliases from silently selecting a different configured model.
+    model_spec이 주어지면 정확히 일치하는 모델만 선택, provider 별칭이 조용히
+    다른 설정된 모델을 고르지 않도록 방지
     """
     config = _load_config()
     endpoints = {
@@ -361,13 +367,13 @@ def resolve_runtime_binding(stage: str, model_spec: str = "") -> dict[str, Any] 
         "resolved_model": str(binding.get("model") or "").strip(),
         "endpoint_ref": str(binding.get("endpoint_ref") or "").strip(),
     }
-    # When enabled, LiteLLM is the single gateway for all ordinary verifier
-    # calls, regardless of the provider selected in the web UI.  The selected
-    # binding still determines the model alias and stage membership.
+    # 활성화 시 LiteLLM이 모든 일반 verifier 호출의 단일 게이트웨이가 됨, 웹 UI에서
+    # 선택한 provider와 무관, 선택된 바인딩이 여전히 모델 alias와 stage 소속을 결정
     return _litellm_runtime(str(binding.get("model") or model_spec), source_runtime=runtime) \
         if _litellm_enabled() else runtime
 
 
+# endpoint의 credential_ref로 API 키 조회, 없으면 provider별 기본 환경변수로 폴백
 def _credential(endpoint: dict[str, Any]) -> str:
     reference = str(endpoint.get("credential_ref") or "").strip()
     if reference:
@@ -391,6 +397,7 @@ def _credential(endpoint: dict[str, Any]) -> str:
     return ""
 
 
+# endpoint 설정의 read timeout(초), 미설정/파싱 실패 시 기본 180초
 def _timeout(endpoint: dict[str, Any]) -> float:
     timeout = endpoint.get("timeout") if isinstance(endpoint.get("timeout"), dict) else {}
     try:
@@ -399,6 +406,7 @@ def _timeout(endpoint: dict[str, Any]) -> float:
         return 180.0
 
 
+# 프롬프트/시스템 프롬프트/이미지를 OpenAI chat completions 메시지 형식으로 구성
 def _messages(prompt: str, system_prompt: str | None, images: list[bytes]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     if system_prompt:
@@ -417,6 +425,7 @@ def _messages(prompt: str, system_prompt: str | None, images: list[bytes]) -> li
     return messages
 
 
+# 응답 객체(dict 또는 속성 객체)에서 여러 후보 이름 중 첫 유효값을 int로 추출
 def _usage_value(obj: Any, *names: str) -> int:
     for name in names:
         value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
@@ -428,6 +437,7 @@ def _usage_value(obj: Any, *names: str) -> int:
     return 0
 
 
+# OpenAI 호환 응답에서 토큰 사용량을 표준 usage dict로 변환
 def _openai_usage(resp: Any, provider: str, model: str, stage: str) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
     details = getattr(usage, "completion_tokens_details", None) or getattr(usage, "output_tokens_details", None)
@@ -449,6 +459,7 @@ def _openai_usage(resp: Any, provider: str, model: str, stage: str) -> dict[str,
     }
 
 
+# Anthropic 응답에서 토큰 사용량을 표준 usage dict로 변환
 def _anthropic_usage(resp: Any, model: str, stage: str) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
     input_tokens = _usage_value(usage, "input_tokens")
@@ -467,6 +478,7 @@ def _anthropic_usage(resp: Any, model: str, stage: str) -> dict[str, Any]:
     }
 
 
+# OpenAI 호환 응답에서 텍스트 콘텐츠 추출
 def _response_text(resp: Any) -> str:
     choices = getattr(resp, "choices", []) or []
     if not choices:
@@ -479,8 +491,9 @@ def _response_text(resp: Any) -> str:
     return str(content)
 
 
+# metadata 조회를 위해 SDK 응답 객체를 최선 노력으로 JSON 가능한 값으로 변환
 def _jsonable(value: Any) -> Any:
-    """Best-effort conversion of SDK response objects for metadata lookup."""
+    """metadata 조회를 위해 SDK 응답 객체를 최선 노력으로 변환"""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
@@ -502,13 +515,15 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+# 응답에 있으면 provider 중립적인 검색 횟수/출처 URL을 추출
 def _web_search_metadata(resp: Any) -> dict[str, Any]:
-    """Extract provider-normalized search counts and source URLs when present."""
+    """응답에서 provider 중립적인 검색 횟수/출처 URL 추출(있는 경우)"""
     payload = _jsonable(resp)
     queries: list[str] = []
     sources: list[str] = []
     request_count = 0
 
+    # 응답 구조를 재귀적으로 순회하며 web_search 호출 횟수와 URL/쿼리 문자열 수집
     def walk(value: Any) -> None:
         nonlocal request_count
         if isinstance(value, dict):
@@ -547,11 +562,13 @@ def _web_search_metadata(resp: Any) -> dict[str, Any]:
     }
 
 
+# 일부 모델은 temperature 파라미터를 지원하지 않음, 그 목록에 해당하는지 확인
 def _openai_temperature_allowed(model: str) -> bool:
     lowered = str(model or "").strip().lower()
     return not lowered.startswith(("gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"))
 
 
+# OpenAI 호환 API로 LLM 호출, 서버가 특정 파라미터를 거부하면 그 파라미터만 제거하고 재시도
 def _call_openai_compatible(
     *,
     runtime: dict[str, Any],
@@ -579,7 +596,7 @@ def _call_openai_compatible(
     if not api_key:
         reference = str(endpoint.get("credential_ref") or "")
         raise RuntimeError(f"{reference or provider} API 키가 설정되지 않았습니다.")
-    # Network/API retry policy is owned by the shared pipeline wrapper.
+    # 네트워크/API 재시도 정책은 공유 파이프라인 wrapper(api_call_with_retry)가 담당
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "timeout": _timeout(endpoint),
@@ -610,10 +627,9 @@ def _call_openai_compatible(
             context_size = "medium"
         max_calls = max(1, int(web_search_max_calls or 1))
 
-        # LiteLLM is the capability boundary for web search. The application
-        # must not maintain a provider allowlist: new providers and provider
-        # model variants should reach the gateway and be accepted or rejected
-        # by LiteLLM's own adapter/capability registry.
+        # web search의 기능 경계는 LiteLLM, 애플리케이션이 provider 허용목록을
+        # 직접 관리해서는 안 됨 — 새 provider와 provider 모델 변형은 게이트웨이에
+        # 도달해 LiteLLM 자체의 adapter/capability registry가 수락·거부를 판단해야 함
         is_openai_search_model = source_provider == "openai" and any(
             marker in source_model.lower()
             for marker in ("search-preview", "search_api", "search-api")
@@ -641,11 +657,10 @@ def _call_openai_compatible(
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_tokens,
-                # OpenAI's SDK requires provider-specific fields to be placed
-                # in extra_body when talking to an OpenAI-compatible proxy.
-                # LiteLLM owns the translation to the selected upstream
-                # provider; this request is intentionally sent for every
-                # configured provider instead of being filtered here.
+                # OpenAI SDK는 OpenAI 호환 프록시와 통신할 때 provider별 필드를
+                # extra_body에 넣도록 요구함. 선택된 상위 provider로의 변환은
+                # LiteLLM이 담당하므로, 이 요청은 여기서 필터링하지 않고 설정된
+                # 모든 provider에 의도적으로 그대로 전송
                 "extra_body": {
                     "web_search_options": {
                         "search_context_size": context_size,
@@ -696,8 +711,8 @@ def _call_openai_compatible(
     if isinstance(options.get("extra_body"), dict):
         kwargs["extra_body"] = options["extra_body"]
 
-    # Retry only by removing a parameter that the selected compatible server
-    # explicitly rejects. Network/API retries are handled by the shared helper.
+    # 선택된 호환 서버가 명시적으로 거부하는 파라미터만 제거하며 재시도,
+    # 네트워크/API 재시도는 공유 헬퍼가 처리
     for _ in range(3):
         try:
             response = api_call_with_retry(lambda: client.chat.completions.create(**kwargs))
@@ -725,6 +740,7 @@ def _call_openai_compatible(
     raise RuntimeError("OpenAI-compatible LLM 호출 실패")
 
 
+# 축약된 별칭을 실제 Anthropic 모델 ID로 변환
 def _anthropic_model_name(model: str) -> str:
     aliases = {
         "haiku-4.5": "claude-haiku-4-5-20251001",
@@ -737,6 +753,7 @@ def _anthropic_model_name(model: str) -> str:
     return aliases.get(str(model or "").strip(), str(model or "").strip())
 
 
+# Anthropic Messages API로 LLM 호출, JSON schema 지정 시 강제 tool_use로 구조화된 응답 요청
 def _call_anthropic_messages(
     *,
     runtime: dict[str, Any],
@@ -824,7 +841,7 @@ def call_runtime_llm(
     web_search_force: bool = False,
     web_search_context_size: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """Call a configured runtime endpoint, or return None for unsupported protocols."""
+    """설정된 runtime endpoint 호출, 지원하지 않는 프로토콜이면 None 반환"""
     protocol = str(runtime.get("protocol") or "").strip().lower()
     images = [item for item in (image_bytes_list or []) if item]
     if not images and image_bytes:
@@ -856,6 +873,6 @@ def call_runtime_llm(
             images=images,
             stage=stage,
         )
-    # Gemini/native Ollama/Responses remain on their existing provider adapter
-    # until their endpoint-specific SDK contract is selected in the UI.
+    # Gemini/native Ollama/Responses는 UI에서 endpoint별 SDK 계약이 선택되기 전까지
+    # 기존 provider adapter를 그대로 사용
     return None
