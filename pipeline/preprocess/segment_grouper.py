@@ -576,59 +576,6 @@ def group_segments_by_context(
     return merged
 
 
-def expand_group_annotations_to_segments(
-    annotated_groups: list[dict],
-    segments: list[dict],
-    groups: list[dict],
-) -> list[dict]:
-    """
-    그룹 단위 강조 결과를 원본 세그먼트 단위로 펼친다.
-
-    - annotated_groups: 그룹별 강조 정보가 붙은 리스트 (각 항목에 'start'로 그룹 식별)
-    - segments: 원본 전사 세그먼트 리스트
-    - groups: group_segments_by_context() 반환값 (각 그룹에 segment_indices 있음)
-
-    반환: segments와 같은 길이·순서의 리스트. 각 세그먼트에 해당 그룹의
-    audio_emphasis, 점수 산출용 필드 등이 복사됨.
-    """
-    group_by_start = {g["start"]: g for g in groups}
-    annotated_by_start = {s["start"]: s for s in annotated_groups}
-
-    # segment index -> annotated group (that contains this segment)
-    index_to_annotated = {}
-    for g in groups:
-        start = g["start"]
-        ann = annotated_by_start.get(start)
-        if ann is None:
-            continue
-        for idx in g["segment_indices"]:
-            index_to_annotated[idx] = ann
-
-    result = []
-    for i, seg in enumerate(segments):
-        seg_copy = seg.copy()
-        ann = index_to_annotated.get(i)
-        if ann:
-            for key in (
-                "emphasis_methods",
-                "emphasis_reasons",
-                "detection_count",
-                "confidence",
-                "emphasis_signals",
-                "emphasis_keywords",
-                "emphasis_keywords_by_method",
-                "emphasis_detail",
-                "audio_emphasis",
-            ):
-                if key in ann:
-                    seg_copy[key] = ann[key]
-        else:
-            seg_copy["detection_count"] = 0
-        result.append(seg_copy)
-
-    return result
-
-
 # ---------------------------------------------------------------------------
 # scene 기반 그룹화 (metadata.json 사용)
 # ---------------------------------------------------------------------------

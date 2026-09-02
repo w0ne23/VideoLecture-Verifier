@@ -127,7 +127,6 @@ def run_pipeline(args, progress_callback=None, *, helpers):
     audio_result = preprocess_result.get('audio_result', {})
     output_files = [
         audio_result.get('segments_path', ''),
-        audio_result.get('silences_path', ''),
         preprocess_result.get('textualized_path', ''),
         r9.get('merged_clean_path', str(output_dir / f'{stem}_analyzer' / f'{stem}_merged_clean.json')),
         r10.get('claim_output', ''),

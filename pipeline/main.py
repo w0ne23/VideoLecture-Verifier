@@ -8,8 +8,8 @@ main.py
   [병렬] P2A textualize_slides         — 슬라이드 텍스트 + 강조 추출
          P2B transcribe_audio          — 전체 전사 (scene 매핑용)
   [직렬] P3  process_audio             — 오디오 후처리 (P2 완료 후)
-                     text_processor    — 3-pass 교정 + 침묵 구간 저장
-                     emphasis          — 오디오 강조 감지
+                     text_processor    — 3-pass 교정
+                     segment_grouper   — scene/context 그룹화 (verifier 입력용)
   [직렬] V1  build_analyzer_input      — 검증 입력 데이터 구성
   [직렬] V2  run_verifier              — claim 추출 → issue 판단/분류 → 멀티 LLM 검증
 
@@ -31,7 +31,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import librosa
 from .logging_utils import pipeline_log_context
 from .utils import resolve_pipeline_package_root
 
@@ -136,30 +135,6 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
         return float(v)
     except Exception:
         return default
-
-
-def _format_emphasis_reason(ann: dict) -> dict:
-    detail = ann.get("emphasis_detail")
-    if isinstance(detail, dict):
-        return detail
-    audio_emphasis = ann.get("audio_emphasis")
-    if isinstance(audio_emphasis, dict):
-        return {
-            **audio_emphasis,
-            "methods": ann.get("emphasis_methods", []),
-            "keywords": {
-                "all_keywords": ann.get("emphasis_keywords", []),
-                "by_method": ann.get("emphasis_keywords_by_method", {}),
-            },
-            "detection_count": ann.get("detection_count", 0),
-        }
-    return {
-        "score": ann.get("emphasis_score"),
-        "methods": ann.get("emphasis_methods", []),
-        "keywords": ann.get("emphasis_keywords", []),
-        "keywords_by_method": ann.get("emphasis_keywords_by_method", {}),
-        "detection_count": ann.get("detection_count", 0),
-    }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -355,115 +330,11 @@ def process_audio(
     from .text_processor import correct_segments_three_pass
     from .segment_grouper import (
         load_slide_ranges,
-        group_segments_by_context,
         group_segments_by_scene_and_context,
-        expand_group_annotations_to_segments,
     )
-    from .audio_analyzer import extract_audio_from_video
-    from .emphasis_audio import detect_emphasis_by_std
-    from .emphasis_keyword import (
-        detect_emphasis_by_keywords_weighted,
-        detect_emphasis_by_topic_keyword_repetition,
-        get_topic_keywords_filtered_v2,
-        get_topic_keyword_count_map,
-        get_topic_keyword_score_map,
-        topic_keyword_count_items,
-    )
-    from .emphasis_combiner import combine_emphasis_simple
 
     stem = Path(args.input).stem
     segments_path = output_dir / f"{stem}_segments.json"
-    silences_path = output_dir / f"{stem}_silences.json"
-    emphasis_path = output_dir / f"{stem}_emphasis.json"
-    by_scene_path = output_dir / f"{stem}_by_scene.json"
-
-    def _by_scene_has_context_schema(path: Path) -> bool:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            scenes = payload.get("scenes", [])
-            if not scenes:
-                return False
-            has_contexts = False
-            for scene in scenes:
-                for ctx in scene.get("contexts", []) or []:
-                    has_contexts = True
-                    if "audio_emphasis" not in ctx:
-                        return False
-            return has_contexts
-        except Exception:
-            return False
-
-    # 세그먼트만 있고 by_scene이 없으면 context-first verifier 입력을 복원할 수 없으므로 재실행
-    seg_ok = (
-        not args.force
-        and segments_path.exists()
-        and segments_path.stat().st_size > 0
-    )
-    silences_ok = silences_path.exists() and silences_path.stat().st_size > 0
-    emphasis_ok = emphasis_path.exists() and emphasis_path.stat().st_size > 0
-    by_scene_ok = (
-        by_scene_path.exists()
-        and by_scene_path.stat().st_size > 0
-        and _by_scene_has_context_schema(by_scene_path)
-    )
-    if seg_ok and silences_ok and emphasis_ok and by_scene_ok:
-        print(f"\n  ⏭  P3 process_audio — 오디오 파이프라인 출력 파일 존재, 스킵")
-        print(f"     {segments_path}")
-        print(f"     {by_scene_path}")
-        print("─" * 70)
-        # in-memory 데이터를 저장된 파일에서 복원
-        slides_structure = None
-        if by_scene_path.exists():
-            try:
-                with open(by_scene_path) as f:
-                    slides_structure = json.load(f).get("scenes")
-            except Exception:
-                pass
-
-        annotated_segments: list[dict] = []
-        try:
-            with open(segments_path) as f:
-                annotated_segments = json.load(f).get("segments", [])
-        except Exception:
-            pass
-
-        slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-        if on_contexts_ready and slides_structure:
-            try:
-                on_contexts_ready({
-                    "segments_path": str(segments_path),
-                    "slides_structure": slides_structure,
-                    "slide_ranges": slide_ranges,
-                    "duration": duration,
-                })
-            except Exception as exc:
-                log.warning(f"analyzer 조기 시작 실패(기존 context 사용): {exc}")
-
-        return {
-            "segments_path": str(segments_path),
-            "silences_path": str(silences_path),
-            "emphasis_path": str(emphasis_path),
-            "annotated_segments": annotated_segments,
-            "annotated_groups": [],
-            "scenes_structure": slides_structure,
-            "slide_ranges": slide_ranges,
-            "duration": duration,
-            "elapsed": 0.0,
-        }
-    elif not args.force and segments_path.exists():
-        log.warning(
-            "P3 process_audio 캐시가 불완전하여 재실행합니다 "
-            f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
-            f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()})"
-        )
-
-    if seg_ok and not by_scene_ok:
-        print(
-            f"\n  ⚠️  {by_scene_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
-            "P3 process_audio 전체를 다시 실행합니다."
-        )
-        print("─" * 70)
 
     video_path = args.input
 
@@ -489,15 +360,13 @@ def process_audio(
         with open(transcript_raw_path, "r", encoding="utf-8") as f:
             transcribe_payload = json.load(f)
         segments_raw = transcribe_payload.get("segments", [])
-        detected_silences = transcribe_payload.get("silences", [])
-        print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개 로드  ({time.time()-t0:.1f}초)")
+        print(f"    ✓ {len(segments_raw)}개 세그먼트 로드  ({time.time()-t0:.1f}초)")
     else:
         print("  [3B-1] 전체 전사 폴백 실행...")
         t0 = time.time()
         transcribe_result = _transcribe_by_scene(video_path, duration, meta_path, slide_ranges, output_dir)
         segments_raw = transcribe_result.get("segments", [])
-        detected_silences = transcribe_result.get("silences", [])
-        print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
+        print(f"    ✓ {len(segments_raw)}개 세그먼트  ({time.time()-t0:.1f}초)")
 
     # [3B-2] 3-pass 텍스트 교정 (Gemini 후보 → GPT 보강 → GPT 적용 판정)
     print("  [3B-2] 텍스트 교정 (3-pass)...")
@@ -516,123 +385,34 @@ def process_audio(
         "segments": segments_clean,
     })
     print(f"    ✓ 교정 완료  ({time.time()-t0:.1f}초)")
-    # [3B-3] 침묵 구간 저장 (transcriber가 ffmpeg silencedetect로 사전 감지)
-    print("  [3B-3] 침묵 구간 저장...")
-    MIN_SILENCE_SEC = 0.6
-    silences: list[dict] = [
-        {
-            "index": i,
-            "start": float(s["start"]),
-            "end": float(s["end"]),
-            "duration": float(s.get("duration", s["end"] - s["start"])),
-        }
-        for i, s in enumerate(detected_silences)
-    ]
-    _save_json(silences_path, {
-        "video_path": video_path,
-        "total_duration_sec": duration,
-        "segment_count": len(segments_clean),
-        "min_silence_sec": MIN_SILENCE_SEC,
-        "silence_count": len(silences),
-        "total_silence_duration_sec": sum(s["duration"] for s in silences),
-        "silences": silences,
-    })
-    print(f"    ✓ 침묵 {len(silences)}개")
 
-    # [3B-4] 오디오 강조 감지
-    print("  [3B-4] 오디오 강조 감지...")
+    # [3B-3] scene/context 그룹화 — verifier 입력(merged_clean.json)의 slides[].contexts로
+    # 그대로 이어지므로 유지한다. slide_ranges가 없으면(메타데이터 없이 폴백 전사한 경우)
+    # scene 단위로 묶을 기준이 없어 scenes_structure는 None으로 남는다.
+    print("  [3B-3] scene/context 그룹화...")
     t0 = time.time()
-    audio_path_temp = str(output_dir / "temp_analysis_audio.wav")
-    extract_audio_from_video(video_path, audio_path_temp)
-    annotated_segments: list[dict] = []
-    annotated_groups: list[dict] = []
     scenes_structure = None
-    emphasis_sections: list[dict] = []
-    topic_kw_set: set[str] = set()
-    topic_keyword_counts: dict[str, int] = {}
-    topic_keyword_scores: dict[str, int] = {}
-    try:
-        y, sr = librosa.load(audio_path_temp, sr=16000)
-        if slide_ranges:
-            groups, scenes_structure = group_segments_by_scene_and_context(
-                segments_clean, slide_ranges, duration, use_pause_sentence=False, use_llm_merge=True
-            )
-        else:
-            groups = group_segments_by_context(segments_clean)
-            scenes_structure = None
+    if slide_ranges:
+        _, scenes_structure = group_segments_by_scene_and_context(
+            segments_clean, slide_ranges, duration, use_pause_sentence=False, use_llm_merge=True
+        )
+    print(f"    ✓ context {sum(len(s.get('contexts', [])) for s in scenes_structure or [])}개  ({time.time()-t0:.1f}초)")
 
-        if on_contexts_ready and scenes_structure:
-            try:
-                on_contexts_ready({
-                    "segments_path": str(segments_path),
-                    "slides_structure": scenes_structure,
-                    "slide_ranges": slide_ranges,
-                    "duration": duration,
-                })
-            except Exception as exc:
-                log.warning(f"analyzer 조기 시작 실패(context 사용): {exc}")
-
-        topic_kw_set = get_topic_keywords_filtered_v2(
-            groups, min_freq=5, max_keywords=20, max_segment_ratio=1.0,
-            min_keyword_len=2, candidate_pool_size=80, use_llm_filter=True,
-        )
-        topic_keyword_counts = get_topic_keyword_count_map(
-            groups,
-            min_freq=5,
-            max_keywords=20,
-            max_segment_ratio=1.0,
-            min_keyword_len=2,
-            candidate_pool_size=80,
-            use_llm_filter=False,
-            _topic_keywords_override=topic_kw_set,
-        )
-        topic_keyword_scores = get_topic_keyword_score_map(topic_keyword_counts)
-        audio_emphasis = detect_emphasis_by_std(y, sr, groups)
-        keyword_emphasis = detect_emphasis_by_keywords_weighted(groups)
-        topic_emphasis = detect_emphasis_by_topic_keyword_repetition(
-            groups, window=2, min_keyword_len=2, max_segment_ratio=1.0,
-            min_freq=5, max_keywords=20, use_llm_filter=False, min_keyword_count=1,
-            _topic_keywords_override=topic_kw_set,
-            _topic_keyword_count_map=topic_keyword_counts,
-            _topic_keyword_score_map=topic_keyword_scores,
-        )
-        annotated_groups, emphasis_sections = combine_emphasis_simple(
-            audio_emphasis, keyword_emphasis + topic_emphasis, groups,
-        )
-        annotated_segments = expand_group_annotations_to_segments(
-            annotated_groups, segments_clean, groups
-        )
-        _save_json(emphasis_path, {
-            "method": "std_topic_v2",
-            "description": "표준편차 + 가중치 키워드 + 주제 키워드 반복",
-            "keyword_report": {
-                "description": "강조 감지에 사용된 주제 키워드",
-                "topic_keywords": {
-                    "keywords": sorted(topic_kw_set),
-                    "count": len(topic_kw_set),
-                },
-                "audio_topic_keywords": topic_keyword_count_items(topic_keyword_counts),
-            },
-            "statistics": {
-                "total_count": len(emphasis_sections),
-                "ratio": round(len(emphasis_sections) / len(groups), 3) if groups else 0,
-                "duration": round(sum(s["end"] - s["start"] for s in emphasis_sections), 2),
-            },
-            "topic_keywords": sorted(topic_kw_set),
-            "emphasis_sections": emphasis_sections,
-        })
-        print(f"    ✓ 강조 {len(emphasis_sections)}개  ({time.time()-t0:.1f}초)")
-    finally:
-        Path(audio_path_temp).unlink(missing_ok=True)
+    if on_contexts_ready and scenes_structure:
+        try:
+            on_contexts_ready({
+                "segments_path": str(segments_path),
+                "slides_structure": scenes_structure,
+                "slide_ranges": slide_ranges,
+                "duration": duration,
+            })
+        except Exception as exc:
+            log.warning(f"analyzer 조기 시작 실패(context 사용): {exc}")
 
     elapsed = time.time() - stage_started_at
     _done("오디오 파이프라인", elapsed)
     return {
         "segments_path": str(segments_path),
-        "silences_path": str(silences_path),
-        "emphasis_path": str(emphasis_path),
-        "annotated_segments": annotated_segments,
-        "annotated_groups": annotated_groups,
         "scenes_structure": scenes_structure,
         "slide_ranges": slide_ranges,
         "duration": duration,
