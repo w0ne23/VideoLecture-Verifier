@@ -189,6 +189,15 @@ function buildIssueJudgeColumn(judgeData, summaryData) {
   // 그대로 기록한 것이라 프론트에서 고정하지 않는다 (issue_judge.json.models).
   const models = asArray(judgeData?.models || summaryData?.models)
   const modelList = models.length ? models : Object.keys(counts)
+  const detailRows = [
+    { key: 'agreed', label: '모델 전원 일치', value: s.all_models_agreed_count ?? '-' },
+    { key: 'partial', label: '절반 이상 일치', value: s.majority_agreement_count ?? s.partial_agreement_count ?? '-' },
+    { key: 'single', label: '단일 강한 확신 통과', value: s.single_model_only_count ?? '-' },
+    { key: 'none', label: '이슈 없음', value: s.no_issue_claim_count ?? '-' },
+    { key: 'reject', label: '합의 기준 미달 기각', value: s.consensus_rejected_count ?? s.rejected_single_model_low_confidence_count ?? '-' },
+    { divider: true },
+    ...modelList.map(model => ({ key: model, label: model, value: counts[model] ?? 0 })),
+  ]
   return {
     key: 'issue_judge',
     title: '오류 후보 수',
@@ -196,7 +205,7 @@ function buildIssueJudgeColumn(judgeData, summaryData) {
     mainLabel: '탐지된 오류 후보 수',
     mainValue: issues.length,
     alwaysOpen: true,
-    detailRows: modelList.map(model => ({ key: model, label: model, value: counts[model] ?? 0 })),
+    detailRows,
   }
 }
 

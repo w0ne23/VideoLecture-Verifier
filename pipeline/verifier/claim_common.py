@@ -30,6 +30,11 @@ from utils import (
     is_retryable_api_error,
 )
 
+try:
+    from .runtime_llm import call_runtime_llm, configured_stage_models, resolve_runtime_binding
+except ImportError:
+    from runtime_llm import call_runtime_llm, configured_stage_models, resolve_runtime_binding
+
 
 # ── LLM 추상화 레이어 ────────────────────────────────────────
 
@@ -50,35 +55,18 @@ def _model_mode() -> str:
     return "fixed"
 
 
-def _default_judge_model(base_model: str) -> str:
-    base = str(base_model or "").strip()
-    if base == "gpt-5.4-mini":
-        return "gpt-5.1-medium"
-    return base
-
-
 def _resolve_stage_model(stage: str) -> str:
-    base = os.getenv("VERIFIER_MODEL", VERIFIER_MODEL).strip() or VERIFIER_MODEL
-    extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
-    judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
-    slide_error_model = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", VERIFIER_SLIDE_ERROR_MODEL).strip()
-    slide_error_transcribe_model = os.getenv(
-        "VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL", VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL
-    ).strip()
-    strong = judge_model or _default_judge_model(base)
-
-    if stage == "extract":
-        return extract_model or base
+    # Detector workers explicitly set their concrete model because several
+    # models execute the same stage in parallel.
     if stage == "judge":
-        return strong
-    if stage == "slide_error":
-        return slide_error_model or strong
-    if stage == "slide_error_transcribe":
-        # 판단이 아니라 "보이는 그대로 옮겨 적기"만 하는 작업이라 저렴한 모델로도 충분합니다.
-        # 기본값을 gpt-5.4-mini로 둬서, 모든 슬라이드에 대해 무조건 돌려도 비용 부담이
-        # slide_error 본 판단 호출보다 훨씬 작게 유지되도록 합니다.
-        return slide_error_transcribe_model or "gpt-5.4-mini"
-    return base
+        model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "").strip()
+        if model:
+            return model
+
+    selected = configured_stage_models(stage)
+    if selected:
+        return selected[0]
+    raise RuntimeError(f"{stage} 단계에 사용할 모델이 선택되지 않았습니다.")
 
 
 def _parse_openai_model_spec(model_spec: str) -> tuple[str, Optional[str]]:
@@ -417,9 +405,9 @@ def _deepseek_api_retry_config() -> tuple[int, float]:
     except ValueError:
         max_retries = 4
     try:
-        initial_wait = float(os.getenv("VERIFIER_DEEPSEEK_API_INITIAL_WAIT", "5") or "5")
+        initial_wait = float(os.getenv("VERIFIER_DEEPSEEK_API_INITIAL_WAIT", "0") or "0")
     except ValueError:
-        initial_wait = 5.0
+        initial_wait = 0.0
     return max(1, max_retries), max(0.0, initial_wait)
 
 
@@ -642,6 +630,32 @@ def _call_llm(
     model_spec = _resolve_stage_model(stage)
     model, reasoning_effort = _parse_openai_model_spec(model_spec)
 
+    # A profile selected in the web UI is authoritative for the stage.  Keep
+    # the existing provider branches below as a compatibility fallback for
+    # jobs started without a saved provider-neutral configuration.
+    runtime_binding = resolve_runtime_binding(stage, model)
+    if runtime_binding:
+        runtime_result = call_runtime_llm(
+            runtime_binding,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temp,
+            response_format=response_format,
+            image_bytes=image_bytes,
+            image_bytes_list=image_bytes_list,
+            model_spec=model_spec,
+            stage=stage,
+        )
+        if runtime_result is not None:
+            text, usage = runtime_result
+            usage.setdefault("endpoint_ref", runtime_binding.get("endpoint_ref", ""))
+            return text, usage
+
+    raise RuntimeError(
+        f"{stage} 단계의 선택 모델을 런타임 바인딩으로 해석하지 못했습니다: {model_spec}"
+    )
+
     # ── Local vLLM / Qwen (OpenAI-compatible) ───────────────
     if _is_vllm_model(model):
         import base64
@@ -655,7 +669,12 @@ def _call_llm(
             raise RuntimeError("LOCAL_LLM_API_KEY(또는 VLLM_API_KEY)가 설정되지 않았습니다.")
 
         resolved_model = _resolve_vllm_model(model)
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=_deepseek_request_timeout())
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=_deepseek_request_timeout(),
+            max_retries=0,
+        )
         image_payloads = []
         if image_bytes_list:
             image_payloads.extend([b for b in image_bytes_list if b])
@@ -1031,9 +1050,9 @@ def _call_llm(
 # ── 설정 ──────────────────────────────────────────────────
 
 BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "15"))
-VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gpt-5.6-luna-medium")
-VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "gpt-5.6-luna-medium")
-VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "gpt-5.6-luna-medium")
+VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "")
+VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
+VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
 VERIFIER_SLIDE_ERROR_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", "")
 VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))

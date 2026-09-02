@@ -164,20 +164,16 @@ def _status_from_score(score: float) -> str:
 
 
 def _grounding_model_specs() -> list[str]:
-    configured = (
-        _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODELS"))
-        or _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL"))
-        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODEL"))
-    )
-    return configured or ["gpt"]
+    try:
+        from .runtime_llm import configured_stage_models
+    except ImportError:
+        from runtime_llm import configured_stage_models
+    return configured_stage_models("grounding")
 
 
 def _pre_verifier_evidence_model() -> str:
-    return (
-        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MODEL", "").strip()
-        or "gpt-5.6-luna-medium"
-    )
+    configured = _grounding_model_specs()
+    return configured[0] if configured else ""
 
 
 def _pre_verifier_evidence_max_tool_calls() -> int:
@@ -237,10 +233,7 @@ def _pre_verifier_evidence_max_fetch_attempts() -> int:
 
 
 def _pre_verifier_evidence_semantic_model() -> str:
-    return (
-        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEMANTIC_MODEL", "").strip()
-        or _pre_verifier_evidence_model()
-    )
+    return _pre_verifier_evidence_model()
 
 
 def _pre_verifier_evidence_semantic_max_tokens() -> int:
@@ -1397,7 +1390,7 @@ def _call_source_repair_fallback(
         return payload, _empty_token_usage()
     directional_status = _directional_status_before_repair(payload)
     prompt = _build_source_repair_prompt(issue, payload, current_date)
-    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)), stage="grounding")
     repair: dict[str, Any] = {
         "provider": resolved.get("provider", ""),
         "model": model_spec,
@@ -1576,6 +1569,7 @@ def _call_document_relevance_assessment(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=_pre_verifier_document_relevance_max_tokens(),
+        stage="grounding",
     )
     parse_error = ""
     assessments: dict[str, dict[str, Any]] = {}
@@ -1750,7 +1744,7 @@ def _call_passage_extraction_fallback(
         payload,
         reselect_all=reselect_all,
     )
-    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)), stage="grounding")
     extraction: dict[str, Any] = {
         "provider": resolved.get("provider", ""),
         "model": model_spec,
@@ -1981,6 +1975,7 @@ def _call_source_trust_assessment(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=_pre_verifier_source_trust_max_tokens(),
+        stage="grounding",
     )
     valid_classes = {
         "primary_authority",
@@ -2157,7 +2152,7 @@ def _call_evidence_recheck(
     if not _evidence_recheck_enabled() or payload.get("source_verification_status") != "verified":
         return {}, _empty_token_usage()
     prompt = _build_evidence_recheck_prompt(issue, payload, current_date)
-    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)))
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max(512, min(max_tokens, 1200)), stage="grounding")
     try:
         recheck = _parse_response(text or "", require_sources=False)
     except Exception as exc:
@@ -2562,6 +2557,7 @@ def _call_pre_verifier_web_search(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=max_tokens,
+        stage="grounding",
         web_search=True,
         web_search_max_calls=_pre_verifier_evidence_max_tool_calls(),
         web_search_force=False,
@@ -2667,7 +2663,7 @@ def _call_text_grounding(
     max_tokens: int,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     prompt = _build_grounding_json_prompt(issue, current_date)
-    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max_tokens)
+    text, usage, resolved = _call_llm(model_spec=model_spec, prompt=prompt, max_tokens=max_tokens, stage="grounding")
     payload = _parse_response(text or "")
     payload["model"] = model_spec
     payload["resolved_model"] = resolved.get("resolved_model", model_spec)
@@ -3103,6 +3099,7 @@ def _call_pre_verifier_query_plan(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=_pre_verifier_query_plan_max_tokens(),
+        stage="grounding",
     )
     plans, parse_error = _normalize_pre_verifier_query_plans(
         text,
@@ -3502,6 +3499,7 @@ def _call_pre_verifier_semantic_assessment(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=_pre_verifier_evidence_semantic_max_tokens(),
+        stage="grounding",
     )
     assessments, parse_error = _normalize_semantic_assessments(text, excerpts)
     retry_count = 0
@@ -3510,6 +3508,7 @@ def _call_pre_verifier_semantic_assessment(
             model_spec=model_spec,
             prompt=prompt,
             max_tokens=_pre_verifier_evidence_semantic_max_tokens(),
+            stage="grounding",
         )
         retry_assessments, retry_parse_error = _normalize_semantic_assessments(
             retry_text,
@@ -4696,6 +4695,7 @@ def _call_pre_verifier_batch_assessment(
         model_spec=model_spec,
         prompt=prompt,
         max_tokens=_pre_verifier_batch_assessment_max_tokens(),
+        stage="grounding",
     )
     results, parse_error = _normalize_pre_verifier_batch_assessment(
         text,
@@ -4838,6 +4838,8 @@ def collect_pre_verifier_evidence(
     target_groups = _group_pre_verifier_targets(targets)
     retrieval_targets = [group[0] for group in target_groups]
     model_spec = _pre_verifier_evidence_model()
+    if retrieval_targets and not model_spec:
+        raise RuntimeError("웹 근거 수집에 사용할 모델을 grounding 단계에서 선택해야 합니다.")
     token_usage = _empty_token_usage()
     evidence_items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -5034,6 +5036,8 @@ def collect_pre_verifier_evidence_batched(
     ]
     model_spec = _pre_verifier_evidence_model()
     query_plan_model_spec = _pre_verifier_evidence_semantic_model()
+    if retrieval_targets and (not model_spec or not query_plan_model_spec):
+        raise RuntimeError("웹 근거 수집에 사용할 모델을 grounding 단계에서 선택해야 합니다.")
     stage_usage = {
         "query_planning": _empty_token_usage(),
         "web_search_and_fetch": _empty_token_usage(),

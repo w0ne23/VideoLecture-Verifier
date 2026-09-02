@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   applyEditorStateToStages,
   ensureProvidersForEditorState,
@@ -8,13 +9,9 @@ import {
   validateStagesForSave,
 } from './stageModels'
 import {
-  defaultEndpointConfig,
   buildLlmConfig,
-  detectProvider,
   loadRegisteredLlms,
-  maskKey,
-  PROVIDERS_META,
-  providerRequiresKey,
+  providerMeta,
   saveRegisteredLlms,
 } from './llmRegistry'
 
@@ -98,25 +95,27 @@ function recomputeWeights(selected) {
 
 function providerName(providers, providerId) {
   const provider = providers.find(item => item.id === providerId)
-  return provider ? (PROVIDERS_META[provider.type]?.name || provider.type) : ''
+  return provider ? providerMeta(provider.type, provider).name : ''
 }
 
 function getAutoStages(providers) {
   const nextStages = createInitialStages()
   const firstProvider = providers[0]
+  const firstMeta = providerMeta(firstProvider.type, firstProvider)
 
   nextStages.claim.selected = firstProvider.id
-  nextStages.claim.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
+  nextStages.claim.version = firstProvider.version || firstMeta.versions?.[0] || ''
   nextStages.ground.selected = firstProvider.id
-  nextStages.ground.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
+  nextStages.ground.version = firstProvider.version || firstMeta.versions?.[0] || ''
   nextStages.slide.selected = firstProvider.id
-  nextStages.slide.version = firstProvider.version || PROVIDERS_META[firstProvider.type]?.versions?.[0] || ''
+  nextStages.slide.version = firstProvider.version || firstMeta.versions?.[0] || ''
 
   ;['detect', 'classify', 'judge'].forEach(stageKey => {
     const selected = providers.map(provider => provider.id)
     nextStages[stageKey].selected = selected
     nextStages[stageKey].versions = providers.reduce((versions, provider) => {
-      versions[provider.id] = provider.version || PROVIDERS_META[provider.type]?.versions?.[0] || ''
+      const meta = providerMeta(provider.type, provider)
+      versions[provider.id] = provider.version || meta.versions?.[0] || ''
       return versions
     }, {})
     nextStages[stageKey].weights = recomputeWeights(selected)
@@ -143,13 +142,10 @@ export default function ModelSetupConsole({
   isSubmitting = false,
   errorMessage = '',
 }) {
+  const navigate = useNavigate()
   const [view, setView] = useState('key')
   const [presetName, setPresetName] = useState(initialName)
   const [providers, setProviders] = useState(() => loadRegisteredLlms())
-  const [providerSelect, setProviderSelect] = useState('auto')
-  const [keyValue, setKeyValue] = useState('')
-  const [rememberKey, setRememberKey] = useState(true)
-  const [showHelp, setShowHelp] = useState(false)
   const [stages, setStages] = useState(() => createInitialStages())
   const [activeStage, setActiveStage] = useState('claim')
   const [openDropdown, setOpenDropdown] = useState(null)
@@ -238,69 +234,8 @@ export default function ModelSetupConsole({
   }, [providers, stages])
 
   useEffect(() => {
-    if (rememberKey) {
-      saveRegisteredLlms(providers.filter(provider => !provider.isPresetPlaceholder))
-      return
-    }
-    localStorage.removeItem('vlverifier_registered_llms')
-    localStorage.removeItem('vlverifier_providers')
-  }, [providers, rememberKey])
-
-  const addProvider = () => {
-    const key = keyValue.trim()
-    if (!key && providerSelect === 'auto') {
-      window.alert('API 키를 입력해주세요.')
-      return
-    }
-
-    const detected = detectProvider(key)
-    let finalType = providerSelect
-
-    if (providerSelect === 'auto') {
-      if (!detected) {
-        window.alert('키 형식을 인식할 수 없어요. 위 드롭다운에서 provider를 직접 선택해주세요.')
-        return
-      }
-      finalType = detected
-    } else if (providerRequiresKey(finalType) && !key) {
-      window.alert('API 키를 입력해주세요.')
-      return
-    } else if (detected && detected !== providerSelect) {
-      const shouldUseDetected = window.confirm(
-        `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n선택하신 ${PROVIDERS_META[providerSelect].name} 대신 ${PROVIDERS_META[detected].name}로 등록할까요?`,
-      )
-      if (!shouldUseDetected) return
-      finalType = detected
-    }
-
-    setProviders(current => {
-      const placeholder = current.find(
-        provider => provider.type === finalType && provider.isPresetPlaceholder,
-      )
-      if (placeholder) {
-        return current.map(provider => (
-          provider.id === placeholder.id
-            ? { ...provider, keyMasked: maskKey(key), isPresetPlaceholder: false }
-            : provider
-        ))
-      }
-      return [
-        ...current,
-        {
-          id: nextProviderId(current),
-          type: finalType,
-          version: PROVIDERS_META[finalType]?.versions?.[0] || '',
-          modelId: PROVIDERS_META[finalType]?.versions?.[0] || '',
-          keyMasked: providerRequiresKey(finalType) ? maskKey(key) : '키 불필요',
-          providerName: PROVIDERS_META[finalType]?.name || finalType,
-          ...defaultEndpointConfig(finalType),
-          isPresetPlaceholder: false,
-        },
-      ]
-    })
-    setKeyValue('')
-    setProviderSelect('auto')
-  }
+    saveRegisteredLlms(providers.filter(provider => !provider.isPresetPlaceholder))
+  }, [providers])
 
   const removeProvider = providerId => {
     const usedStages = stageUsage[providerId] || []
@@ -367,11 +302,12 @@ export default function ModelSetupConsole({
 
     setStages(current => {
       const stage = current[activeStage]
-      const meta = PROVIDERS_META[provider.type] || PROVIDERS_META.custom
+      const meta = providerMeta(provider.type, provider)
+      const version = provider.version || meta.versions?.[0] || ''
       if (stage.mode === 'single') {
         return {
           ...current,
-          [activeStage]: { ...stage, selected: providerId, version: meta.versions[0] },
+          [activeStage]: { ...stage, selected: providerId, version },
         }
       }
 
@@ -383,7 +319,7 @@ export default function ModelSetupConsole({
       if (alreadySelected) {
         delete versions[providerId]
       } else {
-        versions[providerId] = meta.versions[0]
+        versions[providerId] = version
       }
 
       return {
@@ -547,7 +483,7 @@ export default function ModelSetupConsole({
                   <div className="ms-provider-list">
                     {providers.map(provider => (
                       <div className="ms-provider-row" key={provider.id}>
-                        <span className="ms-provider-name">{PROVIDERS_META[provider.type]?.name || provider.type}</span>
+                        <span className="ms-provider-name">{providerMeta(provider.type, provider).name}</span>
                         <span className="ms-provider-key">{provider.keyMasked}</span>
                         <span className="ms-provider-check">
                           {provider.isPresetPlaceholder ? '복원' : 'OK'}
@@ -567,58 +503,16 @@ export default function ModelSetupConsole({
                   <p className="ms-empty">아직 등록된 모델이 없어요.</p>
                 )}
 
-                <div className="ms-add-row">
-                  <select value={providerSelect} onChange={event => setProviderSelect(event.target.value)}>
-                    <option value="auto">자동 인식</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="xai">xAI</option>
-                  </select>
-                  <input
-                    type="text"
-                    value={keyValue}
-                    placeholder="API 키를 붙여넣으세요"
-                    onChange={event => setKeyValue(event.target.value)}
-                  />
-                  <button className="ms-btn-secondary ms-add-btn" type="button" onClick={addProvider}>
-                    추가
-                  </button>
-                </div>
-
-                <button className="ms-link-btn" type="button" onClick={() => setShowHelp(current => !current)}>
-                  키 발급 방법 보기
+                <p className="ms-hint">
+                  새 Provider와 모델은 LiteLLM 카탈로그를 사용하는 모델 등록 화면에서 추가할 수 있어요.
+                </p>
+                <button
+                  className="ms-btn-secondary"
+                  type="button"
+                  onClick={() => navigate('/model-setup/models')}
+                >
+                  모델 등록 화면 열기
                 </button>
-                {showHelp && (
-                  <div className="ms-help-panel">
-                    <div className="ms-help-row">
-                      <span>OpenAI</span>
-                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">
-                        API Keys 페이지 열기 -&gt;
-                      </a>
-                    </div>
-                    <div className="ms-help-row">
-                      <span>Anthropic</span>
-                      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
-                        API Keys 페이지 열기 -&gt;
-                      </a>
-                    </div>
-                    <div className="ms-help-row">
-                      <span>xAI</span>
-                      <a href="https://console.x.ai" target="_blank" rel="noreferrer">
-                        콘솔 열기 -&gt;
-                      </a>
-                    </div>
-                  </div>
-                )}
-
-                <label className="ms-checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={rememberKey}
-                    onChange={event => setRememberKey(event.target.checked)}
-                  />
-                  다음에도 이 키 기억하기
-                </label>
               </div>
 
               <div className="ms-actions">
@@ -679,15 +573,16 @@ export default function ModelSetupConsole({
                 <p className="ms-desc">{activeStageConfig.desc}</p>
                 <div className="ms-chip-row">
                   {providers.map(provider => {
-                    const meta = PROVIDERS_META[provider.type] || PROVIDERS_META.custom
+                    const meta = providerMeta(provider.type, provider)
+                    const providerVersions = provider.version ? [provider.version] : (meta.versions || [])
                     const isSelected = activeStageConfig.mode === 'single'
                       ? activeStageConfig.selected === provider.id
                       : activeStageConfig.selected.includes(provider.id)
                     const currentVersion = activeStageConfig.mode === 'single'
                       ? activeStageConfig.selected === provider.id
                         ? activeStageConfig.version
-                        : meta.versions[0]
-                      : activeStageConfig.versions[provider.id] || meta.versions[0]
+                        : providerVersions[0]
+                      : activeStageConfig.versions[provider.id] || providerVersions[0]
 
                     return (
                       <div className="ms-chip-wrap" key={provider.id}>
@@ -708,7 +603,7 @@ export default function ModelSetupConsole({
                         </button>
                         {openDropdown === provider.id && (
                           <div className="ms-dropdown">
-                            {meta.versions.map(version => (
+                            {providerVersions.map(version => (
                               <button
                                 className={`ms-dd-item${version === currentVersion ? ' ms-dd-item--active' : ''}`}
                                 type="button"

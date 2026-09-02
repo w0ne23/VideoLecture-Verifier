@@ -117,6 +117,25 @@ class ModelSettingProfile(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class LlmCredential(Base):
+    """웹에서 등록한 Provider credential.
+
+    API key 원문은 저장하지 않고 application-level encryption으로 암호화한
+    값만 저장한다. ``credential_ref``만 모델 설정에 들어가며, 실제 값은
+    강의 실행 프로세스에서만 복호화한다.
+    """
+
+    __tablename__ = 'llm_credentials'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=True)
+    fingerprint = Column(String, nullable=False, index=True)
+    encrypted_api_key = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class VerificationStats(Base):
     """완료된 verify 실행 1건에서 추출한 통계용 요약. 통계 페이지가 이 테이블만
     집계한다. 원본(진실)은 여전히 디스크의 verification_final.json 등이고, 이 행은

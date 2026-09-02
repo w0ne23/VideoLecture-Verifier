@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { getLlmCatalog } from '../../api/llmCatalog'
+import { saveLlmCredential } from '../../api/llmCredentials'
+import SearchableSelect from '../../components/model-setup/SearchableSelect'
 import {
   CUSTOM_VERSION,
-  PROVIDERS_META,
-  detectProvider,
   llmLabel,
   loadRegisteredLlms,
   maskKey,
   nextLlmId,
+  providerMeta,
   providerRequiresKey,
   saveRegisteredLlms,
   versionToModelId,
@@ -18,124 +20,179 @@ const NO_KEY_LABEL = '키 불필요'
 export default function ModelRegistryPage() {
   const navigate = useNavigate()
   const [llms, setLlms] = useState(() => loadRegisteredLlms())
-  const [providerSelect, setProviderSelect] = useState('auto')
+  const [providerSelect, setProviderSelect] = useState('')
   const [keyValue, setKeyValue] = useState('')
   const [version, setVersion] = useState('')
   const [customVersion, setCustomVersion] = useState('')
   // const [showHelp, setShowHelp] = useState(false)
   const [editingId, setEditingId] = useState(null)
-  const [editProviderSelect, setEditProviderSelect] = useState('auto')
+  const [editProviderSelect, setEditProviderSelect] = useState('')
   const [editKeyValue, setEditKeyValue] = useState('')
   const [editVersion, setEditVersion] = useState('')
   const [editCustomVersion, setEditCustomVersion] = useState('')
+  const [catalog, setCatalog] = useState(null)
+  const [catalogStatus, setCatalogStatus] = useState('loading')
+  const [catalogError, setCatalogError] = useState('')
+  const [credentialSaving, setCredentialSaving] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    getLlmCatalog()
+      .then(data => {
+        if (cancelled) return
+        setCatalog(data)
+        setCatalogStatus('ready')
+      })
+      .catch(error => {
+        if (cancelled) return
+        setCatalogStatus('error')
+        setCatalogError(error.message || 'LiteLLM 모델 목록을 불러오지 못했습니다.')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const catalogProviderMap = useMemo(
+    () => new Map((catalog?.providers || []).map(provider => [provider.id, provider])),
+    [catalog],
+  )
+
+  const providerEntries = useMemo(() => {
+    if (catalogStatus !== 'ready') return []
+    return (catalog?.providers || []).map(provider => [
+      provider.id,
+      providerMeta(provider.id, provider),
+    ])
+  }, [catalog, catalogProviderMap, catalogStatus])
+
+  const providerOptions = useMemo(
+    () => providerEntries.map(([value, meta]) => ({ value, label: meta.name })),
+    [providerEntries],
+  )
+
+  const catalogModelsFor = type => (catalog?.models || [])
+    .filter(model => model.provider === type)
+    .map(model => model.id)
+
+  const modelOptionsFor = type => {
+    return catalogStatus === 'ready' ? catalogModelsFor(type) : []
+  }
+
+  const metaFor = type => providerMeta(type, {
+    providerName: catalogProviderMap.get(type)?.name,
+  })
 
   const resolvedType = useMemo(() => {
-    if (providerSelect !== 'auto') return providerSelect
-    return detectProvider(keyValue.trim()) || ''
-  }, [providerSelect, keyValue])
+    return providerSelect
+  }, [providerSelect])
 
-  const keyRequired = resolvedType ? providerRequiresKey(resolvedType) : true
-  const versionOptions = resolvedType ? PROVIDERS_META[resolvedType].versions : []
+  const keyRequired = resolvedType
+    ? providerRequiresKey(resolvedType, catalogProviderMap.get(resolvedType))
+    : true
+  const versionOptions = resolvedType ? modelOptionsFor(resolvedType) : []
 
   useEffect(() => {
     if (!resolvedType) {
       setVersion(current => (current ? '' : current))
       return
     }
-    const options = PROVIDERS_META[resolvedType].versions
+    const options = modelOptionsFor(resolvedType)
     setVersion(current => (current === CUSTOM_VERSION || options.includes(current) ? current : options[0]))
-  }, [resolvedType])
+  }, [resolvedType, catalogStatus, catalog])
 
   const editingLlm = editingId ? llms.find(llm => llm.id === editingId) : null
 
   const editResolvedType = useMemo(() => {
-    if (editProviderSelect !== 'auto') return editProviderSelect
-    return detectProvider(editKeyValue.trim()) || (editingLlm ? editingLlm.type : '')
-  }, [editProviderSelect, editKeyValue, editingLlm])
+    return editProviderSelect || (editingLlm ? editingLlm.type : '')
+  }, [editProviderSelect, editingLlm])
 
-  const editKeyRequired = editResolvedType ? providerRequiresKey(editResolvedType) : true
-  const editVersionOptions = editResolvedType ? PROVIDERS_META[editResolvedType].versions : []
+  const editKeyRequired = editResolvedType
+    ? providerRequiresKey(editResolvedType, catalogProviderMap.get(editResolvedType))
+    : true
+  const editVersionOptions = editResolvedType ? modelOptionsFor(editResolvedType) : []
 
   useEffect(() => {
     if (!editingId) return
-    const options = editResolvedType ? PROVIDERS_META[editResolvedType].versions : []
+    const options = editResolvedType ? modelOptionsFor(editResolvedType) : []
     setEditVersion(current => (
       current === CUSTOM_VERSION || options.includes(current) ? current : (options[0] || '')
     ))
-  }, [editingId, editResolvedType])
+  }, [editingId, editResolvedType, catalogStatus, catalog])
 
   const persist = next => {
     setLlms(next)
     saveRegisteredLlms(next)
   }
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
+    if (credentialSaving) return
     const key = keyValue.trim()
-    let finalType = providerSelect
-
-    if (providerSelect === 'auto') {
-      if (!key) {
-        window.alert('API 키를 입력해주세요.')
-        return
-      }
-      const detected = detectProvider(key)
-      if (!detected) {
-        window.alert('키 형식을 인식할 수 없어요. provider를 직접 선택해주세요.')
-        return
-      }
-      finalType = detected
-    } else if (keyRequired) {
-      if (!key) {
-        window.alert('API 키를 입력해주세요.')
-        return
-      }
-      const detected = detectProvider(key)
-      if (detected && detected !== providerSelect) {
-        const useDetected = window.confirm(
-          `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n`
-          + `선택하신 ${PROVIDERS_META[providerSelect].name} 대신 ${PROVIDERS_META[detected].name}로 등록할까요?`,
-        )
-        if (!useDetected) return
-        finalType = detected
-      }
+    const finalType = providerSelect
+    if (!finalType) {
+      window.alert('LiteLLM Provider를 선택해주세요.')
+      return
+    }
+    if (keyRequired && !key) {
+      window.alert('API 키를 입력해주세요.')
+      return
     }
 
-    const meta = PROVIDERS_META[finalType]
+    const meta = metaFor(finalType)
     const selectedVersion = version === CUSTOM_VERSION
       ? customVersion.trim()
-      : (versionOptions.includes(version) ? version : meta.versions[0])
+      : (versionOptions.includes(version) ? version : versionOptions[0])
     if (!selectedVersion) {
       window.alert('모델명을 입력해주세요.')
       return
     }
 
-    const modelId = versionToModelId(selectedVersion)
-    const keyMasked = providerRequiresKey(finalType) ? maskKey(key) : NO_KEY_LABEL
+    const catalogModel = (catalog?.models || []).find(
+      model => model.provider === finalType && model.id === selectedVersion,
+    )
+    const modelId = catalogModel?.id || versionToModelId(selectedVersion)
+    const finalProvider = catalogProviderMap.get(finalType)
+    const requiresKey = providerRequiresKey(finalType, finalProvider)
+    const keyMasked = requiresKey ? maskKey(key) : NO_KEY_LABEL
     const duplicate = llms.some(
       llm => llm.type === finalType && llm.modelId === modelId
-        && (!providerRequiresKey(finalType) || llm.keyMasked === keyMasked),
+        && (!requiresKey || llm.keyMasked === keyMasked),
     )
     if (duplicate) {
-      window.alert(providerRequiresKey(finalType) ? '이미 같은 키·모델로 등록되어 있어요.' : '이미 등록된 로컬 모델이에요.')
+      window.alert(requiresKey ? '이미 같은 키·모델로 등록되어 있어요.' : '이미 등록된 로컬 모델이에요.')
       return
     }
 
-    const next = [
-      ...llms,
-      {
-        id: nextLlmId(llms),
-        type: finalType,
-        version: selectedVersion,
-        modelId,
-        keyMasked,
-        providerName: meta.name,
-      },
-    ]
-    persist(next)
-    setKeyValue('')
-    setVersion('')
-    setCustomVersion('')
-    setProviderSelect('auto')
+    setCredentialSaving(true)
+    try {
+      const credential = requiresKey
+        ? await saveLlmCredential({ provider: finalType, model: modelId, apiKey: key })
+        : null
+      const next = [
+        ...llms,
+        {
+          id: nextLlmId(llms),
+          type: finalType,
+          version: selectedVersion,
+          modelId,
+          credentialRef: credential?.credential_ref || '',
+          keyMasked: credential?.key_masked || keyMasked,
+          providerName: meta.name,
+          capabilities: catalogModel ? {
+            reasoning: catalogModel.supports_reasoning === true,
+            vision: catalogModel.supports_vision === true,
+            json_schema: catalogModel.supports_response_schema === true,
+          } : {},
+        },
+      ]
+      persist(next)
+      setKeyValue('')
+      setVersion('')
+      setCustomVersion('')
+      setProviderSelect('')
+    } catch (error) {
+      window.alert(String(error.message || error))
+    } finally {
+      setCredentialSaving(false)
+    }
   }
 
   const handleRemove = id => {
@@ -146,8 +203,10 @@ export default function ModelRegistryPage() {
   const handleEditStart = llm => {
     setEditingId(llm.id)
     setEditProviderSelect(llm.type)
-    setEditKeyValue(llm.keyMasked)
-    const meta = PROVIDERS_META[llm.type]
+    // The masked value is intentionally never copied into the editable secret
+    // field. An empty value means “keep the existing credential”.
+    setEditKeyValue('')
+    const meta = metaFor(llm.type)
     const isPresetVersion = meta?.versions.includes(llm.version)
     setEditVersion(isPresetVersion ? llm.version : CUSTOM_VERSION)
     setEditCustomVersion(isPresetVersion ? '' : llm.version)
@@ -155,56 +214,67 @@ export default function ModelRegistryPage() {
 
   const handleEditCancel = () => {
     setEditingId(null)
-    setEditProviderSelect('auto')
+    setEditProviderSelect('')
     setEditKeyValue('')
     setEditVersion('')
     setEditCustomVersion('')
   }
 
-  const handleEditSave = () => {
+  const handleEditSave = async () => {
+    if (credentialSaving) return
     const current = llms.find(llm => llm.id === editingId)
     if (!current) return
 
     const key = editKeyValue.trim()
-    const keyChanged = key !== current.keyMasked
-    let finalType = editProviderSelect === 'auto' ? current.type : editProviderSelect
+    const finalType = editProviderSelect || current.type
+    const providerChanged = finalType !== current.type
+    const keyChanged = Boolean(key)
+    const requiresKey = providerRequiresKey(finalType, catalogProviderMap.get(finalType))
     let keyMasked = current.keyMasked
 
-    if (editKeyRequired && keyChanged && key) {
-      const detected = detectProvider(key)
-      if (editProviderSelect === 'auto') {
-        if (!detected) {
-          window.alert('키 형식을 인식할 수 없어요. provider를 직접 선택해주세요.')
-          return
-        }
-        finalType = detected
-      } else if (detected && detected !== editProviderSelect) {
-        const useDetected = window.confirm(
-          `입력하신 키는 ${PROVIDERS_META[detected].name} 형식으로 보여요.\n`
-          + `선택하신 ${PROVIDERS_META[editProviderSelect].name} 대신 ${PROVIDERS_META[detected].name}로 변경할까요?`,
-        )
-        finalType = useDetected ? detected : editProviderSelect
-      }
+    if (requiresKey && providerChanged && !key) {
+      window.alert('Provider를 바꾸려면 새 API 키를 입력해주세요.')
+      return
+    }
+    if (requiresKey && keyChanged) {
       keyMasked = maskKey(key)
-    } else if (!providerRequiresKey(finalType)) {
+    } else if (!requiresKey) {
       keyMasked = NO_KEY_LABEL
     }
 
-    const meta = PROVIDERS_META[finalType]
+    const meta = metaFor(finalType)
     const selectedVersion = editVersion === CUSTOM_VERSION
       ? editCustomVersion.trim()
-      : (meta.versions.includes(editVersion) ? editVersion : meta.versions[0])
+      : (editVersionOptions.includes(editVersion) ? editVersion : editVersionOptions[0])
     if (!selectedVersion) {
       window.alert('모델명을 입력해주세요.')
       return
     }
     const modelId = versionToModelId(selectedVersion)
 
-    const next = llms.map(llm => (llm.id === editingId
-      ? { ...llm, type: finalType, version: selectedVersion, modelId, keyMasked, providerName: meta.name }
-      : llm))
-    persist(next)
-    handleEditCancel()
+    setCredentialSaving(true)
+    try {
+      const credential = requiresKey && keyChanged
+        ? await saveLlmCredential({ provider: finalType, model: modelId, apiKey: key })
+        : null
+      const next = llms.map(llm => (llm.id === editingId
+        ? {
+          ...llm,
+          type: finalType,
+          version: selectedVersion,
+          modelId,
+          credentialRef: credential?.credential_ref || (providerChanged ? '' : llm.credentialRef || ''),
+          keyMasked: credential?.key_masked || (providerChanged ? NO_KEY_LABEL : keyMasked),
+          providerName: meta.name,
+        }
+        : llm))
+      persist(next)
+      handleEditCancel()
+    } catch (error) {
+      window.alert(String(error.message || error))
+    } finally {
+      setCredentialSaving(false)
+    }
   }
 
   return (
@@ -224,17 +294,19 @@ export default function ModelRegistryPage() {
               API 키(또는 로컬 모델명)를 등록하면 여기서 등록한 모델만 LLM 조합 만들기에서 선택할 수 있어요.
             </p>
             <div className="ms-add-row ms-add-row--wrap">
-              <select value={providerSelect} onChange={event => {
-                setProviderSelect(event.target.value)
+              <SearchableSelect
+                className="ms-provider-select"
+                value={providerSelect}
+                options={providerOptions}
+                placeholder={catalogStatus === 'loading' ? 'Provider 로딩 중…' : 'Provider 선택'}
+                searchPlaceholder="Provider 검색…"
+                disabled={catalogStatus !== 'ready'}
+                onChange={nextValue => {
+                setProviderSelect(nextValue)
                 setVersion('')
                 setCustomVersion('')
               }}
-              >
-                <option value="auto">자동 감지</option>
-                {Object.entries(PROVIDERS_META).map(([type, meta]) => (
-                  <option value={type} key={type}>{meta.name}</option>
-                ))}
-              </select>
+              />
               <input
                 type="password"
                 value={keyValue}
@@ -242,20 +314,21 @@ export default function ModelRegistryPage() {
                 disabled={!keyRequired}
                 onChange={event => setKeyValue(event.target.value)}
                 onKeyDown={event => {
-                  if (event.key === 'Enter') handleAdd()
+                  if (event.key === 'Enter') void handleAdd()
                 }}
               />
-              <select
+              <SearchableSelect
+                className="ms-model-select"
                 value={version || ''}
-                onChange={event => setVersion(event.target.value)}
+                onChange={setVersion}
+                options={[
+                  ...versionOptions.map(option => ({ value: option, label: option })),
+                  ...(resolvedType ? [{ value: CUSTOM_VERSION, label: '직접 입력...' }] : []),
+                ]}
+                placeholder={versionOptions.length ? '모델 선택' : 'Provider 먼저 선택'}
+                searchPlaceholder="모델 검색…"
                 disabled={!versionOptions.length}
-              >
-                <option value="">{versionOptions.length ? '모델 선택' : '키/provider 먼저'}</option>
-                {versionOptions.map(option => (
-                  <option value={option} key={option}>{option}</option>
-                ))}
-                {resolvedType && <option value={CUSTOM_VERSION}>직접 입력...</option>}
-              </select>
+              />
               {version === CUSTOM_VERSION && (
                 <input
                   type="text"
@@ -267,10 +340,15 @@ export default function ModelRegistryPage() {
                   }}
                 />
               )}
-              <button className="ms-btn-primary ms-add-btn" type="button" onClick={handleAdd}>
-                등록
+              <button className="ms-btn-primary ms-add-btn" type="button" onClick={() => void handleAdd()} disabled={credentialSaving}>
+                {credentialSaving ? '저장 중…' : '등록'}
               </button>
             </div>
+            <p className="ms-hint" style={{ marginTop: 10, marginBottom: 0 }}>
+              {catalogStatus === 'loading' && 'LiteLLM 지원 목록을 불러오는 중이에요…'}
+              {catalogStatus === 'ready' && `LiteLLM 카탈로그에서 ${catalog.providers.length}개 Provider를 불러왔어요.`}
+              {catalogStatus === 'error' && `LiteLLM 카탈로그를 불러오지 못했습니다. (${catalogError})`}
+            </p>
 
             {/* API 키 발급 안내: 나중에 필요하면 복원
             <button className="ms-link-btn" type="button" onClick={() => setShowHelp(current => !current)}>
@@ -306,37 +384,38 @@ export default function ModelRegistryPage() {
                     <div className="ms-provider-row ms-provider-row--edit" key={llm.id}>
                       <span className="ms-provider-index">{index + 1}</span>
                       <div className="ms-provider-edit-fields">
-                        <select
+                        <SearchableSelect
+                          className="ms-provider-select"
                           value={editProviderSelect}
-                          onChange={event => setEditProviderSelect(event.target.value)}
-                        >
-                          <option value="auto">자동 감지</option>
-                          {Object.entries(PROVIDERS_META).map(([type, meta]) => (
-                            <option value={type} key={type}>{meta.name}</option>
-                          ))}
-                        </select>
+                          options={providerOptions}
+                          placeholder="Provider 선택"
+                          searchPlaceholder="Provider 검색…"
+                          disabled={catalogStatus !== 'ready'}
+                          onChange={setEditProviderSelect}
+                        />
                         <input
-                          type="text"
+                          type="password"
                           value={editKeyValue}
-                          placeholder={editKeyRequired ? 'API 키' : '로컬 모델은 키가 필요 없어요'}
+                          placeholder={editKeyRequired ? `바꾸려면 새 API 키 입력 (${llm.keyMasked || '미등록'})` : '로컬 모델은 키가 필요 없어요'}
                           disabled={!editKeyRequired}
                           onChange={event => setEditKeyValue(event.target.value)}
                           onKeyDown={event => {
-                            if (event.key === 'Enter') handleEditSave()
+                            if (event.key === 'Enter') void handleEditSave()
                             if (event.key === 'Escape') handleEditCancel()
                           }}
                         />
-                        <select
+                        <SearchableSelect
+                          className="ms-model-select"
                           value={editVersion || ''}
-                          onChange={event => setEditVersion(event.target.value)}
+                          onChange={setEditVersion}
+                          options={[
+                            ...editVersionOptions.map(option => ({ value: option, label: option })),
+                            ...(editResolvedType ? [{ value: CUSTOM_VERSION, label: '직접 입력...' }] : []),
+                          ]}
+                          placeholder={editVersionOptions.length ? '모델 선택' : 'Provider 먼저 선택'}
+                          searchPlaceholder="모델 검색…"
                           disabled={!editVersionOptions.length}
-                        >
-                          <option value="">{editVersionOptions.length ? '모델 선택' : '키/provider 먼저'}</option>
-                          {editVersionOptions.map(option => (
-                            <option value={option} key={option}>{option}</option>
-                          ))}
-                          {editResolvedType && <option value={CUSTOM_VERSION}>직접 입력...</option>}
-                        </select>
+                        />
                         {editVersion === CUSTOM_VERSION && (
                           <input
                             type="text"
@@ -351,8 +430,8 @@ export default function ModelRegistryPage() {
                         )}
                       </div>
                       <div className="ms-provider-actions">
-                        <button className="ms-btn-primary ms-add-btn" type="button" onClick={handleEditSave}>
-                          저장
+                        <button className="ms-btn-primary ms-add-btn" type="button" onClick={() => void handleEditSave()} disabled={credentialSaving}>
+                          {credentialSaving ? '저장 중…' : '저장'}
                         </button>
                         <button className="ms-link-btn ms-link-btn--compact" type="button" onClick={handleEditCancel}>
                           취소
@@ -363,7 +442,7 @@ export default function ModelRegistryPage() {
                     <div className="ms-provider-row" key={llm.id}>
                       <span className="ms-provider-index">{index + 1}</span>
                       <div className="ms-provider-info">
-                        <span className="ms-provider-name">{PROVIDERS_META[llm.type]?.name || llm.type}</span>
+                        <span className="ms-provider-name">{providerMeta(llm.type, llm).name || llm.type}</span>
                         <span className="ms-provider-key-masked">{llm.keyMasked}</span>
                         <span className={`ms-llm-version-chip ms-llm-version-chip--${llm.type}`}>{llm.version}</span>
                       </div>
