@@ -1,3 +1,6 @@
+// 강의 영상 업로드 카드 — 드래그&드롭 / 파일 선택 + 썸네일 미리보기 + 제목 입력
+// 상태·제출은 useUploadForm, 썸네일은 useVideoThumbnail 에 위임
+
 import { useRef } from 'react'
 import { useUploadForm } from '../hooks/useUploadForm'
 import { useVideoThumbnail } from '../hooks/useVideoThumbnail'
@@ -7,6 +10,7 @@ export default function UploadForm({ onUploaded }) {
   const { file, title, errorMessage, isSubmitting, actions } = useUploadForm({ onUploaded })
   const thumbnailUrl = useVideoThumbnail(file)
 
+  // 드롭된 파일 중 첫 번째만 사용
   function onDrop(event) {
     event.preventDefault()
     actions.selectFile(event.dataTransfer.files?.[0])

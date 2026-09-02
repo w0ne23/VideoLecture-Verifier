@@ -1,3 +1,4 @@
+// 홈 화면 하단 푸터 — 프로젝트 정보 + 팀 크레딧
 export default function SiteFooter() {
   return (
     <footer className="site-footer">

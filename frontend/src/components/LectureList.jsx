@@ -1,8 +1,11 @@
+// 강의 목록 그리드 — 검색·정렬·출처 필터 적용 후 페이지네이션
+
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listLectures } from '../api/pipeline'
 import { lectureTagLabel } from '../constants/lectureTags'
 
+// job 상태 → 상태 칩 라벨
 const STATUS_LABELS = {
   pending: '대기 중',
   running: '분석 중',
@@ -10,8 +13,10 @@ const STATUS_LABELS = {
   error: '오류',
 }
 
+// 페이지당 카드 수
 const PAGE_SIZE = 6
 
+// ISO 문자열 → ko-KR 날짜 (YYYY. MM. DD)
 function formatDate(value) {
   if (!value) return ''
   const date = new Date(value)
@@ -23,6 +28,8 @@ function formatDate(value) {
   })
 }
 
+// sort 값에 따른 정렬 비교자 (date-desc 기본)
+// source 정렬은 출처 라벨 우선, 동일하면 최신순
 function compareBySort(a, b, sort) {
   if (sort === 'date-asc') {
     return String(a.created_at || '').localeCompare(String(b.created_at || ''))
@@ -35,11 +42,11 @@ function compareBySort(a, b, sort) {
   if (sort === 'title') {
     return String(a.title || '').localeCompare(String(b.title || ''), 'ko')
   }
-  // date-desc (default)
+  // date-desc (기본): 최신순
   return String(b.created_at || '').localeCompare(String(a.created_at || ''))
 }
 
-// 전처리가 아직 안 끝나 슬라이드 프레임이 없는 강의는 자리표시용 영상 아이콘을 둔다.
+// 썸네일(슬라이드 프레임)이 아직 없는 강의용 자리표시 아이콘
 function ThumbnailPlaceholder() {
   return (
     <span className="lecture-card-thumb-icon" aria-hidden="true">
@@ -51,6 +58,8 @@ function ThumbnailPlaceholder() {
   )
 }
 
+// filters: { query, sort, sourceFilter } — 상위(강의 목록 화면)에서 주입
+// onSelect(lectureId): 카드 클릭 시 상세 화면 이동
 export default function LectureList({ onSelect, filters = {} }) {
   const { query = '', sort = 'date-desc', sourceFilter = 'all' } = filters
   const { data: lectures = [], isLoading, error } = useQuery({
@@ -59,6 +68,7 @@ export default function LectureList({ onSelect, filters = {} }) {
   })
   const [page, setPage] = useState(0)
 
+  // 출처 필터 + 제목 검색 적용 후 정렬
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return lectures
@@ -73,12 +83,12 @@ export default function LectureList({ onSelect, filters = {} }) {
 
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
 
-  // 검색어·정렬·필터가 바뀌면 다시 첫 페이지부터 보여준다.
+  // 검색어·정렬·필터 변경 시 첫 페이지로 복귀
   useEffect(() => {
     setPage(0)
   }, [query, sort, sourceFilter])
 
-  // 필터링 결과가 줄어들어 현재 페이지가 범위를 벗어나면 마지막 페이지로 당겨온다.
+  // 필터 결과가 줄어 현재 페이지가 범위를 벗어나면 마지막 페이지로 당김
   useEffect(() => {
     setPage(current => Math.min(current, pageCount - 1))
   }, [pageCount])
@@ -112,8 +122,7 @@ export default function LectureList({ onSelect, filters = {} }) {
                   </span>
                 </span>
                 {lecture.created_at && <span className="lecture-card-date">{formatDate(lecture.created_at)}</span>}
-                {/* 진행 중 강의는 status-chip('분석 중')로 충분하므로 current_stage 는 생략.
-                    오류만 사유를 보여준다. */}
+                {/* 진행 중 강의는 상태 칩('분석 중')으로 충분하므로 단계 텍스트 생략, 오류만 사유 표시 */}
                 {lecture.status === 'error' && lecture.error_message && (
                   <span className="lecture-card-stage">{lecture.error_message}</span>
                 )}
