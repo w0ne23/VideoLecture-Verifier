@@ -8,7 +8,7 @@ import { useDemoDiagramFlow } from '../hooks/useDemoDiagramFlow'
 // 컨트롤. 상태를 페이지 최상단에 둬서 진행/에러/완료 단계를 오가도 값이 유지된다.
 // 여러 팔레트를 만들어봤지만 비교해보니 이 로즈/틸 조합이 제일 나아서 색 자체는 고정하고
 // "선만/노드만 다르게" 토글만 남겼다.
-function ColorLabControls({ diffLine, diffNode, onToggleLine, onToggleNode }) {
+function ColorLabControls({ diffLine, diffNode, onToggleLine, onToggleNode, noGrounding, onToggleGrounding }) {
   return (
     <div className="diag-colorlab">
       <div className="diag-colorlab-row">
@@ -20,6 +20,10 @@ function ColorLabControls({ diffLine, diffNode, onToggleLine, onToggleNode }) {
         <label className="field" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }}>
           <input type="checkbox" checked={diffNode} onChange={onToggleNode} />
           <span style={{ margin: 0 }}>노드 색 다르게</span>
+        </label>
+        <label className="field" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }}>
+          <input type="checkbox" checked={noGrounding} onChange={onToggleGrounding} />
+          <span style={{ margin: 0 }}>웹그라운딩 미포함 셋</span>
         </label>
       </div>
     </div>
@@ -80,6 +84,9 @@ function DemoUploadStep({ flow }) {
 function DemoPipelineStep({ flow, colorLab }) {
   const { phase, title, file, tickIndex, autoPlay, status, currentStage, actions } = flow
   const isError = phase === DEMO_PHASES.ERROR
+  // worker.py가 그라운딩 미포함 잡의 verifier_web_grounding stage를 시작부터 'skip'으로
+  // 보고하는 것과 같은 신호를 데모에서 흉내낸다 — DiagramPipeline은 이 값만 보고 레이아웃을 바꾼다.
+  const displayStatus = colorLab.noGrounding ? { ...status, issue_filter: 'skip' } : status
 
   return (
     <div className="detail">
@@ -90,7 +97,7 @@ function DemoPipelineStep({ flow, colorLab }) {
       <div className="vf-pipe diag-breakout">
         <div className="vf-progress-message">{currentStage}</div>
         <ColorLabControls {...colorLab} />
-        <DiagramPipeline status={status} diffLine={colorLab.diffLine} diffNode={colorLab.diffNode} />
+        <DiagramPipeline status={displayStatus} diffLine={colorLab.diffLine} diffNode={colorLab.diffNode} />
       </div>
 
       {isError && (
@@ -124,6 +131,7 @@ function DemoPipelineStep({ flow, colorLab }) {
 
 function DemoDoneStep({ flow, colorLab }) {
   const { title, file, status, currentStage, actions } = flow
+  const displayStatus = colorLab.noGrounding ? { ...status, issue_filter: 'skip' } : status
 
   return (
     <div className="detail">
@@ -134,7 +142,7 @@ function DemoDoneStep({ flow, colorLab }) {
       <div className="vf-pipe diag-breakout">
         <div className="vf-progress-message">{currentStage}</div>
         <ColorLabControls {...colorLab} />
-        <DiagramPipeline status={status} diffLine={colorLab.diffLine} diffNode={colorLab.diffNode} />
+        <DiagramPipeline status={displayStatus} diffLine={colorLab.diffLine} diffNode={colorLab.diffNode} />
       </div>
 
       <div className="button-row detail-actions">
@@ -151,11 +159,14 @@ export default function VerifyDemoDiagramPage() {
   const flow = useDemoDiagramFlow()
   const [diffLine, setDiffLine] = useState(false)
   const [diffNode, setDiffNode] = useState(false)
+  const [noGrounding, setNoGrounding] = useState(false)
   const colorLab = {
     diffLine,
     diffNode,
+    noGrounding,
     onToggleLine: () => setDiffLine(value => !value),
     onToggleNode: () => setDiffNode(value => !value),
+    onToggleGrounding: () => setNoGrounding(value => !value),
   }
 
   return (

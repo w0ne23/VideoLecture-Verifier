@@ -126,6 +126,12 @@ def pipeline_process(
         # 데이터 구성처럼 내부에 세부 단위가 없는 stage)는 None으로 남는다 — 프론트가
         # progress 유무로 실측 진행 바와 그냥 "진행 중" 표시를 구분한다.
         stages_state = {key: {'status': 'wait', 'progress': None} for key in PIPELINE_STAGE_KEYS}
+        # 적용된 LLM 셋이 "웹그라운딩 미포함"이면 run_all.py가 이 stage를 아예 건너뛰고
+        # 한 번도 notify하지 않는다 — 그대로 두면 프론트에 영원히 'wait'(대기 중)로 남아
+        # 있는 것처럼 보이므로, 시작 시점에 바로 'skip'으로 표시해 프론트가 이 stage가
+        # 이번 실행에 존재하지 않는다는 걸 처음부터 알 수 있게 한다.
+        if os.environ.get('CLASSIFIED_ISSUE_EVIDENCE_ENABLED', '1').strip().lower() in {'0', 'false', 'no', 'off'}:
+            stages_state['verifier_web_grounding'] = {'status': 'skip', 'progress': None}
         if job_type == JOB_TYPE_VERIFY_ONLY:
             # verify_only는 이전 실행이 남긴 전처리 산출물을 그대로 재사용하는 것이
             # 전제라, 전처리 단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로

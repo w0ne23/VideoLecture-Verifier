@@ -17,6 +17,7 @@ from app.models import (
     ProcessingJob,
     normalize_job_type,
 )
+from app.services.model_settings_service import get_model_settings
 from app.services.storage_service import make_file_url, resolve_storage_path
 
 
@@ -40,7 +41,7 @@ async def get_current_job(db: AsyncSession, lecture_id: str) -> ProcessingJob | 
     return lecture.last_job if lecture else None
 
 
-def build_job(lecture_id, mode: str | None = None) -> ProcessingJob:
+async def build_job(db: AsyncSession, lecture_id, mode: str | None = None) -> ProcessingJob:
     """업로드·재시도 공통 job 삽입 단위.
 
     'Job 없는 Lecture'가 존재하지 않는다는 불변조건을, 두 생성 경로(POST /lectures의
@@ -48,14 +49,28 @@ def build_job(lecture_id, mode: str | None = None) -> ProcessingJob:
     호출자는 반환된 job을 같은 트랜잭션에서 db.add 한다.
 
     job_type은 mode에 따라 정해진다 — verify가 기본이고 verify_only도 만들 수 있다.
+
+    pipeline_stages를 빈 배열로 두면, 프론트가 최초 조회 시 verifier_web_grounding을
+    포함한 모든 단계를 'wait'로 그려서(useJobStream.js) 실제 파이프라인이 시작되어
+    worker.py가 'skip'을 써넣기 전까지 잠깐 "그라운딩 포함" 5단계 레이아웃이 보였다가
+    4단계로 바뀌는 깜빡임이 생긴다. 그래서 job을 만드는 시점에 현재 활성 LLM 셋을
+    미리 확인해, 그라운딩이 꺼져 있으면 그 사실을 처음부터 pipeline_stages에 넣어둔다.
     """
+    stage_models = await get_model_settings(db)
+    evidence_enabled = stage_models.get('CLASSIFIED_ISSUE_EVIDENCE_ENABLED', '1').strip().lower() not in {
+        '0', 'false', 'no', 'off',
+    }
+    initial_stages = (
+        [] if evidence_enabled
+        else [{'stage': 'verifier_web_grounding', 'status': 'skip', 'progress': None}]
+    )
     return ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=lecture_id,
         job_type=normalize_job_type(mode, JOB_TYPE_VERIFY),
         status=JOB_STATUS_PENDING,
         current_stage='검증 파이프라인을 시작합니다.',
-        pipeline_stages=[],
+        pipeline_stages=initial_stages,
     )
 
 
@@ -137,7 +152,7 @@ async def create_job(db: AsyncSession, lecture_id: str, mode: str | None = None)
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         return None
-    job = build_job(lecture.id, mode)
+    job = await build_job(db, lecture.id, mode)
     db.add(job)
     await db.commit()
     await db.refresh(job)
