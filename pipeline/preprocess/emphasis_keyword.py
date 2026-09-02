@@ -14,8 +14,6 @@ max_keywords / min_freq 조정 (기본값 20/5):
 """
 
 import json
-import os
-import re
 from collections import Counter
 from typing import Optional, Set
 
@@ -53,46 +51,7 @@ _MINIMAL_STOP = {
     "그런데", "그러나", "따라서", "즉시", "아마", "혹시", "좀", "더", "매우", "너무", "잘", "많이", "적게",
 }
 
-_ENDINGS = (
-    "했습니다", "됐습니다", "였습니다", "습니다", "ㅂ니다",
-    "입니다", "합니다", "됩니다",
-    "이에요", "이예요", "예요", "에요", "네요", "군요", "어요", "아요", "해요", "되요",
-    "되는", "하는", "있는", "라는", "이라는", "된", "할", "하게", "하지",
-    "는데", "니까", "거나", "지만", "에서", "으로", "고", "면", "며", "죠", "네",
-    "부터", "까지", "처럼", "대로", "마저", "조차", "랑", "들",
-    "가", "를", "을", "의", "로", "에", "와", "과", "는", "은", "도", "만", "이",
-)
-
 _NOUN_TAGS = ("NNG", "NNP", "SL")
-
-
-def _strip_endings(word: str) -> str:
-    if not word or len(word) < 2:
-        return word
-    for ending in _ENDINGS:
-        if word.endswith(ending) and len(word) > len(ending):
-            stem = word[: -len(ending)]
-            if len(stem) >= 2:
-                return stem
-    return word
-
-
-def _tokenize(text: str) -> list[str]:
-    text = (text or "").strip()
-    text = re.sub(r"[^\w\s\u3131-\uD7A3]", " ", text)
-    tokens = text.split()
-    return [t for t in tokens if len(t) >= 2]
-
-
-def _content_stems(tokens: list[str], min_length: int = 2) -> list[str]:
-    stems = []
-    for t in tokens:
-        if t in _MINIMAL_STOP or len(t) < min_length:
-            continue
-        s = _strip_endings(t)
-        if len(s) >= min_length and s not in _MINIMAL_STOP:
-            stems.append(s)
-    return stems
 
 
 def _add_compound_nouns_from_seq(seq: list[str], out: list[str], min_length: int) -> None:
@@ -134,76 +93,6 @@ def _extract_content_words(text: str, min_length: int = 3) -> list[str]:
     return words
 
 
-def extract_content_words(text: str, min_length: int = 3) -> list[str]:
-    """Kiwi 기반 내용어 추출 공개 API. Kiwi 미설치/분석 실패 시 예외를 올린다."""
-    return _extract_content_words(text, min_length=min_length)
-
-
-def extract_contiguous_content_words(text: str, min_length: int = 3) -> list[str]:
-    """
-    원문에서 공백/기호 없이 붙어 있던 명사열만 복합어로 묶어 반환한다.
-
-    슬라이드 강조 키워드처럼 사용자에게 직접 노출되는 후보용이다.
-    예: "운영체제 개념" -> ["운영체제", "개념"]
-        "응용소프트웨어 운영체제" -> ["응용소프트웨어", "운영체제"]
-    """
-    text = (text or "").strip()
-    if not text:
-        return []
-    kiwi = _get_kiwi()
-    try:
-        tokens = kiwi.tokenize(text)
-    except Exception as exc:
-        raise RuntimeError("Kiwi 형태소 분석 중 오류가 발생해 키워드 추출을 중단합니다.") from exc
-
-    result: list[str] = []
-    run: list = []
-    prev_end: Optional[int] = None
-
-    def flush_run() -> None:
-        nonlocal run
-        if not run:
-            return
-        forms = [getattr(t, "form", "") for t in run]
-        if len(forms) >= 2:
-            compound = "".join(forms)
-            if len(compound) >= min_length and compound not in _MINIMAL_STOP:
-                result.append(compound)
-        else:
-            form = forms[0]
-            if len(form) >= min_length and form not in _MINIMAL_STOP:
-                result.append(form)
-        run = []
-
-    for t in tokens:
-        tag = getattr(t, "tag", None)
-        form = getattr(t, "form", None)
-        start = getattr(t, "start", None)
-        length = getattr(t, "len", None)
-        is_content = (
-            tag in _NOUN_TAGS
-            and form
-            and len(form) >= min_length
-            and form not in _MINIMAL_STOP
-            and start is not None
-            and length is not None
-        )
-        if not is_content:
-            flush_run()
-            prev_end = None
-            continue
-
-        if run and prev_end == start:
-            run.append(t)
-        else:
-            flush_run()
-            run = [t]
-        prev_end = int(start) + int(length)
-
-    flush_run()
-    return result
-
-
 def _select_representative_keywords(candidates: set[str]) -> set[str]:
     if not candidates:
         return set()
@@ -213,42 +102,6 @@ def _select_representative_keywords(candidates: set[str]) -> set[str]:
             continue
         reps.append(w)
     return set(reps)
-
-
-def _get_topic_keywords(
-    segments: list[dict],
-    min_freq: int = 5,
-    max_keywords: int = 20,
-    max_segment_ratio: float = 1.0,
-    min_length: int = 2,
-) -> set[str]:
-    if not segments:
-        return set()
-    total_segments = len(segments)
-    counter: Counter = Counter()
-    segment_presence: Counter = Counter()
-
-    for seg in segments:
-        text = (seg.get("text") or "").strip()
-        words = _extract_content_words(text, min_length=min_length)
-        seen_here = set()
-        for s in words:
-            counter[s] += 1
-            seen_here.add(s)
-        for s in seen_here:
-            segment_presence[s] += 1
-
-    threshold_segments = total_segments if max_segment_ratio >= 1.0 else max(2, int(total_segments * max_segment_ratio))
-    topic = set()
-    for w, cnt in counter.most_common(max_keywords * 2):
-        if cnt < min_freq:
-            continue
-        if segment_presence[w] > threshold_segments:
-            continue
-        topic.add(w)
-        if len(topic) >= max_keywords:
-            break
-    return _select_representative_keywords(topic)
 
 
 def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[str]) -> set[str]:
@@ -330,28 +183,6 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
 # ---------------------------------------------------------------------------
 # 주제 키워드 공개 API
 # ---------------------------------------------------------------------------
-
-def get_topic_keywords_filtered(
-    segments: list[dict],
-    *,
-    min_freq: int = 5,
-    max_keywords: int = 20,
-    max_segment_ratio: float = 1.0,
-    min_keyword_len: int = 2,
-    use_llm_filter: bool = True,
-) -> set[str]:
-    """주제 키워드 추출 + LLM 필터 적용. 여러 min_keyword_count 변형 실행 시 1회만 호출."""
-    kw_set = _get_topic_keywords(
-        segments,
-        min_freq=min_freq,
-        max_keywords=max_keywords,
-        max_segment_ratio=max_segment_ratio,
-        min_length=min_keyword_len,
-    )
-    if use_llm_filter and kw_set:
-        kw_set = _filter_topic_keywords_by_llm(segments, kw_set)
-    return kw_set
-
 
 def get_topic_keywords_filtered_v2(
     segments: list[dict],
@@ -495,103 +326,3 @@ def summarize_topic_keyword_counts_for_text(
         "keyword_scores": keyword_scores,
         "score_sum": int(sum(keyword_scores.values())),
     }
-
-
-def get_topic_keywords_list(
-    segments: list[dict],
-    *,
-    min_freq: int = 5,
-    max_keywords: int = 20,
-    max_segment_ratio: float = 1.0,
-    min_keyword_len: int = 2,
-) -> list[str]:
-    """주제 키워드 반복 감지에 사용되는 키워드 목록 반환 (확인용)."""
-    kw_set = _get_topic_keywords(
-        segments,
-        min_freq=min_freq,
-        max_keywords=max_keywords,
-        max_segment_ratio=max_segment_ratio,
-        min_length=min_keyword_len,
-    )
-    return sorted(kw_set)
-
-
-# ---------------------------------------------------------------------------
-# 진단 도구 (EMPHASIS_DEBUG=1 시 사용)
-# ---------------------------------------------------------------------------
-
-def diagnose_topic_keywords(
-    segments: list[dict],
-    check_words: tuple[str, ...] = ("운영체제", "운영", "체제"),
-    min_length: int = 2,
-    max_segment_ratio: float = 1.0,
-) -> dict:
-    """주제 키워드가 왜 잡히지 않는지 진단."""
-    total = len(segments)
-    kiwi = _get_kiwi()
-    lines = []
-    lines.append("=== 주제 키워드 진단 ===")
-    lines.append(f"전체 구간 수: {total}")
-    lines.append(f"min_length={min_length}, max_segment_ratio={max_segment_ratio}")
-    lines.append("")
-
-    if kiwi is not None:
-        try:
-            sample = "운영체제의 목적과 기능"
-            tokens = kiwi.tokenize(sample)
-            lines.append(f"[Kiwi 분석 예시] '{sample}'")
-            for t in tokens:
-                form = getattr(t, "form", "?")
-                tag = getattr(t, "tag", "?")
-                lines.append(f"  form='{form}' tag={tag} len(form)={len(form)} NNG/NNP? {tag in _NOUN_TAGS} min_length 통과? {len(form) >= min_length} stop? {form in _MINIMAL_STOP}")
-            lines.append("")
-        except Exception as e:
-            lines.append(f"Kiwi 예시 분석 실패: {e}")
-            lines.append("")
-    counter: Counter = Counter()
-    segment_presence: Counter = Counter()
-    for seg in segments:
-        text = (seg.get("text") or "").strip()
-        words = _extract_content_words(text, min_length=min_length)
-        seen = set(words)
-        for s in words:
-            counter[s] += 1
-        for s in seen:
-            segment_presence[s] += 1
-
-    threshold = total if max_segment_ratio >= 1.0 else max(2, int(total * max_segment_ratio))
-    lines.append(f"threshold_segments (이 값 초과 시 제외): {threshold}")
-    lines.append("")
-
-    topic = _get_topic_keywords(
-        segments, min_freq=5, max_keywords=20,
-        max_segment_ratio=max_segment_ratio, min_length=min_length,
-    )
-    lines.append(f"topic_keywords 개수: {len(topic)}")
-    lines.append("")
-
-    for w in check_words:
-        cnt = counter.get(w, 0)
-        pres = segment_presence.get(w, 0)
-        in_topic = w in topic
-        lines.append(f"[{w}]")
-        lines.append(f"  전체 등장 횟수: {cnt}, 등장한 구간 수: {pres}")
-        lines.append(f"  threshold 초과? {pres > threshold} -> 제외됨: {pres > threshold}")
-        lines.append(f"  min_freq(5) 미달? {cnt < 5}")
-        lines.append(f"  topic_keywords 포함: {in_topic}")
-        if not in_topic and cnt > 0:
-            reason = []
-            if cnt < 5:
-                reason.append("min_freq 미달")
-            if pres > threshold:
-                reason.append("구간 비율 초과로 제외")
-            if w in _MINIMAL_STOP:
-                reason.append("stopword")
-            if len(w) < min_length:
-                reason.append(f"길이 {len(w)} < min_length {min_length}")
-            lines.append(f"  -> 추정 원인: {', '.join(reason) or '확인 필요 (Kiwi 품사/길이 등)'}")
-        lines.append("")
-
-    sample_list = sorted(topic)[:30]
-    lines.append("topic_keywords 샘플 (처음 30개): " + ", ".join(sample_list))
-    return {"lines": lines, "topic_count": len(topic), "in_topic": {w: w in topic for w in check_words}}
