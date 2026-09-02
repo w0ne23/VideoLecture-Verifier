@@ -252,6 +252,7 @@ services:
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-sk-vlverifier-local-dev}"
       # LiteLLM 은 프록시 관리용 DB 연결에 DATABASE_URL 사용 — backend 의 PostgreSQL 서비스 재사용
+      STORE_MODEL_IN_DB: "True"
       DATABASE_URL: "${LITELLM_DATABASE_URL:-postgresql://user:pass@db/litellm}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"

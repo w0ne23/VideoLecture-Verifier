@@ -161,6 +161,37 @@ def _provider_model_name(model: str, endpoint: dict[str, Any]) -> str:
     return f"{prefix}/{raw}" if prefix else raw
 
 
+def _litellm_model_registered(alias: str, master_key: str) -> bool:
+    """LiteLLM에 이미 등록된 alias인지 `GET /model/info`로 확인한다.
+
+    alias가 결정론적 해시라 재실행 시 항상 같은 값이 나오는데, 로컬
+    `_DYNAMIC_LITELLM_MODELS` set은 프로세스별로 초기화되므로 이전 job에서
+    등록해둔 걸 모르고 다시 등록을 시도하면 DB unique 제약 위반(500)이 난다.
+    """
+    request = urllib.request.Request(
+        f"{_litellm_api_root()}/model/info",
+        headers={"Authorization": f"Bearer {master_key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        # 조회 실패는 치명적이지 않다 — 등록을 그대로 시도하게 둔다.
+        return False
+    entries = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("model_name") or "") == alias:
+            return True
+        info = entry.get("model_info")
+        if isinstance(info, dict) and str(info.get("id") or "") == alias:
+            return True
+    return False
+
+
 def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
     """선택된 endpoint/model을 불투명한 LiteLLM deployment로 등록"""
     reference = str(source_endpoint.get("credential_ref") or "").strip()
@@ -197,6 +228,13 @@ def _ensure_litellm_model(model: str, source_endpoint: dict[str, Any]) -> str:
             raise RuntimeError(
                 "웹 API 키를 LiteLLM에 등록하려면 LITELLM_MASTER_KEY가 필요합니다."
             )
+
+        # alias는 (credential_ref, model, endpoint) 해시라 결정론적이다. 이전
+        # 프로세스/job에서 이미 등록해둔 경우 재등록을 시도하면 LiteLLM의 DB
+        # unique 제약(model_id 중복)에 걸려 500이 난다 — 먼저 존재 여부를 확인한다.
+        if _litellm_model_registered(alias, master_key):
+            _DYNAMIC_LITELLM_MODELS.add(alias)
+            return alias
 
         params: dict[str, Any] = {
             "model": provider_model,
