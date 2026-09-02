@@ -503,6 +503,64 @@ def _call_llm(
 
 
 # 모델 1개가 담당하는 전체 배치를 순차 처리
+def _call_model_for_batch(
+    *,
+    model: str,
+    batch: list[dict[str, Any]],
+    current_date: str,
+    max_tokens: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """모델 1개에 batch 1개를 요청하고, 응답을 id별 분류 행으로 정규화한다."""
+    prompt = _build_prompt(batch, current_date)
+    text, usage, _resolved = _call_llm(
+        model_spec=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        stage="issue_classify",
+    )
+    try:
+        raw_rows = _parse_response(text)
+    except Exception as exc:
+        return (
+            [
+                {
+                    "id": item["id"],
+                    "status": "parse_failed",
+                    "parse_error": f"모델 응답 파싱 실패: {exc}",
+                }
+                for item in batch
+            ],
+            usage,
+        )
+
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        issue_id = str(raw.get("id") or "").strip()
+        if not issue_id:
+            continue
+        probabilities, error = _normalize_probabilities(raw.get("probabilities"))
+        if error or probabilities is None:
+            rows.append({
+                "id": issue_id,
+                "status": "parse_failed",
+                "parse_error": error or "probabilities 파싱 실패",
+            })
+            continue
+        top_type, top_probability = _top_probability_type(probabilities)
+        rows.append({
+            "id": issue_id,
+            "status": "ok",
+            "probabilities": probabilities,
+            "top_issue_type": _normalize_issue_type(top_type) or top_type,
+            "top_probability": top_probability,
+            "confidence": _safe_float(raw.get("confidence"), default=top_probability),
+            "reason": str(raw.get("reason") or ""),
+        })
+    return rows, usage
+
+
 def _model_worker(args: tuple) -> dict[str, Any]:
     model, issues, batch_size, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
