@@ -1,23 +1,16 @@
 """
-키워드 기반 강조 구간 감지
+슬라이드 텍스트 반복 주제 키워드 추출
 
-- 가중치 키워드: 하드코딩된 중요/요약/시험 관련 표현 매칭
-- 주제 키워드 반복: 전사문 전체에서 반복 등장하는 내용어 기반
+- 주제 키워드 반복: 슬라이드 텍스트화 결과(t1) 전체에서 반복 등장하는 내용어 기반
 
 키워드 추출: kiwipiepy/Kiwi 형태소 분석 필수(명사만). 미설치 시 중단.
 주제 키워드 LLM 필터: Gemini로 강의 흐름과 무관한 후보 제거.
 
-진단: EMPHASIS_DEBUG=1 python main.py ... 로 실행하면 주제 키워드 진단 결과를 output/ 폴더에 저장.
-
 max_keywords / min_freq 조정 (기본값 20/5):
-  [1] emphasis_keyword.py
-      - _get_topic_keywords(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
-      - get_topic_keywords_list(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
-      - detect_emphasis_by_topic_keyword_repetition(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
-      - diagnose_topic_keywords 내부 _get_topic_keywords(..., min_freq=5, max_keywords=20)  호출 인자
-  [2] main.py
-      - get_topic_keywords_list(groups, min_freq=5, max_keywords=20, ...)  키워드 보고서용 호출
-  위 네 군데를 같은 값으로 맞춰서 바꾸면 됨.
+  - get_topic_keywords_filtered_v2(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
+  - get_topic_keyword_count_map(..., min_freq=5, max_keywords=20)  함수 정의부 기본값
+  - slide_textualizer.py의 get_topic_keyword_count_map(...) 호출 인자
+  위 세 군데를 같은 값으로 맞춰서 바꾸면 됨.
 """
 
 import json
@@ -25,65 +18,6 @@ import os
 import re
 from collections import Counter
 from typing import Optional, Set
-
-
-# ---------------------------------------------------------------------------
-# 가중치 키워드 감지
-# ---------------------------------------------------------------------------
-
-KEYWORDS_WEIGHTED = {
-    'exam':    (['시험', '문제', '출제', '나옵니다'], 5),
-    'strong':  (['중요', '핵심', '반드시', '꼭', '필수'], 3),
-    'summary': (['정리하면', '요약하면', '다시 말하면', '즉'], 1),
-}
-
-
-def detect_emphasis_by_keywords_weighted(segments: list[dict]) -> list[dict]:
-    """중요 표현 키워드 점수 계산. 카테고리별로 한 번만 가산한다."""
-    print("  [가중치 키워드] 분석 중...")
-    emphasis_segments = []
-
-    for seg in segments:
-        text = seg['text']
-        matched_keywords_by_category: dict[str, list[str]] = {}
-        category_scores = {}
-        matched_categories = []
-        keyword_score = 0
-
-        for category, (keywords, weight) in KEYWORDS_WEIGHTED.items():
-            matched = [keyword for keyword in keywords if keyword in text]
-            matched_keywords_by_category[category] = matched
-            if matched:
-                matched_categories.append(category)
-                category_scores[category] = weight
-                keyword_score += weight
-            else:
-                category_scores[category] = 0
-
-        flat_matched_keywords = []
-        for keywords in matched_keywords_by_category.values():
-            for keyword in keywords:
-                if keyword not in flat_matched_keywords:
-                    flat_matched_keywords.append(keyword)
-
-        emphasis_segments.append({
-            'start': seg['start'],
-            'end': seg['end'],
-            'text': text,
-            'emphasis_score': float(keyword_score),
-            'importance_keyword_score': int(keyword_score),
-            'category_scores': category_scores,
-            'matched_categories': matched_categories,
-            'matched_keywords': flat_matched_keywords,
-            'matched_keywords_by_category': matched_keywords_by_category,
-            'detected': keyword_score > 0,
-            'detection_method': 'keyword_weighted',
-        })
-
-    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
-    ratio = detected_count / len(segments) * 100 if segments else 0.0
-    print(f"    -> 가중치 키워드: {detected_count}개 detected (전체의 {ratio:.1f}%), 점수 {len(emphasis_segments)}개")
-    return emphasis_segments
 
 
 # ---------------------------------------------------------------------------
@@ -580,85 +514,6 @@ def get_topic_keywords_list(
         min_length=min_keyword_len,
     )
     return sorted(kw_set)
-
-
-# ---------------------------------------------------------------------------
-# 주제 키워드 반복 감지
-# ---------------------------------------------------------------------------
-
-def detect_emphasis_by_topic_keyword_repetition(
-    segments: list[dict],
-    *,
-    window: int = 2,
-    min_keyword_len: int = 2,
-    max_segment_ratio: float = 1.0,
-    min_freq: int = 5,
-    max_keywords: int = 20,
-    use_llm_filter: bool = True,
-    min_keyword_count: int = 1,
-    _topic_keywords_override: Optional[Set[str]] = None,
-    _topic_keyword_count_map: Optional[dict[str, int]] = None,
-    _topic_keyword_score_map: Optional[dict[str, int]] = None,
-) -> list[dict]:
-    """
-    전사문 전체에서 반복되는 주제 키워드가 등장하는 구간을 강조로 표시.
-
-    - min_freq: 전사문 전체 등장 횟수 기준.
-    - use_llm_filter: True면 Gemini로 주제 무관 키워드 제거.
-    - _topic_keywords_override: 이미 추출된 키워드 집합을 넘기면 재추출/LLM 필터 생략.
-    """
-    label = f"min_kw>={min_keyword_count}"
-    _get_kiwi()
-    print(f"  [주제 키워드 반복 ({label})] 분석 중 (전사 전체 기준, Kiwi 명사만 사용)...")
-    if not segments:
-        return []
-
-    if _topic_keywords_override is not None:
-        topic_keywords = _topic_keywords_override
-    else:
-        topic_keywords = _get_topic_keywords(
-            segments,
-            min_freq=min_freq,
-            max_keywords=max_keywords,
-            max_segment_ratio=max_segment_ratio,
-            min_length=min_keyword_len,
-        )
-        if use_llm_filter and topic_keywords:
-            topic_keywords = _filter_topic_keywords_by_llm(segments, topic_keywords)
-    if not topic_keywords:
-        print(f"    -> 주제 키워드 없음 (반복 단어 부족)")
-        return []
-    topic_keyword_score_map = _topic_keyword_score_map
-    if topic_keyword_score_map is None:
-        topic_keyword_score_map = get_topic_keyword_score_map(_topic_keyword_count_map or {})
-
-    emphasis_segments = []
-    for seg in segments:
-        words = _extract_content_words(seg.get("text") or "", min_length=min_keyword_len)
-        here = set(words) & topic_keywords
-        repeated_words = sorted(here)
-        topic_total_count_sum = 0
-        if _topic_keyword_count_map:
-            # 같은 context 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
-            topic_total_count_sum = int(sum(_topic_keyword_count_map.get(w, 0) for w in repeated_words))
-        keyword_scores = {w: int(topic_keyword_score_map.get(w, 0)) for w in repeated_words}
-        topic_keyword_score = int(sum(keyword_scores.values()))
-        emphasis_segments.append({
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg["text"],
-            "emphasis_score": float(topic_keyword_score),
-            "repeated_topic_keywords": repeated_words,
-            "repeated_topic_keyword_scores": keyword_scores,
-            "audio_topic_total_count_sum": topic_total_count_sum,
-            "audio_topic_keyword_score": topic_keyword_score,
-            "detected": len(here) >= min_keyword_count and topic_keyword_score > 0,
-            "detection_method": "topic_keyword_repeat",
-        })
-
-    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
-    print(f"    -> 주제 키워드 반복 ({label}): {detected_count}개 (전체의 {detected_count/len(segments)*100:.1f}%)")
-    return emphasis_segments
 
 
 # ---------------------------------------------------------------------------
