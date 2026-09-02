@@ -24,7 +24,7 @@ def run_verifier_pipeline(
     paths: dict,
     timings: dict[str, float],
     background: bool = True,
-    notify_stage=lambda _stage, _status: None,
+    notify_stage=lambda _stage, _status, _progress=None: None,
     helpers,
 ) -> dict:
     """Build verifier input and run the verifier path."""

@@ -10,9 +10,10 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 SCHEMA_VERSION = "issue_types.v3"
@@ -1574,6 +1575,7 @@ def classify_issues(
     dry_run: bool = False,
     model_weights_spec: str | None = None,
     low_margin_threshold: float | None = None,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     _load_env()
     if not models:
@@ -1637,6 +1639,19 @@ def classify_issues(
         for args in worker_args:
             worker_args_by_model[args[0]].append(args)
 
+        total_batch_count = len(worker_args)
+        progress_lock = threading.Lock()
+        progress_done = 0
+
+        def _tick_progress() -> None:
+            nonlocal progress_done
+            if not progress_notify:
+                return
+            with progress_lock:
+                progress_done += 1
+                done = progress_done
+            progress_notify(done, total_batch_count)
+
         def _run_model_batches(model: str, model_args: list[tuple]) -> tuple[str, list[tuple], list[tuple[tuple, Exception]]]:
             completed: list[tuple] = []
             failed: list[tuple[tuple, Exception]] = []
@@ -1648,6 +1663,7 @@ def classify_issues(
                         completed.append(future.result())
                     except Exception as exc:
                         failed.append((args, exc))
+                    _tick_progress()
             return model, completed, failed
 
         with ThreadPoolExecutor(max_workers=max(1, len(worker_args_by_model))) as model_executor:

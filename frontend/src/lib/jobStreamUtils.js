@@ -13,13 +13,13 @@ export function isTerminalStatus(status) {
 
 export function mergeStageStatus(current, incoming) {
   const known = new Set(VERIFY_STAGE_KEYS)
-  const byStage = new Map(current.map(item => [item.stage, item.status]))
+  const byStage = new Map(current.map(item => [item.stage, item]))
 
   incoming.forEach(item => {
     if (!item?.stage || !known.has(item.stage)) return
-    byStage.set(item.stage, item.status)
+    byStage.set(item.stage, { stage: item.stage, status: item.status, progress: item.progress ?? null })
   })
-  return normalizePipelineStages(Array.from(byStage, ([stage, status]) => ({ stage, status })))
+  return normalizePipelineStages(Array.from(byStage.values()))
 }
 
 export function markAllStages(status) {

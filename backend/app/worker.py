@@ -56,10 +56,11 @@ PIPELINE_STAGE_LABELS = {
 }
 
 
-def _stage_text(stage_key: str, status: str) -> str:
+def _stage_text(stage_key: str, status: str, progress: tuple[int, int] | None = None) -> str:
     label = PIPELINE_STAGE_LABELS.get(stage_key, stage_key)
+    suffix = f' ({progress[0]}/{progress[1]})' if progress else ''
     if status == 'run':
-        return f'{label} 진행 중'
+        return f'{label} 진행 중{suffix}'
     if status == 'done':
         return f'{label} 완료'
     if status == 'error':
@@ -120,7 +121,11 @@ def pipeline_process(
         slides_dir = output_dir / 'slides'
         slides_dir.mkdir(parents=True, exist_ok=True)
 
-        stages_state = {key: 'wait' for key in PIPELINE_STAGE_KEYS}
+        # 각 stage는 {'status', 'progress'} 딕셔너리다. progress는 배치 처리가 있는
+        # stage에서만 (완료 개수, 전체 개수) 튜플로 채워지고, 그 외(예: 검증 입력
+        # 데이터 구성처럼 내부에 세부 단위가 없는 stage)는 None으로 남는다 — 프론트가
+        # progress 유무로 실측 진행 바와 그냥 "진행 중" 표시를 구분한다.
+        stages_state = {key: {'status': 'wait', 'progress': None} for key in PIPELINE_STAGE_KEYS}
         if job_type == JOB_TYPE_VERIFY_ONLY:
             # verify_only는 이전 실행이 남긴 전처리 산출물을 그대로 재사용하는 것이
             # 전제라, 전처리 단계는 이번 실행에서 아예 호출되지 않는다. 'wait'로
@@ -132,7 +137,13 @@ def pipeline_process(
                 'preprocess_slide_analyze',
                 'preprocess_audio_transcribe',
             ):
-                stages_state[key] = 'done'
+                stages_state[key] = {'status': 'done', 'progress': None}
+
+        def _stages_array() -> list[dict]:
+            return [
+                {'stage': key, 'status': value['status'], 'progress': value['progress']}
+                for key, value in stages_state.items()
+            ]
 
         # 슬라이드 오류 검사(verify_slide_inspect/verify_slide_syntax) 단계가
         # verifier_claim_extraction 체인과 별도 스레드에서 동시에 진행되므로
@@ -141,20 +152,24 @@ def pipeline_process(
         # 스냅샷이 나중 것을 덮어쓸 수 있으므로 락으로 직렬화한다.
         on_progress_lock = threading.Lock()
 
-        def on_progress(stage_key: str, status: str):
+        def on_progress(stage_key: str, status: str, progress: tuple[int, int] | None = None):
             with on_progress_lock:
                 if stage_key in stages_state:
-                    stages_state[stage_key] = status
-                stages_array = [{'stage': key, 'status': value} for key, value in stages_state.items()]
-                update_job_stage_sync(job_id, stages_array, _stage_text(stage_key, status))
-            logger.info('[%s] Progress: %s -> %s', job_id, stage_key, status)
+                    stages_state[stage_key] = {
+                        'status': status,
+                        # done/error에서는 progress를 안 지워야 마지막 %가 화면에
+                        # 남아있다가 자연스럽게 상태만 바뀐다.
+                        'progress': list(progress) if progress else stages_state[stage_key]['progress'],
+                    }
+                update_job_stage_sync(job_id, _stages_array(), _stage_text(stage_key, status, progress))
+            logger.info('[%s] Progress: %s -> %s%s', job_id, stage_key, status, f' {progress}' if progress else '')
 
         with pipeline_log_context(output_dir):
             import pipeline.main as pipeline_main
 
             update_job_stage_sync(
                 job_id,
-                [{'stage': key, 'status': value} for key, value in stages_state.items()],
+                _stages_array(),
                 '파이프라인을 시작합니다.',
             )
             args = pipeline_main.get_parser().parse_args([

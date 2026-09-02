@@ -5,6 +5,7 @@ import os
 import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable
 
 
 _CANONICAL_CLAIM_TYPES = {
@@ -671,6 +672,7 @@ def extract_claims_only(
     slide_ctx: dict,
     batch_size: int | None = None,
     max_workers: int | None = None,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> tuple[list[tuple], int, dict]:
     """1단계만 실행: claim 추출. (batch_list, total_claims) 반환."""
     from . import claim_common as cv
@@ -762,14 +764,22 @@ def extract_claims_only(
             flush=True,
         )
     if len(work_items) <= 1 or max_workers <= 1:
-        results = [_run_item(item) for item in work_items]
+        results = []
+        for done_count, item in enumerate(work_items, start=1):
+            results.append(_run_item(item))
+            if progress_notify:
+                progress_notify(done_count, len(work_items))
     else:
         results = [None] * len(work_items)
+        done_count = 0
         with ThreadPoolExecutor(max_workers=min(max_workers, len(work_items))) as executor:
             futures = {executor.submit(_run_item, item): item for item in work_items}
             for future in as_completed(futures):
                 index, context_batch, claims, api_calls, token_usage = future.result()
                 results[index] = (index, context_batch, claims, api_calls, token_usage)
+                done_count += 1
+                if progress_notify:
+                    progress_notify(done_count, len(work_items))
 
     for _index, context_batch, claims, api_calls, token_usage in [r for r in results if r is not None]:
         all_claims_by_batch.append((context_batch, claims))

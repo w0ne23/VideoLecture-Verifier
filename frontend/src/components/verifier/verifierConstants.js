@@ -34,16 +34,18 @@ export const PHASES = {
 }
 
 export function createEmptyStages() {
-  return VERIFY_STAGE_KEYS.map(stage => ({ stage, status: 'wait' }))
+  return VERIFY_STAGE_KEYS.map(stage => ({ stage, status: 'wait', progress: null }))
 }
 
 export function normalizePipelineStages(stages = []) {
   if (!Array.isArray(stages) || stages.length === 0) return createEmptyStages()
 
-  const byStage = new Map(createEmptyStages().map(item => [item.stage, item.status]))
+  const byStage = new Map(createEmptyStages().map(item => [item.stage, item]))
   stages.forEach(item => {
     if (!item?.stage) return
-    if (byStage.has(item.stage)) byStage.set(item.stage, item.status)
+    if (byStage.has(item.stage)) {
+      byStage.set(item.stage, { stage: item.stage, status: item.status, progress: item.progress ?? null })
+    }
   })
-  return Array.from(byStage, ([stage, status]) => ({ stage, status }))
+  return Array.from(byStage.values())
 }

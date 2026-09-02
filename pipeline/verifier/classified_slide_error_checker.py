@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1013,9 +1014,11 @@ def _run_check_pass(
     max_workers: int,
     check_fn: Callable[..., tuple[list[dict[str, Any]], bool, int, dict[str, Any]]],
     log_label: str,
+    progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """슬라이드 검사/문법 검사 두 라운드가 공유하는 모델별 병렬 처리 로직. check_fn만
-    바꿔서 두 검사에 재사용한다."""
+    바꿔서 두 검사에 재사용한다. progress_notify(done, total)은 (모델, 슬라이드) 작업
+    항목 하나가 끝날 때마다(성공/실패 무관) 호출된다."""
     from . import claim_common as cc
 
     model_results: dict[str, dict[str, Any]] = {
@@ -1032,6 +1035,18 @@ def _run_check_pass(
     work_items_by_model: dict[str, list[tuple[str, dict[str, Any]]]] = {
         model: [(model, slide) for slide in slides] for model in models
     }
+    total_work_items = sum(len(items) for items in work_items_by_model.values())
+    progress_lock = threading.Lock()
+    progress_done = 0
+
+    def _tick_progress() -> None:
+        nonlocal progress_done
+        if not progress_notify:
+            return
+        with progress_lock:
+            progress_done += 1
+            done = progress_done
+        progress_notify(done, total_work_items)
 
     def worker(args: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         model, slide = args
@@ -1062,6 +1077,7 @@ def _run_check_pass(
                     completed.append(future.result())
                 except Exception as exc:
                     failed.append((args, exc))
+                _tick_progress()
         return model, completed, failed
 
     with ThreadPoolExecutor(max_workers=max(1, len(work_items_by_model))) as model_executor:
@@ -1124,13 +1140,13 @@ def detect_classified_slide_errors(
     max_tokens: int = 4096,
     current_date: str | None = None,
     min_score: float | None = None,
-    stage_notify: Callable[[str, str], None] | None = None,
+    stage_notify: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     from . import claim_common as cc
 
-    def notify(stage: str, status: str) -> None:
+    def notify(stage: str, status: str, progress: tuple[int, int] | None = None) -> None:
         if stage_notify:
-            stage_notify(stage, status)
+            stage_notify(stage, status, progress)
 
     _load_env()
     current_date = current_date or datetime.now().date().isoformat()
@@ -1163,6 +1179,7 @@ def detect_classified_slide_errors(
             max_workers=max_workers,
             check_fn=_check_single_slide,
             log_label="슬라이드 검사",
+            progress_notify=lambda done, total: notify("verify_slide_inspect", "run", (done, total)),
         )
     except Exception:
         notify("verify_slide_inspect", "error")
@@ -1179,6 +1196,7 @@ def detect_classified_slide_errors(
             max_workers=max_workers,
             check_fn=_check_single_slide_syntax,
             log_label="문법/코드 오류 점검",
+            progress_notify=lambda done, total: notify("verify_slide_syntax", "run", (done, total)),
         )
     except Exception:
         notify("verify_slide_syntax", "error")
