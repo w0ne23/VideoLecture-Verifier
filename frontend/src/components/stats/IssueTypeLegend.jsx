@@ -1,3 +1,5 @@
+// 지식 오류 유형 색상 범례 (묶음 막대·원 그래프 공용)
+
 import { ISSUE_TYPES } from '../../config/statsConfig'
 
 export default function IssueTypeLegend() {
