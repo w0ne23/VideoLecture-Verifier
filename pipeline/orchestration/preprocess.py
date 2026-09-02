@@ -140,9 +140,6 @@ def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dic
         "transcript_raw_path": preprocess_result.get("transcript_raw_path"),
         "audio_result": {
             "segments_path": audio_result.get("segments_path"),
-            "silences_path": audio_result.get("silences_path"),
-            "annotated_segments": audio_result.get("annotated_segments") or [],
-            "annotated_groups": audio_result.get("annotated_groups") or [],
             "scenes_structure": audio_result.get("scenes_structure"),
             "slide_ranges": audio_result.get("slide_ranges") or [],
             "duration": audio_result.get("duration", preprocess_result.get("duration", 0.0)),
@@ -186,9 +183,6 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
         ),
         "audio_result": {
             "segments_path": audio_result.get("segments_path") or str(paths["segments"]),
-            "silences_path": audio_result.get("silences_path") or str(paths["silences"]),
-            "annotated_segments": audio_result.get("annotated_segments") or [],
-            "annotated_groups": audio_result.get("annotated_groups") or [],
             "scenes_structure": audio_result.get("scenes_structure"),
             "slide_ranges": audio_result.get("slide_ranges") or [],
             "duration": audio_result.get("duration", manifest.get("duration", 0.0)),
@@ -199,7 +193,6 @@ def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict
         ("metadata", restored["meta_path"]),
         ("textualized", restored["textualized_path"]),
         ("segments", restored["audio_result"]["segments_path"]),
-        ("silences", restored["audio_result"]["silences_path"]),
     ]
     missing = [f"{label}: {path}" for label, path in required_paths if not path or not Path(path).exists()]
     if missing:
