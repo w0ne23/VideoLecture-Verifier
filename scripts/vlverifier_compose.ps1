@@ -1,5 +1,5 @@
-# Select the portable CPU stack or NVIDIA stack from Windows PowerShell.
-# Docker Desktop must use the WSL 2 backend for NVIDIA GPU containers.
+# Windows PowerShell에서 CPU/NVIDIA 스택 중 하나를 자동 선택
+# NVIDIA GPU 컨테이너를 쓰려면 Docker Desktop이 WSL 2 백엔드를 사용해야 함
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ComposeArgs

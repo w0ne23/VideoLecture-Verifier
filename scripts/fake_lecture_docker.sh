@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# 가짜 강의로 검증 탐지율을 테스트하기 위한 헬퍼.
+# 가짜 강의로 검증 탐지율을 테스트하기 위한 헬퍼
 # docker-compose backend/db를 그대로 쓰면서, 앱을 거치지 않고도 lecture_id 기준
 # 파일명 규칙(save_upload()가 하는 일)을 처음부터 지켜서 이후 수동 리네임이
-# 필요 없게 한다.
+# 필요 없도록 함
 #
 # 사용법:
 #   scripts/fake_lecture_docker.sh preprocess <video_path> [lecture_id]
-#     -> 전처리만 실행 (--skip-analyzer). lecture_id를 안 주면 새로 생성.
-#        완료 후 merged_clean.json 경로와 lecture_id를 출력한다.
-#        이 merged_clean.json을 직접 편집해서 오류를 주입한 다음 아래 verify-only로 넘어간다.
+#     -> 전처리만 실행 (--skip-analyzer), lecture_id를 안 주면 새로 생성
+#        완료 후 merged_clean.json 경로와 lecture_id를 출력
+#        이 merged_clean.json을 직접 편집해서 오류를 주입한 다음 아래 verify-only로 진행
 #
 #   scripts/fake_lecture_docker.sh verify-only <lecture_id> [title]
 #     -> 해당 lecture_id로 Lecture(없으면 생성) + pending ProcessingJob(verify_only)을
-#        DB에 넣는다. 워커가 집어가서 전처리는 스킵하고 검증만 새로 돈다.
-#        완료되면 GET /lectures/<lecture_id>/result 로 확인 가능.
+#        DB에 등록, 워커가 집어가서 전처리는 스킵하고 검증만 새로 진행
+#        완료되면 GET /lectures/<lecture_id>/result 로 확인 가능
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Select the portable CPU stack or the NVIDIA stack without making callers
-# remember Compose override files. Override automatic detection with
-# VLVERIFIER_MODE=cpu or VLVERIFIER_MODE=gpu when needed.
+# 호출자가 Compose override 파일을 따로 기억할 필요 없이 CPU/NVIDIA 스택 중 하나를 자동 선택
+# VLVERIFIER_MODE=cpu 또는 VLVERIFIER_MODE=gpu로 자동 감지를 재정의 가능
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
