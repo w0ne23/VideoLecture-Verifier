@@ -1,23 +1,19 @@
-"""Slide error checker for the classified issue pipeline.
+"""classified issue 파이프라인의 슬라이드 오류 검사기
 
-The classified pipeline keeps its own output shape. The slide image is the
-source of truth, and whitespace/layout/style suggestions are not reportable
-slide errors.
+classified 파이프라인은 자체 출력 형식을 유지, 슬라이드 이미지가 유일한 원본이고
+공백/레이아웃/문체 제안은 신고 대상 슬라이드 오류가 아님
 
-Earlier stages' OCR-derived text (t1/slide_text) is never passed straight
-into the error-judging prompt: it can already contain misreads from that
-stage's own OCR hint, and re-presenting it here would anchor the judgment
-call on the same mistake a second time. Instead, each slide is re-transcribed
-here from the image alone (`_transcribe_slide_text`) before judging, mirroring
-the transcribe-then-judge split already used for code_syntax.
+이전 단계의 OCR 기반 텍스트(t1/slide_text)는 오류 판정 프롬프트에 그대로 넘기지
+않음: 그 단계 자체의 OCR 힌트에서 온 오독을 이미 포함하고 있을 수 있어, 여기서
+다시 제시하면 같은 실수에 판정이 두 번째로 앵커링될 수 있음, 대신 판정 전에
+이미지만 보고 각 슬라이드를 다시 전사(`_transcribe_slide_text`)하는데, 이는
+code_syntax에 이미 쓰던 전사-후-판정 분리 방식을 그대로 따른 것
 
-Even with that split, the judging model can still misread the same subtle
-glyph on its own (independent of the transcription), especially on small text
-in a downscaled full-slide image. text_error/numeric_unit candidates are
-therefore re-verified against a cropped, zoomed-in region of the original
-image (`_verify_error_with_crop`) before being finalized, since a focused
-crop avoids the resolution loss a vision API applies when downsampling the
-whole slide.
+이렇게 분리해도 판정 모델이 (전사와 독립적으로) 미묘한 글자를 스스로 잘못 읽을 수
+있음, 특히 다운스케일된 전체 슬라이드 이미지 속 작은 텍스트에서 그러함, 그래서
+text_error/numeric_unit 후보는 최종 확정 전에 원본 이미지의 크롭·확대 영역으로
+재검증(`_verify_error_with_crop`)함 — 집중 크롭은 전체 슬라이드를 다운샘플링할 때
+vision API가 적용하는 해상도 손실을 피할 수 있기 때문
 """
 
 from __future__ import annotations
@@ -56,10 +52,12 @@ SLIDE_ERROR_TYPES = {
 }
 
 
+# 현재 시각을 ISO 8601 문자열로 반환
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+# 값을 float로 안전 변환, NaN/inf/실패는 default
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -70,10 +68,12 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return number
 
 
+# 값을 0~1 범위로 clamp (소수점 6자리 반올림)
 def _clamp01(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, _safe_float(value, default))), 6)
 
 
+# 코드펜스(```json ... ```) 제거
 def _strip_json_fence(text: str) -> str:
     stripped = (text or "").strip()
     if stripped.startswith("```"):
@@ -82,6 +82,7 @@ def _strip_json_fence(text: str) -> str:
     return stripped.strip()
 
 
+# JSON 파일 로드, 없거나 dict가 아니면 빈 dict
 def _load_json(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -95,6 +96,7 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+# slide 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
     try:
@@ -104,18 +106,22 @@ def _default_models() -> list[str]:
     return configured_stage_models("slide")
 
 
+# 리스트를 지정 크기로 분할
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+# 연속 공백을 하나로 정규화
 def _norm_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+# 공백 제거 후 소문자화
 def _compact_no_space(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").strip().lower())
 
 
+# 실제 존재하는 경로로 해석, /pipeline/ 접두어는 현재 작업 디렉터리 기준으로도 시도
 def _existing_path(raw_path: object) -> Path | None:
     if not raw_path:
         return None
@@ -132,6 +138,7 @@ def _existing_path(raw_path: object) -> Path | None:
     return path if path.is_absolute() else None
 
 
+# 슬라이드 번호로 base/start/end 이미지 후보 중 존재하는 첫 파일 조회
 def _find_slide_image(img_dir: str | None, slide_no: int) -> Path | None:
     if not img_dir:
         return None
@@ -156,9 +163,10 @@ def _force_base_image_path(
     image_path: object, img_dir: str | None, slide_no: int
 ) -> Path | None:
     """annot(필기)·build(애니메이션 진행) 변형 이미지가 아니라 항상 base 이미지로
-    판정하도록 강제합니다. annot/build 프레임은 필기나 미완성 애니메이션 상태 때문에
+    판정하도록 강제, annot/build 프레임은 필기나 미완성 애니메이션 상태 때문에
     텍스트/도형이 겹쳐 보여 visual_defect 오탐을 유발하므로, base 한 장만 채점 대상으로
-    삼습니다. annot/build도 결국 base에서 파생된 프레임이라 base만 봐도 충분합니다."""
+    삼음, annot/build도 결국 base에서 파생된 프레임이라 base만 봐도 충분
+    """
     candidates: list[Path] = []
     raw = str(image_path or "").strip()
     if raw:
@@ -182,6 +190,7 @@ def _force_base_image_path(
     return None
 
 
+# merged_clean 경로/로그 경로 주변에서 슬라이드 이미지가 있는 디렉터리 탐색
 def _resolve_img_dir(merged_payload: dict[str, Any], merged_path: str | Path | None) -> str | None:
     detector_log = str(merged_payload.get("source_detector_log", "") or "").strip()
     candidates: list[Path] = []
@@ -201,6 +210,7 @@ def _resolve_img_dir(merged_payload: dict[str, Any], merged_path: str | Path | N
     return None
 
 
+# 여러 후보 키 중 첫 유효한 슬라이드 번호 조회
 def _slide_number(slide: dict[str, Any]) -> int | None:
     for key in ("slide_number", "slide_canonical_number", "scene_number"):
         try:
@@ -212,6 +222,7 @@ def _slide_number(slide: dict[str, Any]) -> int | None:
     return None
 
 
+# payload에서 slides 또는 scenes 배열 조회
 def _slides_from(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("slides")
     if isinstance(rows, list):
@@ -222,6 +233,7 @@ def _slides_from(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+# 여러 payload에서 (제목, 텍스트, 이미지 경로) 후보 목록 수집
 def _image_candidates(*payloads: dict[str, Any]) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     for payload in payloads:
@@ -250,6 +262,7 @@ def _image_candidates(*payloads: dict[str, Any]) -> list[dict[str, str]]:
     return candidates
 
 
+# image_path가 없는 슬라이드에 제목/텍스트 유사도로 가장 잘 맞는 이미지 경로를 매칭
 def _attach_slide_image_paths(
     slides: list[dict[str, Any]],
     textualized_payload: dict[str, Any],
@@ -289,6 +302,7 @@ def _attach_slide_image_paths(
     return enriched
 
 
+# merged_clean 우선으로 검사 대상 슬라이드 목록 구성, 이미지 경로 보강 후 슬라이드 번호순 정렬
 def _slides_for_check(
     *,
     merged_payload: dict[str, Any],
@@ -304,6 +318,7 @@ def _slides_for_check(
     return rows
 
 
+# 슬라이드 오류 검사용 LLM 프롬프트 생성
 def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str:
     return f"""당신은 강의 슬라이드에서 눈에 보이는 오류를 찾는 검수자입니다.
 
@@ -415,6 +430,7 @@ def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str
 """
 
 
+# LLM 응답에서 slide_errors 배열 파싱
 def _parse_response(text: str) -> list[dict[str, Any]]:
     payload = json.loads(_strip_json_fence(text))
     rows = payload.get("slide_errors", [])
@@ -426,8 +442,9 @@ _BRACKET_CLOSERS = {")": "(", "]": "[", "}": "{"}
 
 
 def _find_bracket_mismatch(text: str) -> str | None:
-    """스택 기반으로 괄호 짝을 확인합니다. 사람이 눈으로 세는 대신 결정론적으로 계산하므로
-    LLM에게 판단을 맡기는 것보다 정확합니다. 문제가 있으면 설명을, 없으면 None을 반환합니다."""
+    """스택 기반으로 괄호 짝을 확인, 사람이 눈으로 세는 대신 결정론적으로 계산하므로
+    LLM에게 판단을 맡기는 것보다 정확, 문제가 있으면 설명을, 없으면 None을 반환
+    """
     stack: list[str] = []
     for ch in text:
         if ch in _BRACKET_OPENERS:
@@ -443,6 +460,7 @@ def _find_bracket_mismatch(text: str) -> str | None:
     return None
 
 
+# 슬라이드 텍스트(제목/본문) 전사용 LLM 프롬프트 생성
 def _build_text_transcription_prompt(slide_no: int, title_hint: str) -> str:
     return f"""당신은 강의 슬라이드 이미지 속 텍스트를 있는 그대로 옮겨 적는 전사자입니다.
 
@@ -470,6 +488,7 @@ JSON 외 텍스트는 출력하지 마세요.
 """
 
 
+# 슬라이드 코드/수식 전사용 LLM 프롬프트 생성
 def _build_code_transcription_prompt(slide_no: int, title: str) -> str:
     return f"""당신은 강의 슬라이드 이미지 속 코드나 수식을 있는 그대로 옮겨 적는 전사자입니다.
 
@@ -508,14 +527,15 @@ def _check_code_syntax_mechanical(
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
     """VLM에게는 '보이는 그대로 옮겨 적기'만 시키고, 괄호 짝 판단은 결정론적 알고리즘이
-    맡습니다. 시각 인식과 문법 판단을 한 번에 묶어서 시켰던 기존 방식보다 정확도가 높을
-    것으로 기대되는 별도 경로입니다.
+    맡음, 시각 인식과 문법 판단을 한 번에 묶어서 시켰던 기존 방식보다 정확도가 높을
+    것으로 기대되는 별도 경로
 
     OCR 텍스트로 코드/수식 슬라이드를 미리 걸러내지 않고 모든 슬라이드에 대해 무조건
-    전사를 시도합니다 — OCR이 코드 블록을 놓치면 걸러내기 자체가 실패해 탐지가 통째로
-    스킵되는 위험이 있었기 때문입니다. 대신 판단이 필요 없는 단순 전사 작업이라는 점을
+    전사를 시도 — OCR이 코드 블록을 놓치면 걸러내기 자체가 실패해 탐지가 통째로
+    스킵되는 위험이 있었기 때문, 대신 판단이 필요 없는 단순 전사 작업이라는 점을
     이용해 저렴한 전용 모델(VERIFIER_SLIDE_ERROR_TRANSCRIBE_MODEL, 기본 gpt-5.4-mini)을
-    써서 전체 슬라이드에 걸어도 비용 부담이 크지 않게 합니다."""
+    써서 전체 슬라이드에 걸어도 비용 부담이 크지 않게 함
+    """
     from . import claim_common as cc
 
     slide_number = _slide_number(slide) or 0
@@ -606,11 +626,12 @@ def _transcribe_slide_text(
     img_dir: str | None,
     max_tokens: int,
 ) -> tuple[str, str, int, dict[str, Any]]:
-    """이미지만 보고 제목/본문을 새로 전사합니다. 이전 단계(t1 추출)에서 OCR 힌트에
+    """이미지만 보고 제목/본문을 새로 전사, 이전 단계(t1 추출)에서 OCR 힌트에
     이끌려 잘못 옮겨졌을 수 있는 텍스트를 오탈자 판정 프롬프트에 그대로 넘기면, 그 오독이
     두 번째 판정 단계에도 앵커링되어 실제로는 이미지에 맞게 적힌 글자를 오류로 보고하는
-    문제가 생긴다. 그래서 판정용 텍스트를 기존 slide_text(t1)에서 가져오지 않고, OCR 힌트
-    없이 이미지만 보는 별도 호출로 다시 뽑는다."""
+    문제가 생김, 그래서 판정용 텍스트를 기존 slide_text(t1)에서 가져오지 않고, OCR 힌트
+    없이 이미지만 보는 별도 호출로 다시 뽑음
+    """
     from . import claim_common as cc
 
     slide_number = _slide_number(slide) or 0
@@ -653,6 +674,7 @@ def _transcribe_slide_text(
     return "", "", api_calls, token_usage
 
 
+# 오류 후보가 실제로 신고할 만한지(스타일 제안 등 제외) 판정
 def _is_reportable_slide_error(
     problematic: str,
     corrected: str,
@@ -663,7 +685,7 @@ def _is_reportable_slide_error(
     r = str(reason or "").strip().lower()
 
     if error_type == "visual_defect":
-        # 고칠 "텍스트"가 없는 유형이라, 문제 위치/대상 설명과 근거만 있으면 됩니다.
+        # 고칠 "텍스트"가 없는 유형이라, 문제 위치/대상 설명과 근거만 있으면 됨
         return bool(p) and bool(r)
 
     c = str(corrected or "").strip()
@@ -704,7 +726,7 @@ def _is_reportable_slide_error(
 
 
 def _normalize_error_type(raw_value: object, problematic: str, corrected: str) -> str:
-    """LLM이 준 error_type을 검증하고, 없거나 잘못됐을 때만 텍스트로 추론합니다."""
+    """LLM이 준 error_type을 검증하고, 없거나 잘못됐을 때만 텍스트로 추론"""
     value = str(raw_value or "").strip().lower()
     if value in SLIDE_ERROR_TYPES:
         return value
@@ -715,6 +737,7 @@ def _normalize_error_type(raw_value: object, problematic: str, corrected: str) -
     return "text_error"
 
 
+# LLM 응답 1건을 검증/정제해 최종 오류 레코드로 변환, confidence 미달/미확정/미신고 대상이면 None
 def _normalize_error(
     row: dict[str, Any],
     *,
@@ -771,6 +794,7 @@ def _normalize_error(
     }
 
 
+# bbox 필드를 (x0,y0,x1,y1) 튜플로 파싱, 범위/순서가 잘못되면 None
 def _extract_bbox(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
     bbox = row.get("bbox")
     if not isinstance(bbox, dict):
@@ -798,10 +822,10 @@ def _crop_and_zoom_image_bytes(
     pad_ratio: float = 0.15,
     min_width: int = 1000,
 ) -> bytes | None:
-    """bbox 주변을 여유 있게 크롭해서 확대합니다. 전체 슬라이드를 한 번에 보낼 때는 비전
+    """bbox 주변을 여유 있게 크롭해서 확대, 전체 슬라이드를 한 번에 보낼 때는 비전
     API가 이미지를 내부적으로 다운스케일하면서 작은 글자의 디테일을 뭉갤 수 있는데, 문제
-    구간만 잘라 확대해 다시 보내면 그 구간이 다운스케일의 영향을 덜 받아 더 선명하게
-    보입니다."""
+    구간만 잘라 확대해 다시 보내면 그 구간이 다운스케일의 영향을 덜 받아 더 선명하게 보임
+    """
     try:
         image = Image.open(image_path)
         image.load()
@@ -810,8 +834,8 @@ def _crop_and_zoom_image_bytes(
     width, height = image.size
     x0, y0, x1, y1 = bbox
     # bbox 자체가 한 단어처럼 아주 좁으면 bbox 크기에 비례한 여백만으로는 주변 문맥이
-    # 부족해 잘려 나가기 쉽다(글자가 안 보여 "판독 불가"로 되돌아옴). 전체 이미지 폭의
-    # 일정 비율을 최소 여백으로 강제해 항상 읽을 수 있는 크기의 크롭을 확보한다.
+    # 부족해 잘려 나가기 쉬움(글자가 안 보여 "판독 불가"로 되돌아옴), 전체 이미지 폭의
+    # 일정 비율을 최소 여백으로 강제해 항상 읽을 수 있는 크기의 크롭을 확보
     pad_x = max((x1 - x0) * pad_ratio, 0.04)
     pad_y = max((y1 - y0) * pad_ratio, 0.04)
     left = max(0, int((x0 - pad_x) * width))
@@ -829,6 +853,7 @@ def _crop_and_zoom_image_bytes(
     return buf.getvalue()
 
 
+# 크롭 확대 이미지로 오류 후보를 재검증하는 LLM 프롬프트 생성
 def _build_crop_verify_prompt(problematic_text: str, corrected_text: str, error_type: str) -> str:
     return f"""당신은 강의 슬라이드에서 발견된 오류 후보를 확대된 이미지로 최종 확인하는
 검수자입니다.
@@ -862,6 +887,7 @@ JSON 외 텍스트는 출력하지 마세요.
 """
 
 
+# bbox 영역을 크롭·확대해 오류 후보가 실제로 유효한지 재검증, verdict가 not_an_error면 False
 def _verify_error_with_crop(
     *,
     model: str,
@@ -907,6 +933,7 @@ def _verify_error_with_crop(
     return True, api_calls, token_usage
 
 
+# 슬라이드 1장에 대해 재전사 -> 오류 검사 -> (text_error/numeric_unit만) 크롭 재검증까지 수행
 def _check_single_slide(
     *,
     model: str,
@@ -993,9 +1020,10 @@ def _check_single_slide_syntax(
     img_dir: str | None,
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], bool, int, dict[str, Any]]:
-    """_check_single_slide(슬라이드 검사)의 문법/코드 오류 점검 짝. 두 검사는 서로
-    결과를 참조하지 않는 완전히 독립된 검사라 별도 라운드로 돌 수 있다 — 다이어그램의
-    slide_inspect/syntax_verify 두 노드에 각각 대응한다."""
+    """_check_single_slide(슬라이드 검사)의 문법/코드 오류 점검 짝, 두 검사는 서로
+    결과를 참조하지 않는 완전히 독립된 검사라 별도 라운드로 돌 수 있음 — 다이어그램의
+    slide_inspect/syntax_verify 두 노드에 각각 대응
+    """
     errors, api_calls, token_usage = _check_code_syntax_mechanical(
         model=model,
         slide=slide,
@@ -1016,9 +1044,10 @@ def _run_check_pass(
     log_label: str,
     progress_notify: Callable[[int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """슬라이드 검사/문법 검사 두 라운드가 공유하는 모델별 병렬 처리 로직. check_fn만
-    바꿔서 두 검사에 재사용한다. progress_notify(done, total)은 (모델, 슬라이드) 작업
-    항목 하나가 끝날 때마다(성공/실패 무관) 호출된다."""
+    """슬라이드 검사/문법 검사 두 라운드가 공유하는 모델별 병렬 처리 로직, check_fn만
+    바꿔서 두 검사에 재사용, progress_notify(done, total)은 (모델, 슬라이드) 작업
+    항목 하나가 끝날 때마다(성공/실패 무관) 호출됨
+    """
     from . import claim_common as cc
 
     model_results: dict[str, dict[str, Any]] = {
@@ -1064,8 +1093,8 @@ def _run_check_pass(
             "token_usage": usage,
         }
 
-    # ``max_workers``는 모델별 한도다. 현재 기본은 단일 모델이지만, 다중
-    # 모델 설정에서도 각 모델이 독립적으로 같은 동시성을 사용한다.
+    # ``max_workers``는 모델별 한도, 현재 기본은 단일 모델이지만, 다중
+    # 모델 설정에서도 각 모델이 독립적으로 같은 동시성을 사용
     def _run_model_slides(model: str, work_items: list[tuple[str, dict[str, Any]]]) -> tuple[str, list[dict[str, Any]], list[tuple[tuple[str, dict[str, Any]], Exception]]]:
         completed: list[dict[str, Any]] = []
         failed: list[tuple[tuple[str, dict[str, Any]], Exception]] = []
@@ -1111,7 +1140,7 @@ def _run_check_pass(
 def _merge_model_results(
     base: dict[str, dict[str, Any]], other: dict[str, dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
-    """슬라이드 검사/문법 검사 두 라운드의 model_results를 모델별로 합친다."""
+    """슬라이드 검사/문법 검사 두 라운드의 model_results를 모델별로 합침"""
     from . import claim_common as cc
 
     merged: dict[str, dict[str, Any]] = {}
@@ -1129,6 +1158,8 @@ def _merge_model_results(
     return merged
 
 
+# 슬라이드 오류 검사 전체 파이프라인: 검사 대상 슬라이드 구성 -> 일반 오류 검사(slide_inspect) ->
+# 문법/코드 오류 검사(slide_syntax) -> 모델 결과 병합/중복 제거 -> 최종 신고 대상 선별
 def detect_classified_slide_errors(
     *,
     merged_clean_path: str | Path,
@@ -1165,10 +1196,10 @@ def detect_classified_slide_errors(
     img_dir = _resolve_img_dir(merged_payload, merged_clean_path)
 
     # 슬라이드 검사(일반 오류)와 문법/코드 오류 점검(결정론적 괄호 검사)은 서로 결과를
-    # 참조하지 않는 완전히 독립된 검사다 — 원래도 같은 슬라이드 스레드 안에서 이 둘을
+    # 참조하지 않는 완전히 독립된 검사 — 원래도 같은 슬라이드 스레드 안에서 이 둘을
     # 순서대로만 호출했을 뿐 서로 기다리지 않았으므로, 두 라운드로 나눠도 총 작업량/
-    # 동시성은 그대로다. 다이어그램의 slide_inspect/syntax_verify 두 노드에 맞춰
-    # 각각 자기 진행 상태를 따로 보고한다.
+    # 동시성은 그대로임, 다이어그램의 slide_inspect/syntax_verify 두 노드에 맞춰
+    # 각각 자기 진행 상태를 따로 보고
     notify("verify_slide_inspect", "run")
     try:
         inspect_results = _run_check_pass(

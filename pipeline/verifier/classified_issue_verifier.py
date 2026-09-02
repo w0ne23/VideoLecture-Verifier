@@ -1,8 +1,7 @@
-"""Final verifier for classified issue candidates.
+"""분류된 issue 후보에 대한 최종 verifier
 
-This module consumes ``classified_issue_input.v2`` produced by
-``issue_type_classifier.py`` and runs a category-specific final verifier over each
-already-classified issue.
+``issue_type_classifier.py``가 만든 ``classified_issue_input.v2``를 입력으로 받아
+이미 유형이 분류된 issue마다 카테고리별 최종 verifier를 실행한다
 """
 
 from __future__ import annotations
@@ -38,10 +37,9 @@ FINAL_VERIFIER_MAX_ATTEMPTS = max(
     1,
     int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_ATTEMPTS", "3") or "3"),
 )
-# Deliberately keep one weighting policy for every issue type. The previous
-# category-specific overrides made scope/confusing issues use different model
-# priors from factual/temporal issues, which contradicted the equal-weight
-# verifier setting.
+# 모든 issue 유형에 동일한 가중치 정책을 의도적으로 유지, 이전의 카테고리별 override는
+# scope/confusing issue가 factual/temporal issue와 다른 모델 사전 가중치를 쓰게 만들어
+# equal-weight verifier 설정과 모순됐음
 JUDGMENTS = {
     "valid_issue",
     "partially_resolved",
@@ -160,6 +158,7 @@ CATEGORY_SCORE_GUIDES = {
 }
 
 
+# 점수를 confirmed/rejected/professor_check 상태로 변환
 def _status_from_severity(score: float) -> str:
     confirmed = _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.80)
     rejected = _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_REJECTED_THRESHOLD"), 0.20)
@@ -170,14 +169,17 @@ def _status_from_severity(score: float) -> str:
     return "professor_check"
 
 
+# confirmed 판정 임계값 조회
 def _confirmed_threshold() -> float:
     return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.80)
 
 
+# 현재 시각을 ISO 8601 문자열로 반환
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+# 코드펜스(```json ... ```) 제거
 def _strip_json_fence(text: str) -> str:
     stripped = (text or "").strip()
     if stripped.startswith("```"):
@@ -186,6 +188,7 @@ def _strip_json_fence(text: str) -> str:
     return stripped.strip()
 
 
+# 값을 float로 안전 변환, 실패/NaN/inf는 default
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -196,10 +199,12 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return number
 
 
+# 값을 0~1 범위로 clamp, 소수점 6자리로 반올림
 def _clamp01(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, _safe_float(value, default))), 6)
 
 
+# verify 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
     try:
@@ -209,15 +214,19 @@ def _default_models() -> list[str]:
     return configured_stage_models("verify")
 
 
+# 리스트를 지정 크기로 분할
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+# item에서 슬라이드 번호 조회
 def _bundle_slide_number(item: dict[str, Any]) -> int | None:
     issue = item.get("issue") if isinstance(item.get("issue"), dict) else {}
     return _slide_number(issue)
 
 
+# 슬라이드+카테고리 단위로 묶어서 배치를 만들어야 배치 안 카테고리가 섞이지 않으므로,
+# 먼저 (슬라이드, 카테고리)로 그룹화한 뒤 각 그룹을 지정 크기로 분할
 def _chunk_by_slide_and_category(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     grouped: dict[tuple[int | str, str], list[dict[str, Any]]] = {}
     order: list[tuple[int | str, str]] = []
@@ -237,6 +246,7 @@ def _chunk_by_slide_and_category(items: list[dict[str, Any]], size: int) -> list
     return batches
 
 
+# 배치 내 issue들의 공통 카테고리 라벨 조회, 카테고리가 섞여 있으면 예외
 def _batch_category_label(items: list[dict[str, Any]]) -> str:
     categories = []
     for item in items:
@@ -250,6 +260,7 @@ def _batch_category_label(items: list[dict[str, Any]]) -> str:
     raise ValueError(f"final verifier batch contains mixed categories: {categories}")
 
 
+# JSON 파일 로드, 경로가 없거나 파일이 없으면 빈 dict 반환
 def _load_json(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -260,6 +271,7 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+# web evidence payload를 candidate_id 기준 조회 dict로 변환
 def _web_evidence_lookup(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     if not isinstance(payload, dict):
         return {}
@@ -273,6 +285,7 @@ def _web_evidence_lookup(payload: dict[str, Any] | None) -> dict[str, dict[str, 
     return lookup
 
 
+# issue에서 슬라이드 번호 조회, location 우선
 def _slide_number(issue: dict[str, Any]) -> int | None:
     location = issue.get("location") if isinstance(issue.get("location"), dict) else {}
     value = location.get("slide_number", issue.get("slide_number"))
@@ -283,6 +296,7 @@ def _slide_number(issue: dict[str, Any]) -> int | None:
     return number if number > 0 else None
 
 
+# issue에 연결된 context id 목록 조회, 다중/단일 필드를 모두 확인
 def _issue_context_ids(issue: dict[str, Any]) -> list[str]:
     context = issue.get("context") if isinstance(issue.get("context"), dict) else {}
     values = context.get("context_ids") or issue.get("context_ids")
@@ -294,6 +308,7 @@ def _issue_context_ids(issue: dict[str, Any]) -> list[str]:
     return [single] if single else []
 
 
+# issues_by_type dict를 표준 issue 목록과 composite issue 목록으로 평탄화
 def _flatten_issues(
     payload: dict[str, Any],
     *,
@@ -336,6 +351,7 @@ def _flatten_issues(
     return standard_refs, composite_refs
 
 
+# composite issue의 routing 근거(low_margin/model_disagreement)로부터 후보 카테고리 목록 도출
 def _composite_candidate_categories(issue: dict[str, Any]) -> list[str]:
     reasons = set(issue.get("routing_reasons") or [])
     candidates: set[str] = set()
@@ -366,10 +382,12 @@ def _composite_candidate_categories(issue: dict[str, Any]) -> list[str]:
     return [issue_type for issue_type in ISSUE_TYPES if issue_type in candidates]
 
 
+# 기본 id와 카테고리를 결합해 후보 묶음 id 생성
 def _candidate_bundle_id(base_id: str, category: str) -> str:
     return f"{base_id}::{category}"
 
 
+# composite issue 후보 카테고리들을 사람이 읽을 수 있는 라벨로 조합
 def _composite_category_label(candidate_categories: list[str]) -> str:
     labels = [
         CATEGORY_LABELS.get(category, category)
@@ -381,6 +399,7 @@ def _composite_category_label(candidate_categories: list[str]) -> str:
     return f"{CATEGORY_LABELS[COMPOSITE_ISSUE_TYPE]}({', '.join(labels)})"
 
 
+# composite issue 후보 카테고리들의 weighted_scores를 합이 1이 되도록 정규화
 def _normalized_composite_probabilities(
     candidate_categories: list[str],
     weighted_scores: dict[str, Any],
@@ -410,6 +429,7 @@ def _normalized_composite_probabilities(
     return raw, normalized
 
 
+# composite issue를 후보 카테고리별로 독립된 검증 대상 ref로 복제
 def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
     return {
         "id": _candidate_bundle_id(ref["id"], category),
@@ -421,6 +441,7 @@ def _build_candidate_ref(ref: dict[str, Any], category: str) -> dict[str, Any]:
     }
 
 
+# composite issue의 후보 카테고리별 검증 결과를 정규화된 확률로 가중 합산해 최종 하나의 검증 레코드로 병합
 def _merge_composite_verification(
     ref: dict[str, Any],
     candidate_categories: list[str],
@@ -499,6 +520,7 @@ def _merge_composite_verification(
     return selected
 
 
+# 여러 payload의 slides/scenes를 슬라이드 번호 기준으로 병합한 조회 dict 생성
 def _build_slide_lookup(*payloads: dict[str, Any]) -> dict[int, dict[str, Any]]:
     lookup: dict[int, dict[str, Any]] = {}
     for payload in payloads:
@@ -523,6 +545,7 @@ def _build_slide_lookup(*payloads: dict[str, Any]) -> dict[int, dict[str, Any]]:
     return lookup
 
 
+# merged_clean payload에서 context를 context_id 기준 조회 dict와 슬라이드별 목록으로 구성
 def _build_context_lookup(merged_payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[int, list[dict[str, Any]]]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_slide: dict[int, list[dict[str, Any]]] = {}
@@ -566,6 +589,7 @@ def _build_context_lookup(merged_payload: dict[str, Any]) -> tuple[dict[str, dic
     return by_id, by_slide
 
 
+# context에서 프롬프트에 필요한 최소 필드만 추출
 def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "context_id": context.get("context_id", ""),
@@ -574,6 +598,7 @@ def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# context 목록을 "id: 텍스트" 형태로 줄바꿈 연결
 def _joined_context_text(contexts: list[dict[str, Any]]) -> str:
     lines = []
     for context in contexts:
@@ -586,6 +611,7 @@ def _joined_context_text(contexts: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+# 슬라이드 번호 기준으로 step만큼 떨어진 인접 슬라이드 번호 조회
 def _adjacent_slide_number(contexts_by_slide: dict[int, list[dict[str, Any]]], slide_number: int, step: int) -> int | None:
     numbers = sorted(number for number, rows in contexts_by_slide.items() if rows)
     if slide_number not in numbers:
@@ -596,6 +622,7 @@ def _adjacent_slide_number(contexts_by_slide: dict[int, list[dict[str, Any]]], s
     return numbers[index]
 
 
+# issue를 중심으로 앞뒤 window개 슬라이드 범위의 context를 모아 검증 프롬프트용 컨텍스트 창 구성
 def _context_window(
     issue: dict[str, Any],
     *,
@@ -637,6 +664,7 @@ def _context_window(
     }
 
 
+# 프롬프트에 필요한 슬라이드 최소 필드만 추출
 def _compact_slide(slide: dict[str, Any]) -> dict[str, Any]:
     return {
         key: slide.get(key)
@@ -645,6 +673,7 @@ def _compact_slide(slide: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# issue 1건에 슬라이드/context window를 결합해 검증 프롬프트용 번들 구성
 def _build_context_bundle(
     ref: dict[str, Any],
     *,
@@ -675,6 +704,7 @@ def _build_context_bundle(
     }
 
 
+# issue 1건을 프롬프트용 요약(claim, web evidence 압축 포함)으로 변환
 def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
     issue = item.get("issue") or {}
     context_bundle = item.get("context_bundle") if isinstance(item.get("context_bundle"), dict) else {}
@@ -770,6 +800,7 @@ def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
+# 배치 내 모든 item의 슬라이드/context를 중복 제거해 병합한 배치 공통 컨텍스트 구성
 def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
     first = items[0] if items else {}
     merged_contexts: dict[str, dict[str, Any]] = {}
@@ -808,6 +839,7 @@ def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# 배치 컨텍스트+issue 요약을 LLM 프롬프트 입력용 JSON 문자열로 직렬화
 def _prompt_payload(items: list[dict[str, Any]]) -> str:
     return json.dumps(
         {
@@ -819,6 +851,7 @@ def _prompt_payload(items: list[dict[str, Any]]) -> str:
     )
 
 
+# LLM 응답 형식(judgments 배열 JSON 스키마)을 지정하는 프롬프트 조각 반환
 def _response_contract() -> str:
     return """JSON 객체만 출력하세요. 모든 입력 id를 한 번씩 포함하세요.
 {
@@ -837,8 +870,9 @@ def _response_contract() -> str:
 점수는 0.0~1.0입니다. reason과 minimal_fix는 한국어로 작성하고 enum과 key는 그대로 사용하세요."""
 
 
+# 최종 verifier 응답용 JSON 스키마 생성, id를 지정하면 enum/minItems/maxItems로 제약
 def _final_verifier_schema(ids: list[str] | None = None) -> dict[str, Any]:
-    """Provider-neutral schema translated by each API adapter."""
+    """provider-neutral 스키마, 각 API 어댑터가 자체 형식으로 변환"""
     allowed_ids = [str(value) for value in (ids or []) if str(value)]
     id_schema: dict[str, Any] = {"type": "string"}
     if allowed_ids:
@@ -890,6 +924,7 @@ def _final_verifier_schema(ids: list[str] | None = None) -> dict[str, Any]:
     }
 
 
+# 카테고리별 최종 verifier LLM 프롬프트 생성
 def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
     description = CATEGORY_DESCRIPTIONS.get(category, "")
     score_guide = CATEGORY_SCORE_GUIDES.get(category, {})
@@ -973,12 +1008,14 @@ minimal_fix는 필요한 경우만 짧게 작성하세요.
 """
 
 
+# LLM 응답에서 judgments 배열 파싱
 def _parse_response(text: str) -> list[dict[str, Any]]:
     payload = json.loads(_strip_json_fence(text))
     rows = payload.get("judgments", [])
     return rows if isinstance(rows, list) else []
 
 
+# is_valid_issue x category_severity x context_unresolved로 최종 모델 점수 계산
 def _final_model_score(
     *,
     category: str,
@@ -990,6 +1027,7 @@ def _final_model_score(
     return _clamp01(is_valid_issue * category_severity * context_unresolved)
 
 
+# LLM 응답 1개 판정 행을 검증/정규화해 표준 판정 레코드로 변환
 def _normalize_judgment_row(
     row: dict[str, Any],
     *,
@@ -1030,6 +1068,7 @@ def _normalize_judgment_row(
     }
 
 
+# 파싱 실패 issue에 대해 insufficient_context로 채운 대체 판정 레코드 생성
 def _parse_failed_row(
     ref: dict[str, Any],
     model: str,
@@ -1058,6 +1097,7 @@ def _parse_failed_row(
     return row
 
 
+# 배치를 LLM에 보내 판정 요청, 파싱 실패 시 재시도 후 누락된 id만 단건으로 복구
 def _call_model_for_batch(
     *,
     model: str,
@@ -1119,9 +1159,8 @@ def _call_model_for_batch(
                 flush=True,
             )
 
-    # Some providers may return only a subset of a multi-item tool call even
-    # when the schema is valid. Recover only the missing rows with singleton
-    # requests so a provider omission never becomes a false parse failure.
+    # 일부 provider는 스키마가 유효해도 다중 항목 tool call 중 일부만 반환할 수 있음,
+    # 누락된 행만 단건 요청으로 복구해 provider 누락이 오탐 파싱 실패가 되지 않도록 함
     missing_refs = [ref for ref in batch if ref["id"] not in last_by_id]
     for ref in missing_refs:
         single_prompt = _build_prompt(category, [ref], current_date)
@@ -1174,6 +1213,7 @@ def _call_model_for_batch(
     return normalized, _aggregate_token_usage(usages)
 
 
+# 배치 1개를 처리하는 워커, 진행 상황을 로그로 출력하고 모델/카테고리별 결과 dict 반환
 def _batch_worker(args: tuple) -> dict[str, Any]:
     model, category, batch, batch_index, total_batches, current_date, max_tokens = args
     resolved = _resolve_model_spec(model)
@@ -1209,6 +1249,7 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
     }
 
 
+# LLM 호출 없이 dry-run 모드용 빈 결과 dict 생성
 def _dry_run_model_results(models: list[str]) -> dict[str, dict[str, Any]]:
     results = {}
     for model in models:
@@ -1227,6 +1268,7 @@ def _dry_run_model_results(models: list[str]) -> dict[str, dict[str, Any]]:
     return results
 
 
+# 모델별 판정을 가중 평균해 최종 점수 계산, 모델 간 점수 편차로 disagreement 여부도 함께 반환
 def _weighted_final_score(
     verdicts: list[dict[str, Any]],
     model_weights: dict[str, float],
@@ -1251,6 +1293,7 @@ def _weighted_final_score(
     return round(score, 6), used_weights, round(missing_weight, 6), round(disagreement, 6), bool(disagreement >= 0.35)
 
 
+# 카테고리별 가중치 override 없이 base_weights를 그대로 사용
 def _effective_model_weights(
     category: str,
     verdicts: list[dict[str, Any]],
@@ -1260,6 +1303,7 @@ def _effective_model_weights(
     return base_weights
 
 
+# issue 1건의 모든 모델 판정을 가중 평균해 최종 검증 결과 레코드 구성
 def _issue_result_record(
     ref: dict[str, Any],
     verdicts: list[dict[str, Any]],
@@ -1329,6 +1373,7 @@ def _issue_result_record(
     }
 
 
+# 전체 검증 결과의 유형별/모델별 요약 통계 생성
 def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     by_type = Counter(record.get("category") or "unknown" for record in records)
     manual_review_count = sum(1 for record in records if record.get("needs_manual_review"))
@@ -1362,8 +1407,9 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
     }
 
 
+# 전체 issue 레코드를 중복 없이 최종 응답 메타데이터만 남긴 축소 뷰 생성
 def _slim_classified_issue_view(result: dict[str, Any]) -> dict[str, Any]:
-    """Keep final response metadata without duplicating full issue records."""
+    """전체 issue 레코드를 중복하지 않고 최종 응답 메타데이터만 유지"""
     return {
         key: result.get(key)
         for key in (
@@ -1383,12 +1429,13 @@ def _slim_classified_issue_view(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# severity 출력을 웹 verifier 응답 형식으로 변환
 def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
-    """Convert severity output into the web verifier response shape.
+    """severity 출력을 웹 verifier 응답 형식으로 변환
 
-    The frontend already knows how to render ``content_verification.v2`` style
-    ``feedback_items``. Keeping this adapter here lets the new classified issue
-    pipeline show up in the existing verifier page without a separate UI pass.
+    프론트엔드는 이미 ``content_verification.v2`` 형식의 ``feedback_items``를
+    렌더링할 수 있으므로, 이 어댑터를 두면 별도 UI 작업 없이 새 classified
+    issue 파이프라인을 기존 verifier 페이지에서 그대로 보여줄 수 있다
     """
 
     all_issues = result.get("all_issues", []) or []
@@ -1597,6 +1644,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# 분류된 issue 전체를 카테고리별 최종 verifier로 검증하는 전체 오케스트레이션,
+# composite issue는 후보 카테고리별로 검증한 뒤 하나의 결과로 병합
 def judge_classified_issues(
     payload: dict[str, Any],
     *,
@@ -1712,8 +1761,8 @@ def judge_classified_issues(
                 done = progress_done
             progress_notify(done, total_batch_count)
 
-        # ``max_workers``는 모델별 한도다. 모델마다 별도 pool을 두어 한
-        # 공급자의 느린 요청이 다른 모델의 동시성을 줄이지 않게 한다.
+        # ``max_workers``는 모델별 한도, 모델마다 별도 pool을 두어 한
+        # 공급자의 느린 요청이 다른 모델의 동시성을 줄이지 않게 함
         def _run_model_batches(model: str, work_items: list[tuple]) -> tuple[str, list[dict[str, Any]], list[tuple[tuple, Exception]]]:
             completed: list[dict[str, Any]] = []
             failed: list[tuple[tuple, Exception]] = []
@@ -1850,6 +1899,7 @@ def judge_classified_issues(
     }
 
 
+# 입력 파일명에서 _classified_issues/_issue_judge 접미어를 떼고 출력 경로 생성
 def _default_output_path(input_path: Path) -> Path:
     stem = input_path.stem
     if stem.endswith("_classified_issues"):
@@ -1859,6 +1909,7 @@ def _default_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{stem}_classified_issue_verifier.json")
 
 
+# 입력 경로의 접두어를 기반으로 관련 파일(merged_clean 등) 경로 추정
 def _guess_related_path(input_path: Path, suffix: str) -> Path:
     stem = input_path.stem
     if stem.endswith("_classified_issues"):
@@ -1870,24 +1921,25 @@ def _guess_related_path(input_path: Path, suffix: str) -> Path:
     return input_path.with_name(f"{prefix}{suffix}")
 
 
+# CLI 인자 파서 구성
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the category-specific final verifier over classified issues.",
+        description="분류된 issue에 대해 카테고리별 최종 verifier 실행",
     )
-    parser.add_argument("input_json", help="classified_issue_input.v2 JSON path")
-    parser.add_argument("-o", "--output", help="output JSON path")
-    parser.add_argument("--merged-clean", help="merged_clean JSON path")
-    parser.add_argument("--slide-textualized", help="slide_textualized JSON path")
-    parser.add_argument("--slide-classified", help="slide_classified JSON path")
+    parser.add_argument("input_json", help="classified_issue_input.v2 JSON 경로")
+    parser.add_argument("-o", "--output", help="출력 JSON 경로")
+    parser.add_argument("--merged-clean", help="merged_clean JSON 경로")
+    parser.add_argument("--slide-textualized", help="slide_textualized JSON 경로")
+    parser.add_argument("--slide-classified", help="slide_classified JSON 경로")
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Defaults to the verify stage bindings.",
+        help="콤마/공백 구분 모델 목록, 기본값은 verify 스테이지 바인딩",
     )
     parser.add_argument(
         "--model-weights",
         default=None,
-        help="deprecated compatibility option; selected models always receive equal weight",
+        help="사용 중단된 호환 옵션, 선택된 모델은 항상 동일 가중치를 받음",
     )
     parser.add_argument(
         "--batch-size",
@@ -1898,17 +1950,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "20")))
     parser.add_argument("--context-window", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))))
     parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_CURRENT_DATE", "2026-05-14"))
-    parser.add_argument("--limit", type=int, default=None, help="optional issue count limit for quick tests")
+    parser.add_argument("--limit", type=int, default=None, help="빠른 테스트용 issue 개수 제한(선택)")
     parser.add_argument(
         "--ids",
         nargs="+",
         default=None,
-        help="only verify the specified issue IDs (useful for retrying failed batches)",
+        help="지정한 issue ID만 검증 (실패한 배치 재시도에 유용)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="validate input/output shape without calling LLMs")
+    parser.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 입출력 형식만 검증")
     return parser
 
 
+# CLI 진입점, 최종 검증 실행 후 결과 JSON 저장 및 요약 출력
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     input_path = Path(args.input_json)

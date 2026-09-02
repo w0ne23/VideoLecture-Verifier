@@ -1,3 +1,4 @@
+# claim 목록에서 1차 issue 후보를 LLM으로 판정하는 로직 (judge 단계)
 from __future__ import annotations
 
 import json
@@ -5,6 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# issue judge 배치 병렬 처리 worker 수, 환경변수 미설정/파싱 실패 시 기본값
 def _issue_judge_batch_max_workers() -> int:
     raw = (
         os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS")
@@ -17,6 +19,7 @@ def _issue_judge_batch_max_workers() -> int:
         return 12
 
 
+# claim의 식별자 조회, claim_id 없으면 context_id로 대체
 def _claim_id(claim: dict) -> str:
     return str(
         claim.get("claim_id")
@@ -25,10 +28,12 @@ def _claim_id(claim: dict) -> str:
     ).strip()
 
 
+# claim이 속한 단일 context_id 조회
 def _context_id(claim: dict) -> str:
     return str(claim.get("context_id") or "").strip()
 
 
+# claim이 참조하는 context_id 목록 조회 (다중 context_ids 우선, 없으면 단일 context_id)
 def _context_ids(claim: dict) -> list[str]:
     values = claim.get("context_ids")
     if isinstance(values, list):
@@ -39,11 +44,13 @@ def _context_ids(claim: dict) -> list[str]:
     return [cid] if cid else []
 
 
+# judge 프롬프트 레이아웃 선택(legacy/grouped), 환경변수로 제어
 def _issue_judge_prompt_layout() -> str:
     layout = str(os.getenv("VERIFIER_ISSUE_JUDGE_PROMPT_LAYOUT", "legacy") or "").strip().lower()
     return "legacy" if layout in {"legacy", "shared", "flat"} else "grouped"
 
 
+# claim 1건을 프롬프트에 넣을 텍스트 블록으로 포맷
 def _format_claim_for_prompt(claim: dict, index: int) -> str:
     claim_id = _claim_id(claim) or f"claim_{index}"
     context_id = _context_id(claim)
@@ -66,6 +73,7 @@ def _format_claim_for_prompt(claim: dict, index: int) -> str:
     return "\n".join(lines)
 
 
+# legacy 레이아웃용 배치 공통 문맥(슬라이드+context 목록) 문자열 생성
 def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
     from . import claim_common as cv
 
@@ -102,11 +110,11 @@ def _build_context_grouped_judge_input(
     contexts: list[dict],
     slide_ctx: dict,
 ) -> str:
-    """Place each full context immediately before all claims extracted from it.
+    """각 context 전문을 그 context에서 추출된 claim들 바로 앞에 배치
 
-    Every context in the batch remains visible, including contexts with no target
-    claim, so preceding/following discourse can still resolve references and
-    explicit self-corrections without duplicating the context per claim.
+    판정 대상 claim이 없는 context를 포함해 배치 내 모든 context를 그대로 노출,
+    앞뒤 발화로 지시어 해석과 명시적 자기정정을 판단할 수 있게 하면서도
+    claim마다 context를 중복 삽입하지 않음
     """
     from . import claim_common as cv
 
@@ -163,6 +171,7 @@ def _build_context_grouped_judge_input(
     )
 
 
+# judge 프롬프트 레이아웃에 따라 배치 공통 문맥과 판정 대상 claim 섹션을 조합해 최종 프롬프트 생성
 def _build_issue_candidate_prompt(
     claims: list[dict],
     contexts: list[dict],
@@ -307,6 +316,7 @@ confidence는 정보의 중요성이나 추가 확인 가치가 아니라, 위 �
 """
 
 
+# issue dict의 키 순서를 보기 좋게(우선순위 필드 먼저) 재배열
 def _order_issue_candidate_fields(issue: dict) -> dict:
     preferred = (
         "issue_id",
@@ -328,6 +338,7 @@ def _order_issue_candidate_fields(issue: dict) -> dict:
     return ordered
 
 
+# confidence 값을 0~1로 안전 변환 후 clamp
 def _clamp_confidence(value) -> float:
     try:
         number = float(value or 0)
@@ -336,6 +347,7 @@ def _clamp_confidence(value) -> float:
     return max(0.0, min(1.0, number))
 
 
+# LLM 응답의 claim_scores를 claim_id 기준으로 매핑, 입력된 모든 claim에 대해 (없으면 빈 값으로) 항목 생성
 def _normalize_claim_scores(raw_scores: list, claims: list[dict]) -> list[dict]:
     scores_by_claim: dict[str, dict] = {}
     if isinstance(raw_scores, list):
@@ -369,6 +381,7 @@ def _normalize_claim_scores(raw_scores: list, claims: list[dict]) -> list[dict]:
     return normalized
 
 
+# 1차 issue 후보 판정 LLM 호출 1회, JSON 파싱 실패 시 재시도, min_confidence 이상만 issue로 채택
 def _judge_issue_candidates(
     claims: list[dict],
     contexts: list[dict],
@@ -388,9 +401,8 @@ def _judge_issue_candidates(
         claims, contexts, current_date, hint, slide_ctx, min_confidence
     )
     system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
-    # Provider-specific translation happens inside _call_llm.  Do not gate
-    # this on OpenAI-compatible model names: Claude needs the same request to
-    # be translated into forced tool_use, and Gemini into JSON MIME/schema.
+    # provider별 변환은 _call_llm 내부에서 처리, OpenAI 호환 모델명 여부로 분기하지 않음 —
+    # Claude는 동일 요청을 강제 tool_use로, Gemini는 JSON MIME/schema로 각각 변환해야 함
     response_format = {"type": "json_object"}
     api_calls = 0
     token_usage = cv._empty_token_usage()
@@ -471,6 +483,7 @@ def _judge_issue_candidates(
     return [], [], True, api_calls, token_usage
 
 
+# _judge_issue_candidates를 배치 복구 재시도 횟수만큼 재시도, 파싱 실패가 계속되면 마지막 결과라도 반환
 def recover_issue_candidate_judgement(
     claims: list[dict],
     contexts: list[dict],
@@ -520,7 +533,11 @@ def judge_issue_candidates_only(
     min_confidence: float,
     log_prefix: str = "",
 ) -> tuple[list[dict], list[dict], int, dict]:
-    """Run only the first issue judge and return issue candidates."""
+    """1차 issue judge만 실행해 issue 후보 반환
+
+    배치별로 1차 issue judge를 병렬 실행 (첫 배치는 prompt 캐시 warm-up을 위해 먼저 단독 실행),
+    결과를 순서대로 합쳐 issue_id 부여 후 반환
+    """
     from . import claim_common as cv
 
     total_api = 0
@@ -589,6 +606,8 @@ def judge_issue_candidates_only(
     return all_issues, all_claim_scores, total_api, total_token_usage
 
 
+# 프롬프트를 프롬프트 캐싱용 고정 system 부분과 배치별 동적 user 부분으로 분리,
+# 마커를 못 찾으면 분리하지 않음
 def _split_judge_prompt_for_cache(prompt: str) -> tuple[str | None, str]:
     dynamic_marker = "배치 공통 문맥:"
     instruction_marker = "### 판정 기준"

@@ -34,6 +34,7 @@ _LLM_LOG_RULE = "═" * 72
 _LLM_LOG_SUBRULE = "─" * 72
 
 
+# 초 단위 시간을 "N초" 또는 "N분 M초" 형태로 포맷
 def _format_elapsed(seconds: float) -> str:
     seconds = max(0.0, float(seconds or 0.0))
     if seconds < 60:
@@ -43,17 +44,20 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes}분 {remainder:.1f}초"
 
 
+# 유형별 집계 dict를 "key N건, ..." 형태의 한 줄 문자열로 포맷
 def _format_breakdown(values: dict | None) -> str:
     if not isinstance(values, dict) or not values:
         return "없음"
     return ", ".join(f"{key} {value}건" for key, value in values.items())
 
 
+# (라벨, 값) 목록을 들여쓴 로그 줄로 출력
 def _print_log_rows(rows: list[tuple[str, object]] | None) -> None:
     for label, value in rows or []:
         print(f"    • {label}: {value}", flush=True)
 
 
+# 전체 LLM 검증 파이프라인 시작 배너 출력
 def _llm_pipeline_banner(
     *,
     merged_file: Path,
@@ -74,6 +78,7 @@ def _llm_pipeline_banner(
     ])
 
 
+# 단계 시작 로그 출력, 경과 시간 측정을 위한 시작 시각 반환
 def _llm_stage_start(
     stage_code: str,
     title: str,
@@ -86,6 +91,7 @@ def _llm_stage_start(
     return time.perf_counter()
 
 
+# 단계 완료 로그 출력(결과/생성 파일/소요 시간), 경과 시간 반환
 def _llm_stage_done(
     stage_code: str,
     title: str,
@@ -109,6 +115,7 @@ def _llm_stage_done(
     return elapsed
 
 
+# 단계 실패 로그 출력
 def _llm_stage_failed(stage_code: str, title: str, started_at: float, exc: Exception) -> None:
     elapsed = time.perf_counter() - started_at
     print(f"\n  ❌ {stage_code} {title} 실패", flush=True)
@@ -119,6 +126,7 @@ def _llm_stage_failed(stage_code: str, title: str, started_at: float, exc: Excep
     print(_LLM_LOG_SUBRULE, flush=True)
 
 
+# 단계 건너뜀 로그 출력
 def _llm_stage_skipped(stage_code: str, title: str, reason: str) -> None:
     print(f"\n{_LLM_LOG_RULE}", flush=True)
     print(f"  {stage_code} {title}", flush=True)
@@ -127,6 +135,7 @@ def _llm_stage_skipped(stage_code: str, title: str, reason: str) -> None:
     print(_LLM_LOG_SUBRULE, flush=True)
 
 
+# 전체 파이프라인 완료 로그 출력(최종 결과/단계별 소요 시간/생성 파일)
 def _llm_pipeline_done(
     *,
     started_at: float,
@@ -152,6 +161,7 @@ def _llm_pipeline_done(
     return elapsed
 
 
+# 환경변수를 int로 읽되 최솟값 이상으로 clamp
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     try:
         value = int(os.getenv(name, str(default)) or default)
@@ -160,6 +170,7 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
+# 환경변수를 float로 읽되 최소~최대 범위로 clamp
 def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
     try:
         value = float(os.getenv(name, str(default)) or default)
@@ -168,6 +179,7 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: floa
     return max(minimum, min(maximum, value))
 
 
+# 값을 0~1 범위로 clamp, 변환 실패 시 default
 def _clamp01(value: object, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -176,10 +188,12 @@ def _clamp01(value: object, default: float = 0.0) -> float:
     return max(0.0, min(1.0, number))
 
 
+# 파일이 존재하고 내용이 비어있지 않은 JSON 파일인지 확인
 def _json_file_exists(path: Path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
 
 
+# JSON 파일 로드, 최상위가 dict가 아니면 빈 dict 반환
 def _load_json_file(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -201,6 +215,7 @@ DEFAULT_ISSUE_JUDGE_MIN_CONFIDENCE = 0.70
 DEFAULT_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE = 0.85
 
 
+# stdout/stderr를 원래 스트림과 Docker 로그 스트림 양쪽에 동시에 기록하는 tee 래퍼
 class _DockerLogTee:
     def __init__(self, primary, docker_stream):
         self.primary = primary
@@ -229,6 +244,7 @@ class _DockerLogTee:
         return getattr(self.primary, name)
 
 
+# 스트림이 이미 target_path와 같은 파일을 가리키는지 확인
 def _same_stream_target(stream, target_path: str) -> bool:
     try:
         return os.fstat(stream.fileno()) == os.stat(target_path)
@@ -269,27 +285,30 @@ def _enable_docker_log_tee() -> None:
     _DOCKER_LOG_TEE_ENABLED = True
 
 
+# merged_clean 경로에서 _merged_clean/_merged 접미어를 뗀 기본 파일명 조회
 def _base_stem(merged_path: Path) -> str:
     return merged_path.stem.replace("_merged_clean", "").replace("_merged", "")
 
 
+# 콤마/공백 구분 모델 스펙 문자열을 리스트로 분리
 def _split_model_specs(value: str | None) -> list[str]:
     if not value:
         return []
     return [part for part in re.split(r"[\s,]+", str(value).strip()) if part]
 
 
+# issue_detect 스테이지에 설정된 모델 목록 조회
 def _default_issue_judge_models() -> list[str]:
     from .runtime_llm import configured_stage_models
     return configured_stage_models("issue_detect")
 
 
 def _issue_judge_min_confidence_for_model(model: str | None = None) -> float:
-    """Return the common first-pass confidence threshold for every judge.
+    """모든 judge에 공통으로 적용되는 1차 confidence 임계값 반환
 
-    Detector candidates use one threshold regardless of provider or model
-    name.  The argument is retained for worker-call compatibility, but model
-    specific thresholds are intentionally no longer consulted.
+    detector 후보는 provider나 모델명과 무관하게 단일 임계값을 사용한다.
+    인자는 worker 호출 호환성을 위해 남겨두지만, 모델별 임계값은
+    의도적으로 더 이상 참조하지 않는다
     """
     del model
     return _env_float(
@@ -298,6 +317,7 @@ def _issue_judge_min_confidence_for_model(model: str | None = None) -> float:
     )
 
 
+# 단일 모델만으로도 issue를 유지시키는 강한 확신 임계값 조회
 def _issue_judge_single_model_keep_confidence() -> float:
     return _env_float(
         "VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE",
@@ -305,6 +325,7 @@ def _issue_judge_single_model_keep_confidence() -> float:
     )
 
 
+# 모델별 issue judge 결과를 claim_id 기준 confidence 조회 dict로 변환
 def _issue_judge_score_lookup(
     *,
     models: list[str],
@@ -325,6 +346,7 @@ def _issue_judge_score_lookup(
     return scores_by_claim
 
 
+# claim 1건에 대한 detector 투표를 집계해 후속 검증으로 넘길지 결정
 def _issue_judge_consensus_decision(
     claim_id: str,
     *,
@@ -334,11 +356,10 @@ def _issue_judge_consensus_decision(
     single_keep_confidence: float | None = None,
     majority_min_confidence: float | None = None,
 ) -> dict:
-    """Resolve detector votes before downstream verification.
+    """후속 검증 전에 detector 투표 결과를 확정
 
-    At least half of the evaluated models must independently score the claim
-    at or above the common 0.70 threshold.  A claim also passes when one model
-    reaches the strong-keep threshold, even without half-model agreement.
+    평가된 모델의 절반 이상이 독립적으로 공통 0.70 임계값 이상 점수를 주면 통과한다.
+    절반 합의가 없어도 단일 모델이 강한 확신 임계값에 도달하면 통과한다
     """
     single_keep_confidence = (
         _issue_judge_single_model_keep_confidence()
@@ -365,8 +386,8 @@ def _issue_judge_consensus_decision(
         if _clamp01(claim_scores.get(model, 0.0)) >= majority_min_confidence:
             qualified_models.append(model)
 
-    # "다수"는 strict majority가 아니라 절반 이상 합의다. 따라서 4개
-    # 모델이면 2개, 5개 모델이면 3개가 0.70 이상일 때 통과한다.
+    # "다수"는 strict majority가 아니라 절반 이상 합의, 따라서 4개
+    # 모델이면 2개, 5개 모델이면 3개가 0.70 이상일 때 통과
     majority_required = (evaluated_count + 1) // 2
     qualified_count = len(qualified_models)
     if qualified_count >= majority_required:
@@ -430,8 +451,9 @@ def _issue_judge_consensus_decision(
     }
 
 
+# 추출된 claim들을 classified issue judging에 쓰인 context 배치와 다시 묶음
 def _rebuild_classified_claim_batches(claims: list[dict], contexts: list[dict], batch_size: int) -> list[dict]:
-    """Group extracted claims with the context batches used by classified issue judging."""
+    """추출된 claim을 classified issue judging에 쓰인 context 배치와 그룹화"""
     batches = [contexts[i:i + batch_size] for i in range(0, len(contexts), batch_size)]
     batch_by_context_id: dict[str, int] = {}
     batch_claims: dict[int, tuple[list[dict], list[dict]]] = {}
@@ -457,8 +479,9 @@ def _rebuild_classified_claim_batches(claims: list[dict], contexts: list[dict], 
     ]
 
 
+# classified issue 파이프라인의 1차 issue judge에 쓰이는 워커
 def _classified_issue_judge_worker(args_tuple):
-    """Worker used by the classified issue pipeline's first issue judge."""
+    """classified issue 파이프라인의 1차 issue judge에 쓰이는 워커"""
     started_at = time.perf_counter()
     try:
         (
@@ -508,6 +531,7 @@ def _classified_issue_judge_worker(args_tuple):
         ) from e
 
 
+# claims JSONL 파일을 라인 단위로 읽어 claim dict 목록으로 파싱
 def _load_claims_jsonl(path: str | Path | None) -> list[dict]:
     if not path:
         return []
@@ -528,11 +552,13 @@ def _load_claims_jsonl(path: str | Path | None) -> list[dict]:
     return claims
 
 
+# 모델명을 파일명에 안전한 slug 문자열로 변환
 def _model_file_slug(model: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(model or "").strip()).strip("-")
     return slug or "model"
 
 
+# 모델 1개의 issue judge 결과를 파일 저장용 표준 payload로 정리
 def _issue_judge_payload(
     *,
     model: str,
@@ -605,6 +631,7 @@ def _issue_judge_payload(
     }
 
 
+# 모델별 issue judge 결과를 각각 파일로 저장
 def _write_issue_judge_model_outputs(
     *,
     output_dir: Path,
@@ -631,6 +658,7 @@ def _write_issue_judge_model_outputs(
     return paths
 
 
+# 모델별 1차 issue judge 결과를 claim 기준으로 비교, 합의/불일치 통계와 판정 근거를 정리
 def _build_issue_judge_comparison(
     *,
     models: list[str],
@@ -786,6 +814,7 @@ def _build_issue_judge_comparison(
     }
 
 
+# 모델별 issue를 claim 기준으로 합의 판정 후 중복 제거하여 병합, 결과를 파일로 저장
 def _write_issue_judge_merged_output(
     *,
     output_dir: Path,
@@ -921,6 +950,7 @@ def _write_issue_judge_merged_output(
     return str(path), payload
 
 
+# claim_id가 없으면 context_id+claim_text 앞부분으로 대체 키 생성
 def _claim_key(payload: dict) -> str:
     if payload.get("claim_id"):
         return str(payload.get("claim_id"))
@@ -929,6 +959,7 @@ def _claim_key(payload: dict) -> str:
     return f"{cid}::{text}"
 
 
+# 여러 모델로 1차 issue judge를 병렬 실행하고 합의 병합까지 수행, 합의 기준이 같으면 기존 출력 재사용
 def run_issue_judge_only(
     merged_path: str,
     *,
@@ -1130,6 +1161,7 @@ def run_issue_judge_only(
     }
 
 
+# claim에서 classified issue pipeline 출력용 필드만 추출, 빈 값은 제거
 def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
     context_id = str(claim.get("context_id") or "").strip()
     payload = {
@@ -1142,6 +1174,7 @@ def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
     return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
 
+# classified issue pipeline용 claim을 추출하거나, 기존 출력이 있으면 재사용
 def _extract_or_reuse_claims_for_classified_pipeline(
     merged_file: Path,
     out_dir: Path,
@@ -1221,12 +1254,14 @@ def _extract_or_reuse_claims_for_classified_pipeline(
     }
 
 
+# merged_clean 경로 기반으로 파이프라인 출력 디렉터리 안의 관련 파일 경로 생성
 def _related_pipeline_path(merged_file: Path, suffix: str) -> Path:
     base_stem = _base_stem(merged_file)
     output_dir = merged_file.parent.parent if merged_file.parent.name.endswith("_analyzer") else merged_file.parent
     return output_dir / f"{base_stem}{suffix}"
 
 
+# classified issue pipeline 결과를 사람이 읽을 수 있는 텍스트 리포트로 포맷
 def _format_classified_issue_report(content_view: dict) -> str:
     feedback_items = content_view.get("feedback_items", []) or []
     confirmed = [item for item in feedback_items if item.get("status") == STATUS_CONFIRMED]
@@ -1321,6 +1356,8 @@ def _format_classified_issue_report(content_view: dict) -> str:
     return "\n".join(lines)
 
 
+# claim 추출 → 1차 issue judge → 유형 분류 → 최종 verifier까지 이어지는
+# classified issue pipeline 전체 오케스트레이션
 def run_classified_issue_pipeline(
     merged_path: str,
     *,
@@ -1341,15 +1378,15 @@ def run_classified_issue_pipeline(
     max_tokens: int = 8192,
     stage_notify: Callable[[str, str], None] | None = None,
 ) -> dict:
-    """Run the user's classified issue flow end-to-end.
+    """classified issue 전체 흐름을 end-to-end로 실행
 
-    Flow:
-    claim extraction -> first issue judge -> issue type classifier ->
-    category-specific issue verifier -> web-friendly verification_final.json.
+    흐름:
+    claim 추출 -> 1차 issue judge -> issue type classifier ->
+    카테고리별 issue verifier -> 웹 친화적 verification_final.json
     """
 
-    # The backend calls this function directly instead of entering CLI main().
-    # Keep verifier output visible in both pipeline.log and Docker logs.
+    # 백엔드는 CLI main()을 거치지 않고 이 함수를 직접 호출함,
+    # verifier 출력이 pipeline.log와 Docker 로그 양쪽에 보이도록 유지
     _enable_docker_log_tee()
 
     from .classified_slide_error_checker import detect_classified_slide_errors
@@ -1383,9 +1420,9 @@ def run_classified_issue_pipeline(
         context_count=context_count,
     )
 
-    # The full video pipeline does not pass worker counts explicitly. Resolve
-    # them here so it uses the same per-model concurrency as the standalone
-    # verifier commands instead of silently falling back to one worker.
+    # 전체 비디오 파이프라인은 worker 수를 명시적으로 전달하지 않으므로, 조용히
+    # worker 1개로 폴백하지 않고 독립 실행 verifier 명령과 동일한 모델별 동시성을
+    # 쓰도록 여기서 직접 해석
     shared_max_workers = _env_int("VERIFIER_STAGE_MAX_WORKERS", max_workers or 20)
     issue_type_max_workers = _env_int("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", shared_max_workers)
     final_verifier_max_workers = _env_int(
@@ -1407,12 +1444,12 @@ def run_classified_issue_pipeline(
         flush=True,
     )
 
-    # 서브스테이지별 소요시간. notify()가 이미 모든 스테이지 경계(run/done/error)를
-    # 호출하고 있어서 그 지점을 그대로 재사용한다 — 별도로 새 계측 지점을 만들지
-    # 않는다. 슬라이드 오류 검사(verify_slide_inspect/verify_slide_syntax)는 아래에서
-    # 별도 스레드로 claim_extraction과 동시에 진행되므로, 두 스레드가 동시에 notify()를
-    # 호출해도 stage_timings/_stage_started_at 갱신과 stage_notify 호출이 서로 뒤섞이지
-    # 않도록 락으로 감싼다.
+    # 서브스테이지별 소요시간, notify()가 이미 모든 스테이지 경계(run/done/error)를
+    # 호출하므로 그 지점을 그대로 재사용하고 별도 계측 지점은 만들지 않음. 슬라이드
+    # 오류 검사(verify_slide_inspect/verify_slide_syntax)는 아래에서 별도 스레드로
+    # claim_extraction과 동시에 진행되므로, 두 스레드가 동시에 notify()를 호출해도
+    # stage_timings/_stage_started_at 갱신과 stage_notify 호출이 서로 뒤섞이지 않도록
+    # 락으로 감쌈
     stage_timings: dict[str, float] = {}
     _stage_started_at: dict[str, float] = {}
     _notify_lock = threading.Lock()
@@ -1430,27 +1467,27 @@ def run_classified_issue_pipeline(
             stage_notify(stage, status, progress)
 
     def make_progress_notify(stage: str) -> Callable[[int, int], None]:
-        """배치 루프에 그대로 넘길 수 있는 (done, total) 콜백. stage는 이미 "run"으로
-        notify된 뒤에만 쓴다 — progress가 있는 "run" 호출은 시작 시각을 다시 찍지
-        않도록 notify()가 걸러준다."""
+        """배치 루프에 그대로 넘길 수 있는 (done, total) 콜백, stage는 이미 "run"으로
+        notify된 뒤에만 사용 — progress가 있는 "run" 호출은 시작 시각을 다시 찍지
+        않도록 notify()가 걸러줌"""
         return lambda done, total: notify(stage, "run", (done, total))
 
     # 슬라이드 오류 검사가 읽는 입력(merged_clean/slide_textualized/slide_classified)은
     # 모두 전처리 산출물이라 claim_extraction ~ final_verification 체인의 결과물을
-    # 전혀 참조하지 않는다. 그래서 그 체인과 완전히 동시에 돌려도 안전하며, 슬라이드
+    # 전혀 참조하지 않음. 그래서 그 체인과 완전히 동시에 돌려도 안전하며, 슬라이드
     # 오류 검사가 보통 더 짧게 끝나므로(다이어그램의 슬라이드 검증 레인과 대응) 여기서
-    # 바로 백그라운드 스레드로 띄운다. 결과/예외는 슬라이드 레인이 필요해지는 지점
-    # (content_view 조립 직전)에서 join()해 회수한다.
+    # 바로 백그라운드 스레드로 띄움. 결과/예외는 슬라이드 레인이 필요해지는 지점
+    # (content_view 조립 직전)에서 join()해 회수
     slide_error_state: dict[str, object] = {}
 
     def _run_slide_error_stage() -> None:
         # 슬라이드 검사/문법 검사 각각의 run/done은 detect_classified_slide_errors가
-        # stage_notify로 직접 보고한다(다이어그램의 slide_inspect/syntax_verify 두
+        # stage_notify로 직접 보고함(다이어그램의 slide_inspect/syntax_verify 두
         # 노드에 대응하는 verify_slide_inspect/verify_slide_syntax). 캐시 스킵
         # 분기에서는 그 함수가 아예 호출되지 않으므로 여기서 두 단계를 바로 done
-        # 처리한다. L6 로그도 여기서 직접 남긴다 — claim_extraction(L1)과 동시에
+        # 처리. L6 로그도 여기서 직접 남김 — claim_extraction(L1)과 동시에
         # 돌기 때문에 L1~L5 로그 사이에 섞여 찍힐 수 있지만, join 시점에 찍는 것보다
-        # 실제 실행 시점을 그대로 보여주는 쪽이 정확하다.
+        # 실제 실행 시점을 그대로 보여주는 쪽이 정확
         slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
         slide_error_cached = _json_file_exists(slide_error_output_path)
         stage_started = _llm_stage_start(
@@ -1840,9 +1877,9 @@ def run_classified_issue_pipeline(
     )
 
     # claim_extraction(L1) 시작과 동시에 띄워둔 슬라이드 오류 검사 스레드를 여기서
-    # 합류시킨다. 보통 발화 검증 체인(L1~L5)보다 먼저 끝나 있어 join()이 곧바로
-    # 반환되지만, 혹시 아직 끝나지 않았다면 여기서 기다린다. L6 로그는 스레드
-    # 안에서 이미 남겼다.
+    # 합류. 보통 발화 검증 체인(L1~L5)보다 먼저 끝나 있어 join()이 곧바로
+    # 반환되지만, 혹시 아직 끝나지 않았다면 여기서 대기. L6 로그는 스레드
+    # 안에서 이미 남김
     slide_error_thread.join()
     if "error" in slide_error_state:
         raise slide_error_state["error"]
@@ -1936,13 +1973,14 @@ def run_classified_issue_pipeline(
     }
 
 
+# CLI 진입점, merged_clean 입력으로 verifier 전체 또는 issue-judge-only 실행
 def main():
     _enable_docker_log_tee()
 
     parser = argparse.ArgumentParser(description="merged_clean 입력 기준 verifier 실행")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--output-dir", default=None, help="결과 저장 디렉토리 (기본: merged 파일 폴더)")
-    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims.jsonl 경로. 지정하면 claim 추출을 건너뜀")
+    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims.jsonl 경로, 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
         "--reuse-claims",
         action="store_true",
@@ -1963,20 +2001,20 @@ def main():
         "--claim-batch-size",
         type=int,
         default=CLAIM_EXTRACT_BATCH_SIZE,
-        help="Claim_extraction fallback 배치 크기. context 입력은 VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE(기본 3)를 우선 사용",
+        help="claim 추출 fallback 배치 크기, context 입력은 VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE(기본 3)를 우선 사용",
     )
     parser.add_argument(
         "--issue-judge-batch-size",
         type=int,
         default=ISSUE_DETECTOR_BATCH_SIZE,
-        help="1차 Issue_detection core context 배치 크기. 기본 VERIFIER_ISSUE_DETECTOR_BATCH_SIZE 또는 4",
+        help="1차 issue detection core context 배치 크기, 기본 VERIFIER_ISSUE_DETECTOR_BATCH_SIZE 또는 4",
     )
     parser.add_argument("--issue-judge-max-workers", type=int, default=DEFAULT_ISSUE_JUDGE_MAX_WORKERS)
     parser.add_argument(
         "--issue-type-batch-size",
         type=int,
         default=ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
-        help="Issue_type classification에서 한 prompt에 넣을 issue 후보 수. 기본 VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE 또는 20",
+        help="issue type classification에서 한 prompt에 넣을 issue 후보 수, 기본 VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE 또는 20",
     )
     parser.add_argument(
         "--verifier-batch-size",
@@ -1984,7 +2022,7 @@ def main():
         dest="verifier_batch_size",
         type=int,
         default=CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
-        help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
+        help="다중 LLM 검증에서 한 prompt에 넣을 issue 수, 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
     )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
