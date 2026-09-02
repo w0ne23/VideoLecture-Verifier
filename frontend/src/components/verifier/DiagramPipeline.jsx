@@ -118,6 +118,9 @@ function PlainNode({ id, label, lane, status, diffNode }) {
   }
   return (
     <g>
+      {status === 'run' && (
+        <circle cx={x} cy={y} r="12" className="diag-node-wave" style={style && { stroke: style.stroke }} />
+      )}
       <circle cx={x} cy={y} r="12" className={`diag-node diag-node--${status}`} style={style} />
       <DiagLabel
         label={label}
