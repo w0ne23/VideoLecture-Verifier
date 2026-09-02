@@ -207,7 +207,14 @@ export function useJobStream(lectureId, { onExit } = {}) {
 
     try {
       const result = await retryJobRequest(lectureId)
-      setLecture(prev => ({ ...prev, job_id: result.job_id || prev.job_id, status: 'pending' }))
+      // 새 job이 지금 막 시작됐으므로, 경과 시간 기준점(job.created_at)도 지금 시각으로
+      // 갱신한다 — 갱신하지 않으면 스톱워치가 실패했던 이전 시도의 경과 시간을 이어받는다.
+      setLecture(prev => ({
+        ...prev,
+        job_id: result.job_id || prev.job_id,
+        status: 'pending',
+        job: { ...prev.job, created_at: new Date().toISOString() },
+      }))
       setIsMutating(false)
       connectJob()
     } catch (error) {
