@@ -47,6 +47,10 @@ const SOURCE_PRIORITY_LABELS = {
   encyclopedia: '백과사전',
 }
 
+// 파이프라인이 웹 근거 검색을 수행하는 유형 (classified_issue_grounder.GROUNDABLE_CATEGORIES).
+// 나머지 유형(과도한 일반화·혼동 설명 등)은 웹 검색 대상이 아니다.
+const GROUNDABLE_TYPES = new Set(['factual_error', 'temporal_error'])
+
 // 지식 오류로 분류되는 4개 카테고리 + 슬라이드 오류를 합쳐 5개 필터 버튼을 구성한다.
 const KNOWLEDGE_CATEGORY_KEYS = ['factual_error', 'temporal_error', 'scope_overclaim', 'confusing_explanation']
 const CATEGORY_DEFS = [
@@ -418,37 +422,64 @@ function VerifiedSources({ trials }) {
   )
 }
 
+// 웹 근거로 실제 판정이 난 상태들. 나머지(근거 부족·검증 실패·빈 객체)는
+// 읽는 사람 입장에서 모두 "웹으로는 판정 못 함" 이라 하나로 합친다.
+const GROUNDING_CONCLUSIVE = new Set(['verified', 'supports_issue', 'refutes_issue'])
+
 function WebGroundingPanel({ item }) {
   const grounding = getGrounding(item)
   const evidence = item.evidence || {}
-  if (!grounding || !Object.keys(grounding).length) return null
+  const verifier = item.classified_issue_verifier || {}
+
+  const evidenceRan =
+    Object.keys(grounding).length > 0 ||
+    'web_evidence' in evidence || 'web_evidence' in item || 'web_evidence' in verifier
+  // 웹 근거 수집 단계 자체가 안 돈 경우(파이프라인 비활성 등)만 섹션을 숨긴다.
+  if (!evidenceRan) return null
 
   const sources = grounding.evidence_sources?.length ? grounding.evidence_sources : evidence.web_sources
   const sourceItems = asArray(sources).filter(sourceUrl)
-
   const reasonText = grounding.reason || grounding.evidence_summary || ''
-  const statusLabel = STATUS_LABELS[grounding.status] || grounding.status || ''
 
-  const sourceValue = sourceItems.length > 0
-    ? sourceItems.map((source, index) => {
-        const url = sourceUrl(source)
-        return (
-          <span key={`${url}-${index}`}>
-            {index > 0 && ' · '}
-            <a href={url} target="_blank" rel="noreferrer">{sourceLabel(source, index)}</a>
-          </span>
-        )
-      })
-    : null
+  const conclusive =
+    GROUNDING_CONCLUSIVE.has(grounding.status) || sourceItems.length > 0 || !!reasonText
 
+  if (conclusive) {
+    const statusLabel = STATUS_LABELS[grounding.status] || grounding.status || ''
+    const sourceValue = sourceItems.length > 0
+      ? sourceItems.map((source, index) => {
+          const url = sourceUrl(source)
+          return (
+            <span key={`${url}-${index}`}>
+              {index > 0 && ' · '}
+              <a href={url} target="_blank" rel="noreferrer">{sourceLabel(source, index)}</a>
+            </span>
+          )
+        })
+      : null
+    return (
+      <DetailGroup title="웹 검색 결과" noDivider>
+        <div className="grounding-card">
+          <dl className="claim-detail-list">
+            <DetailRow label="검증 상태" value={!reasonText && !sourceValue ? statusLabel : null} wide />
+            <DetailRow label="판정 이유" value={reasonText ? <ClampedText lines={2}>{reasonText}</ClampedText> : null} wide />
+            <DetailRow label="근거 출처" value={sourceValue ? <ClampedText lines={1}>{sourceValue}</ClampedText> : null} wide />
+          </dl>
+        </div>
+      </DetailGroup>
+    )
+  }
+
+  // 판정 못 난 경우: 대상 유형이면 "판정 불가", 대상 유형이 아니면 "대상 아님".
+  const groundable = itemCategories(item).some(cat => GROUNDABLE_TYPES.has(cat))
   return (
     <DetailGroup title="웹 검색 결과" noDivider>
-      <div className="grounding-card">
-        <dl className="claim-detail-list">
-          <DetailRow label="검증 상태" value={!reasonText && !sourceValue ? statusLabel : null} wide />
-          <DetailRow label="판정 이유" value={reasonText ? <ClampedText lines={2}>{reasonText}</ClampedText> : null} wide />
-          <DetailRow label="근거 출처" value={sourceValue ? <ClampedText lines={1}>{sourceValue}</ClampedText> : null} wide />
-        </dl>
+      <div className="grounding-card grounding-card--na">
+        <p className="claim-detail-text">
+          {groundable
+            ? '웹 근거로는 판정하지 못했습니다.'
+            : `${STATUS_LABELS.not_applicable} — 이 유형은 웹 검색 대상이 아닙니다.`}
+        </p>
       </div>
     </DetailGroup>
   )

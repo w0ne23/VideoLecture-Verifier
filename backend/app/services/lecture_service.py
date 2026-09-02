@@ -363,6 +363,7 @@ ARTIFACT_STAGE_KEYS: dict[str, str] = {
     'issue_judge': 'issue_judge',
     'issue_judge_summary': 'issue_judge_summary',
     'issue_classification': 'issue_types',
+    'web_grounding': 'classified_issue_evidence',
     'final_verification': 'classified_issue_verifier',
     'slide_review': 'slide_errors',
 }

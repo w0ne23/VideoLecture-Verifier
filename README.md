@@ -16,18 +16,30 @@
 
 <br/>
 
+## 🎬 &nbsp;VLVerifier 소개 영상 보러 가기
+
+<p align="center">
+  <a href="https://youtu.be/tG65MpIfNlI" target="_blank">
+    <img src="./docs/img/video-thumbnail.png" alt="Video Lecture Verifier 시연" width="800"/>
+  </a>
+</p>
+
+<br/>
+
+
+
 
 ## 📌 1. 작품 개요
 
 ### 1.1 문제 인식
 
-&nbsp;&nbsp;오늘날 온라인 강의 영상은 지식을 전달하고 학습하는 주요 수단으로 자리 잡았다. 교육 분야에서도 교내 e-class와 같은 LMS는 물론 K-MOOC, KOCW와 같은 이러닝 플랫폼 등 수많은 강의 영상이 지속적으로 제공, 소비되고 있다. 하지만 강의 영상 내의 오류를 검증하지 않고 있으며, 이로 인해 학습자들은 잘못된 지식을 받아들이게 되고, 오류를 가진 지식이 전파되는 악순환 속에서 교육의 질이 하락하는 심각한 문제를 초래할 수 있다.
+&nbsp;&nbsp;오늘날 온라인 강의 영상은 지식을 전달하고 학습하는 주요 수단으로 자리 잡았다. 교내 e-class와 같은 LMS는 물론 K-MOOC, KOCW와 같은 이러닝 플랫폼 등 수많은 강의 영상이 지속적으로 제공되고 있다. 하지만 이들 <strong><u>대부분은 강의 영상 내 오류를 검증하지 않고 있다.</u></strong> 이로 인해 학습자들은 잘못된 지식을 받아들이게 되고, 오류를 가진 지식이 전파되는 악순환 속에서 교육의 질이 하락하는 심각한 문제를 초래할 수 있다.
 
-&nbsp;&nbsp;그러나 기존 영상 검증 시스템은 강의의 형식적 품질을 평가하거나, 가짜 뉴스·조작 영상의 진위 여부 판별에만 초점이 맞추어져 있어 강의 영상 오류 검증에는 활용할 수 없다. 한편으로 LLM에게 직접 질의하는 방식도 가능하지만, 영상을 직접 업로드하여 오류를 확인하기엔 용량의 한계가 있고, LLM이 아직 학습하지 않은 최신 정보는 반영하기 어려울 뿐만 아니라, 환각으로 인해 맞는 내용을 오류라고 잘못 판단하거나 같은 질문에 다른 답변을 내놓는 등 오류 탐지의 신뢰성을 단언하기 어렵다.
+&nbsp;&nbsp;기존의 영상 검증 시스템은 강의의 형식적 품질을 평가하거나, 가짜 뉴스·조작 영상의 진위 여부 판별에만 초점이 맞추어져 있어 강의 영상 오류 검증에 활용하기 부적절하다. 한편으로 LLM에게 직접 질의하는 방식도 가능하지만, 영상을 직접 업로드하여 오류를 확인하기엔 용량의 한계가 있고, LLM이 아직 학습하지 않은 최신 정보는 반영하기 어려울 뿐 아니라, 환각으로 인해 맞는 내용을 오류라고 잘못 판단하거나 같은 질문에 다른 답변을 내놓는 등 오류 탐지의 신뢰성을 단언하기 어렵다.
 
 ---
 
-<p align="center"><i>이에 본 팀은 영상을 심층 분석하는 <u><strong>멀티모달 기법</strong></u>과<br>여러 LLM의 판단을 교차 검증하는 <u><strong>Multi-LLM</strong></u>을 결합하여,<br>강의에 내재된 <u><strong>5개 유형의 지식 오류를 탐지</strong></u>하고 자세한 피드백을 제공하는 오픈소스 프레임워크, Video Lecture Verifier를 개발하였다.</i></p>
+<p align="center"><i>이에 본 팀은 영상을 심층 분석하는 <u><strong>멀티모달 기법</strong></u>과<br> 여러 LLM의 판단을 교차 검증하는 <u><strong>Multi-LLM</strong></u>을 결합하여,<br>강의 속 지식 오류를 <u><strong>5개의 유형으로 탐지</strong></u>하고 자세한 피드백을 제공하는 오픈소스 프레임워크, Video Lecture Verifier를 개발하였다.</i></p>
 
 ---
 
@@ -123,7 +135,7 @@
 
 - **높은 정량적 성능 달성**
 
-  본 팀은 강의 영상 15개에 각각 10개의 오류를 의도적으로 주입한 데이터셋을 구성하고, GPT-5.4·Claude-Sonnet-5·Grok-4.5를 각각 단일로 사용한 경우와 세 모델을 함께 사용한 Video Lecture Verifier의 성능을 비교 평가하였다.
+  본 팀은 강의 영상 15개에 각각 10개씩, 총 150개의 오류를 의도적으로 주입한 데이터셋을 구성하고, **GPT-5.4·Claude-Sonnet-5·Grok-4.5**를 각각 단일로 사용한 경우와 세 모델을 함께 사용한 Video Lecture Verifier의 성능을 비교 평가하였다.
 
   <p align="center"><img src="./docs/img/performance-chart.png" alt="오류 탐지율 및 오탐률 비교" width="650"/></p>
 
@@ -132,65 +144,58 @@
   - **소요 시간**: 멀티모달 분석부터 오류 탐지·피드백 제공까지 — 강의 길이 1분당 **15.35초**
   <br/>
   <br/>
-  GPT-5.4는 탐지율은 높지만 오탐률도 함께 높았고, Claude-Sonnet-5는 오탐률이 가장 낮은 대신 탐지율이 낮았다. <u><strong>Video Lecture Verifier</strong></u>는 두 지표를 함께 고려했을 때 <u><strong>가장 변동성이 적은, 균형 잡힌 성능</strong></u>을 보였다.
+  GPT-5.4는 탐지율은 높지만 오탐률도 함께 높았고, Claude-Sonnet-5는 오탐률이 가장 낮은 대신 탐지율이 낮았다. 두 지표를 함께 고려했을 때, <mark><strong>Video Lecture Verifier는 가장 변동성이 적은, 균형 잡힌 성능</strong></mark>을 보였다.
   <br/>
   <br/>
 
 ## 👀 4. 우수성
-- **오픈소스로서의 우수성**
 
-  특정 LLM에 종속되지 않는 구조로, 기관이나 사용처의 환경과 목적에 맞는 LLM을 자유롭게 구성하여 활용할 수 있다. 사용자가 자체 환경에 맞게 기능을 추가하거나 오류 탐지 방식을 확장하는 것도 가능하다.
-
-- **근거 기반의 자세한 피드백 제공**
-
-  단순히 오류 여부만 알려주는 것이 아니라, Multi-LLM 각각의 판단 근거와 문제의 심각도, 수정 제안까지 함께 제공하여 강의 제작자가 실제로 강의를 개선하는 데 바로 활용할 수 있다.
-
-- **혁신성 및 차별점**
-  - 발화와 슬라이드를 함께 멀티모달로 분석해 강의 맥락을 반영
-  - 특정 LLM에 종속되지 않는 어댑터 구조로, 제약 없이 N개의 LLM 모델로 확장 가능
-  - 웹 검색을 통해 LLM이 학습하지 않은 최신 정보까지 반영해 오탐률 감소
-  - 지식 오류를 5개의 세부 유형으로 세분화하여 탐지
-  - Multi-LLM의 의견 불일치를 활용한 오탐 필터링 알고리즘 개발
+- **오픈소스 구조**: 특정 LLM에 종속되지 않는 구조로, 기관·사용처의 환경과 목적에 맞는 LLM을 자유롭게 구성할 수 있고, 사용자가 자체 환경에 맞게 기능을 추가하거나 오류 탐지 방식을 확장할 수 있음
+  
+- **확장 가능한 어댑터 구조**: 특정 LLM에 종속되지 않아 제약 없이 N개의 LLM 모델로 확장 가능
+  
+- **멀티모달 분석**: 발화와 슬라이드를 함께 분석해 강의 맥락을 반영
+  
+- **세분화된 오류 탐지**: 지식 오류를 5개의 세부 유형으로 세분화하여 탐지
+  
+- **오탐 필터링 알고리즘**: Multi-LLM의 의견 불일치를 활용해 오탐을 필터링하는 알고리즘 개발
+  
+- **웹 검색 기반 최신성 반영**: LLM이 학습하지 않은 최신 정보까지 반영해 오탐률 감소
+  
+- **근거 기반의 상세 피드백**: 오류 여부만 알려주는 것이 아니라 Multi-LLM 각각의 판단 근거, 문제의 심각도, 수정 제안까지 함께 제공해 강의 제작자가 실제 개선에 바로 활용 가능
 
 <br/>
 <br/>
 
 ## 👍 5. 활용 분야
 
-- **이러닝 플랫폼 적용**
+- **이러닝 플랫폼 적용**: 대학의 e-class나 K-MOOC, KOCW, Coursera 등 다양한 국내외 이러닝 플랫폼에 즉시 적용
 
-  대학의 e-class나 K-MOOC, KOCW, Coursera 등 다양한 국내외 이러닝 플랫폼에 즉시 적용 가능하다.
+- **기업 교육 영상 검증**: 방대한 양의 직무 교육 영상을 자체 제작하는 대기업 및 기업 교육 전문 기업의 영상 검증에 도입
 
-- **기업 교육 영상 검증**
-
-  방대한 양의 직무 교육 영상을 자체 제작하는 대기업 및 기업 교육 전문 기업의 영상 검증에 도입할 수 있다.
-
-- **개인 강의 제작자의 자가 점검 도구**
-
-  개인 강의 제작자가 YouTube, 인프런 등의 플랫폼에 영상을 업로드하기 전, 자가 점검 도구로 활용할 수 있다.
-
+- **개인 강의 제작자의 자가 점검 도구**: 개인 강의 제작자가 YouTube, 인프런 등의 플랫폼에 영상을 업로드하기 전, 자가 점검 도구로 활용
 <br/>
 <br/>
 
 ## 🔧 6. 적용 기술
 
-### - 개발 환경
+- **개발 환경**
 
-![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/postgresql-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 
-### - 개발 도구
+- **개발 도구**
 
-![FastAPI](https://img.shields.io/badge/fastapi-005571?style=for-the-badge&logo=fastapi)
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![FastAPI](https://img.shields.io/badge/fastapi-005571?style=for-the-badge&logo=fastapi)
 ![React](https://img.shields.io/badge/react-%2320232a.svg?style=for-the-badge&logo=react&logoColor=%2361DAFB)
 ![Vite](https://img.shields.io/badge/vite-%23646CFF.svg?style=for-the-badge&logo=vite&logoColor=white)
 ![OpenCV](https://img.shields.io/badge/opencv-%23white.svg?style=for-the-badge&logo=opencv&logoColor=white)
 ![Ultralytics YOLO](https://img.shields.io/badge/YOLO-111F68?style=for-the-badge&logo=ultralytics&logoColor=white)
 ![FFmpeg](https://img.shields.io/badge/FFmpeg-007808.svg?style=for-the-badge&logo=FFmpeg&logoColor=white)
 
-### - 개발 언어
+- **개발 언어**
 
-![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
 ![JavaScript](https://img.shields.io/badge/Javascript-F7DF1E?style=for-the-badge&logo=Javascript&logoColor=black)
 ![HTML5](https://img.shields.io/badge/HTML5-E34F26?style=for-the-badge&logo=html5&logoColor=white)
 ![CSS3](https://img.shields.io/badge/CSS3-1572B6?style=for-the-badge&logo=css3&logoColor=white)
@@ -221,19 +226,7 @@
 
 #### 지식 오류 탐지 결과 및 피드백
 
-<p align="center"><img src="./docs/img/feedback.gif" alt="지식 오류 탐지 결과 및 피드백 화면" width="700"/></p>
-
-<br/>
-
-### 시연 영상
-
-<p><a href="https://youtu.be/tG65MpIfNlI" target="_blank"><b>▶ 보러가기</b></a></p>
-
-<p align="center">
-  <a href="https://youtu.be/tG65MpIfNlI" target="_blank">
-    <img src="https://img.youtube.com/vi/tG65MpIfNlI/maxresdefault.jpg" alt="Video Lecture Verifier 시연" width="700"/>
-  </a>
-</p>
+<p align="center"><img src="./docs/img/feedback.gif" alt="지식 오류 탐지 결과 및 피드백 화면" width="900"/></p>
 
 <br/>
 
@@ -243,3 +236,4 @@
     width="100%"
   />
 </p>
+
