@@ -1,16 +1,16 @@
 """
-Detect annotation capture frames inside Step 2 scene intervals.
+Step 2 씬 구간 안에서 판서(annotation) 캡처 프레임 감지
 
-Step 3 of the staged slide extraction pipeline:
+단계별 슬라이드 추출 파이프라인의 Step 3:
 
-  sampled frame cache + scene_transitions.json
+  샘플 프레임 캐시 + scene_transitions.json
     -> scene_annotations.json
-    -> small preview annotation images
+    -> 작은 미리보기 annotation 이미지
 
-This pass does not materialize original-resolution frames. It only records the
-original frame_no values that Step 4 should extract from the source video.
+이 단계는 원본 해상도 프레임을 실체화하지 않음, Step 4가 원본 영상에서 추출해야 할
+원본 frame_no 값만 기록
 
-Usage:
+사용법:
     python -m pipeline.annotation_from_cache \
         --cache sample_cache_dir \
         --scenes scene_probe_step2/scene_transitions.json \
@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 ANNOTATIONS_FILENAME = "scene_annotations.json"
 
 
+# annotation 감지 임계값 모음
 @dataclass
 class AnnotationConfig:
     diff_threshold: int = 15
@@ -53,8 +54,8 @@ class AnnotationConfig:
     stable_sec: float = 0.7
     min_annot_sec: float = 0.2
     min_gap_sec: float = 1.5
-    # Do not emit a new annotation when its visible change from the last
-    # retained annotation is only cursor/compression noise.
+    # 마지막으로 유지된 annotation 대비 눈에 보이는 변화가 커서/압축 노이즈뿐이면
+    # 새 annotation으로 기록하지 않음
     capture_dedupe_ratio: float = 0.0005
     scene_start_guard_sec: float = 0.5
     scene_end_guard_sec: float = 1.0
@@ -65,6 +66,7 @@ class AnnotationConfig:
     crop_bottom: float = 0.90
 
 
+# scene_transitions.json 로드 및 scene_index 순 정렬
 def _load_scenes(scene_path: str | Path) -> dict:
     path = Path(scene_path)
     if not path.exists():
@@ -78,6 +80,7 @@ def _load_scenes(scene_path: str | Path) -> dict:
     return payload
 
 
+# 프레임에서 여백을 제외한 콘텐츠 영역만 크롭
 def _content_region(frame: np.ndarray, cfg: AnnotationConfig) -> np.ndarray:
     h, w = frame.shape[:2]
     x0 = max(0, min(w - 1, int(w * cfg.crop_left)))
@@ -87,23 +90,27 @@ def _content_region(frame: np.ndarray, cfg: AnnotationConfig) -> np.ndarray:
     return frame[y0:y1, x0:x1]
 
 
+# 판정용 크롭+그레이스케일+블러 프레임 생성
 def _decision_frame(frame: np.ndarray, cfg: AnnotationConfig) -> np.ndarray:
     cropped = _content_region(frame, cfg)
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+# 마스크도 판정용 콘텐츠 영역으로 크롭
 def _decision_mask(mask: np.ndarray | None, cfg: AnnotationConfig) -> np.ndarray | None:
     if mask is None:
         return None
     return _content_region(mask.astype(np.uint8), cfg).astype(bool)
 
 
+# 임계값 초과 픽셀 비율 계산
 def _changed_ratio(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     return float(np.sum(diff > threshold) / diff.size)
 
 
+# 사람 마스크를 제외한 두 프레임의 변화 픽셀 비율 계산
 def _masked_changed_ratio(
     frame_a: np.ndarray,
     mask_a: np.ndarray | None,
@@ -115,6 +122,7 @@ def _masked_changed_ratio(
     return _changed_ratio(masked_a, masked_b, threshold)
 
 
+# frame_no에 대응하는 sample_index 조회, 캐시에 없으면 sample_every로 근사
 def _sample_index_for_frame(frame_no: int, frame_to_sample: dict[int, int], sample_every: int) -> int:
     if frame_no in frame_to_sample:
         return frame_to_sample[frame_no]
@@ -127,11 +135,10 @@ def _iter_sample_cache_range(
     start_sample_index: int,
     end_sample_index: int,
 ):
-    """Read a bounded interval from the sampled MJPG cache.
+    """샘플링된 MJPG 캐시에서 지정 구간만 읽기
 
-    Random seeking is intentionally limited to the generated sample cache, not
-    the original lecture video. The cache is our analysis coordinate system and
-    is much safer to seek than arbitrary source encodings.
+    임의 탐색(seek)은 원본 강의 영상이 아니라 생성된 샘플 캐시로만 의도적으로 제한,
+    캐시가 분석의 좌표계 역할을 하고 임의의 원본 인코딩보다 훨씬 안전하게 탐색 가능
     """
     frames = manifest.get("frames", [])
     if not frames:
@@ -146,6 +153,8 @@ def _iter_sample_cache_range(
         yield frame_info, frame
 
 
+# scene 목록을 기준으로 annotation을 감지할 sample_index 구간(start/detect_start/end) 계산,
+# 다음 scene 시작 전 end_guard, 씬 시작 후 start_guard를 적용
 def _build_scene_intervals(scene_payload: dict, manifest: dict, cfg: AnnotationConfig) -> list[dict]:
     scenes = scene_payload["scenes"]
     frames = manifest.get("frames", [])
@@ -200,6 +209,7 @@ def _build_scene_intervals(scene_payload: dict, manifest: dict, cfg: AnnotationC
     return intervals
 
 
+# annotation 미리보기 프레임을 JPEG로 저장
 def _save_annotation_preview(
     output_dir: Path,
     scene_index: int,
@@ -211,6 +221,7 @@ def _save_annotation_preview(
     return filename
 
 
+# scene 구간에 대한 결과 딕셔너리 초기값 생성
 def _new_scene_result(interval: dict) -> dict:
     scene = interval["scene"]
     return {
@@ -225,6 +236,14 @@ def _new_scene_result(interval: dict) -> dict:
     }
 
 
+# 씬 구간 안에서 STABLE <-> WRITING 상태를 오가며 판서 캡처 시점을 판정하는 상태 머신
+#
+# - STABLE: 변화가 거의 없는 상태, 누적 변화가 임계값을 넘으면 WRITING으로 전환
+# - WRITING: 판서가 진행 중인 상태, 연속 안정 프레임 수가 stable_required에 도달하고
+#   최소 작성 시간(min_writing)을 채우면 그 시점의(가장 변화가 컸던) 프레임을 캡처
+# - history는 지금까지 캡처된 안정 상태들을 모두 보관, 현재 프레임이 이전 안정 상태와
+#   다시 일치하면(예: 지우개로 지워서 이전 판서로 되돌아간 경우) 그 시점을 별도로 캡처하고
+#   history를 그 지점까지 되돌림(erase-as-return 감지)
 class AnnotationState:
     def __init__(
         self,
@@ -249,13 +268,13 @@ class AnnotationState:
         self.stable_count = 0
         self.writing_count = 0
         self.last_active: dict | None = None
-        # Keep the strongest transient change as well as the most recent one.
-        # During an erase the most recent active frame can already be nearly
-        # clean, while this snapshot is the annotation that must be retained.
+        # 가장 최근 변화뿐 아니라 가장 컸던(peak) 변화도 함께 보관
+        # 지우는 도중에는 가장 최근 active 프레임이 이미 거의 지워진 상태일 수 있는데,
+        # 실제로 남겨야 할 판서는 이 peak 스냅샷임
         self.peak_active: dict | None = None
-        # A stable annotation becomes the next comparison baseline. Retaining
-        # every baseline lets us recognize an erase as a return to an earlier
-        # state instead of recording the clean frame as a new annotation.
+        # 안정된 annotation은 다음 비교 기준(baseline)이 됨, 모든 baseline을 보관해두면
+        # 지우기를 '깨끗한 프레임을 새 annotation으로 기록'하는 대신 '이전 상태로의
+        # 복귀'로 인식할 수 있음
         self.history: list[dict] = [{
             "decision": base_decision.copy(),
             "mask": base_mask.copy() if base_mask is not None else None,
@@ -265,6 +284,7 @@ class AnnotationState:
         self.last_capture_sample_index = -10**9
         self.annotations: list[dict] = []
 
+    # 프레임 1장을 처리해 상태를 갱신, 캡처가 발생하면 해당 캡처 dict(중복이면 None) 반환
     def process(
         self,
         frame_info: dict,
@@ -353,6 +373,7 @@ class AnnotationState:
         self.prev_mask = mask.copy() if mask is not None else None
         return self._emit_distinct_capture(capture)
 
+    # 씬 구간이 끝날 때 아직 캡처되지 않은 진행 중(WRITING) 판서가 있으면 마지막으로 캡처
     def flush(self) -> dict | None:
         if (
             self.state == "WRITING"
@@ -366,6 +387,7 @@ class AnnotationState:
             return self._emit_distinct_capture(capture)
         return None
 
+    # 상태를 STABLE로 리셋하고 비교 기준 프레임 갱신
     def _reset_to(self, decision: np.ndarray, mask: np.ndarray | None = None) -> None:
         self.state = "STABLE"
         self.stable_count = 0
@@ -380,7 +402,7 @@ class AnnotationState:
         decision: np.ndarray,
         mask: np.ndarray | None,
     ) -> int | None:
-        """Return an earlier stable state if this frame is an annotation erase."""
+        """이 프레임이 이전 안정 상태로 돌아간(annotation erase) 경우 그 history 인덱스 반환"""
         for index in range(len(self.history) - 2, -1, -1):
             state = self.history[index]
             ratio = _masked_changed_ratio(
@@ -395,7 +417,7 @@ class AnnotationState:
         return None
 
     def _capture_peak_before_clear(self, frame_info: dict) -> dict | None:
-        """Persist an in-progress annotation before an erase resets the state."""
+        """지우기로 상태가 리셋되기 전, 진행 중이던 annotation의 peak 프레임을 캡처로 확정"""
         if (
             self.state != "WRITING"
             or self.writing_count < self.min_writing
@@ -414,6 +436,7 @@ class AnnotationState:
         self.last_capture_sample_index = sample_index
         return capture
 
+    # 지정 history 시점으로 base 상태를 되돌리고, 그 이후 history는 버림
     def _restore_history(
         self,
         history_index: int,
@@ -427,7 +450,7 @@ class AnnotationState:
         self._reset_to(decision, mask)
 
     def _emit_distinct_capture(self, capture: dict | None) -> dict | None:
-        """Suppress repeated captures whose visible annotation state is unchanged."""
+        """직전 기록과 눈에 보이는 변화가 거의 없는 반복 캡처는 억제(중복 제거)"""
         if capture is None:
             return None
         decision = capture["decision"]
@@ -452,6 +475,7 @@ class AnnotationState:
         return capture
 
 
+# 하나의 씬 구간에서 샘플 캐시를 순회하며 AnnotationState로 판서 캡처를 감지
 def _detect_interval_annotations(
     cache_dir: str,
     manifest: dict,
@@ -493,6 +517,7 @@ def _detect_interval_annotations(
     return scene_result
 
 
+# 프로세스 풀 worker용 함수, 여러 구간을 순차 처리해 결과 리스트 반환
 def _detect_annotation_chunk_worker(args: tuple) -> list[dict]:
     cache_dir, manifest, intervals, cfg_dict, sampled_fps, output_dir = args
     cfg = AnnotationConfig(**cfg_dict)
@@ -511,6 +536,7 @@ def _detect_annotation_chunk_worker(args: tuple) -> list[dict]:
     return results
 
 
+# annotation 감지에 쓸 프로세스 수 결정, 환경변수 우선, 없으면 CPU 코어 기반 추정
 def _annotation_worker_count(interval_count: int) -> int:
     requested = os.getenv("VLVERIFIER_ANNOT_WORKERS", "0").strip()
     try:
@@ -525,6 +551,7 @@ def _annotation_worker_count(interval_count: int) -> int:
     return max(1, min(workers, interval_count))
 
 
+# 구간 목록을 worker 수에 맞춰 청크로 분할
 def _chunk_intervals(intervals: list[dict], worker_count: int) -> list[list[dict]]:
     if worker_count <= 1:
         return [intervals]
@@ -532,6 +559,7 @@ def _chunk_intervals(intervals: list[dict], worker_count: int) -> list[list[dict
     return [intervals[i:i + chunk_size] for i in range(0, len(intervals), chunk_size)]
 
 
+# 전체 씬 구간에 대해(단일 프로세스 또는 병렬로) 판서 캡처를 감지하고 scene_annotations.json 저장
 def detect_annotations(
     cache_dir: str,
     scene_path: str,
@@ -614,6 +642,7 @@ def detect_annotations(
     return payload
 
 
+# 캡처된 판서 프레임을 이미지로 저장하고 scene_result에 레코드 추가
 def _record_capture(
     out_dir: Path,
     interval: dict,
@@ -660,11 +689,12 @@ def _record_capture(
     )
 
 
+# CLI 인자 파싱
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Detect annotation frames from sampled cache scene intervals.")
-    parser.add_argument("--cache", required=True, help="Sample cache directory")
-    parser.add_argument("--scenes", required=True, help="scene_transitions.json from Step 2")
-    parser.add_argument("--output", "-o", required=True, help="Output annotation probe directory")
+    parser = argparse.ArgumentParser(description="샘플 캐시 씬 구간에서 annotation 프레임 감지")
+    parser.add_argument("--cache", required=True, help="샘플 캐시 디렉터리")
+    parser.add_argument("--scenes", required=True, help="Step 2에서 생성된 scene_transitions.json")
+    parser.add_argument("--output", "-o", required=True, help="출력 annotation probe 디렉터리")
     parser.add_argument("--cumulative-ratio", type=float, default=AnnotationConfig.cumulative_ratio)
     parser.add_argument("--instant-ratio", type=float, default=AnnotationConfig.instant_ratio)
     parser.add_argument("--stable-sec", type=float, default=AnnotationConfig.stable_sec)
@@ -672,11 +702,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-gap-sec", type=float, default=AnnotationConfig.min_gap_sec)
     parser.add_argument("--scene-start-guard-sec", type=float, default=AnnotationConfig.scene_start_guard_sec)
     parser.add_argument("--scene-end-guard-sec", type=float, default=AnnotationConfig.scene_end_guard_sec)
-    parser.add_argument("--workers", type=int, help="Override VLVERIFIER_ANNOT_WORKERS for this run")
+    parser.add_argument("--workers", type=int, help="이번 실행에 한해 VLVERIFIER_ANNOT_WORKERS 값을 덮어씀")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
 
+# CLI 진입점, 인자로 AnnotationConfig 구성 후 detect_annotations 실행
 def main() -> None:
     args = parse_args()
     if args.debug:

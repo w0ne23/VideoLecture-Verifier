@@ -34,6 +34,7 @@ CHUNK_MIN_SEC       = float(os.getenv("TRANSCRIBE_CHUNK_MIN_SEC",     "30"))
 CHUNK_PAD_SEC       = 0.1  # 청크 양 끝에 100ms padding (어두/어말 보존)
 
 
+# 값을 float로 안전 변환, 실패 시 default
 def _safe_float(v, default=0.0):
     try:
         return float(v)
@@ -41,6 +42,7 @@ def _safe_float(v, default=0.0):
         return default
 
 
+# Groq 응답의 word 목록을 청크 시작 시간 기준으로 절대 시간 정규화
 def _normalize_words(words, chunk_start: float = 0.0):
     out = []
     if not isinstance(words, list):
@@ -57,6 +59,7 @@ def _normalize_words(words, chunk_start: float = 0.0):
     return out
 
 
+# stitched(무음 제거 후 이어붙인) 시간 기준 word 목록을 원본 시간으로 역매핑
 def _normalize_words_mapped(words, time_map: list[dict], time_offset: float = 0.0):
     out = []
     if not isinstance(words, list):
@@ -79,8 +82,8 @@ def _normalize_words_mapped(words, time_map: list[dict], time_offset: float = 0.
 
 def _extract_full_audio(video_path: str, audio_path: str, start_sec: float = 0.0, duration: float = 0.0) -> bool:
     """
-    영상에서 mono 16kHz wav 추출.
-    duration > 0 이면 [start_sec, start_sec + duration] 범위만 추출.
+    영상에서 mono 16kHz wav 추출
+    duration > 0이면 [start_sec, start_sec + duration] 범위만 추출
     """
     cmd = ["ffmpeg"]
     if start_sec > 0:
@@ -96,6 +99,7 @@ def _extract_full_audio(video_path: str, audio_path: str, start_sec: float = 0.0
     return Path(audio_path).exists() and Path(audio_path).stat().st_size > 0
 
 
+# ffmpeg silencedetect 로그 파싱용 정규식
 _SILENCE_START_RE = re.compile(r"silence_start:\s*([0-9]+\.?[0-9]*)")
 _SILENCE_END_RE   = re.compile(r"silence_end:\s*([0-9]+\.?[0-9]*)\s*\|\s*silence_duration:\s*([0-9]+\.?[0-9]*)")
 
@@ -106,10 +110,10 @@ def detect_silences(
     min_dur: float = SILENCE_MIN_SEC,
 ) -> list[dict]:
     """
-    ffmpeg silencedetect로 무음 구간을 감지한다.
+    ffmpeg silencedetect로 무음 구간을 감지
 
     Returns: [{"start": float, "end": float, "duration": float}, ...]
-             audio_path 기준 상대 시간.
+             audio_path 기준 상대 시간
     """
     if not Path(audio_path).exists():
         return []
@@ -137,7 +141,7 @@ def detect_silences(
             ends.append((float(m.group(1)), float(m.group(2))))
 
     silences: list[dict] = []
-    # silence_start와 silence_end는 보통 짝을 이룸. 짝이 안 맞으면 무시.
+    # silence_start와 silence_end는 보통 짝을 이룸, 짝이 안 맞으면 무시
     n = min(len(starts), len(ends))
     for i in range(n):
         s = starts[i]
@@ -157,7 +161,7 @@ def build_speech_chunks(
     pad: float = CHUNK_PAD_SEC,
 ) -> list[list[tuple[float, float]]]:
     """
-    무음 구간 정보를 바탕으로 Whisper에 보낼 발화(speech) 청크 그룹을 산출한다.
+    무음 구간 정보를 바탕으로 Whisper에 보낼 발화(speech) 청크 그룹을 산출
 
     동작:
     - split_min 이상 무음만 청크 경계로 사용 (그 무음은 API에 보내지 않음 = 드롭)
@@ -167,7 +171,7 @@ def build_speech_chunks(
     - 마지막 청크가 chunk_min 미만이면 직전 청크와 합칠 수 있을 때 합침
     - 양 끝에 pad 만큼 padding (어두/어말 보존)
 
-    Returns: [[(start_sec, end_sec), ...], ...]  audio_path 기준 절대 시간.
+    Returns: [[(start_sec, end_sec), ...], ...]  audio_path 기준 절대 시간
     """
     if total_duration <= 0:
         return []
@@ -215,7 +219,7 @@ def build_speech_chunks(
             pieces.append((cur, nxt))
             cur = nxt
 
-    # 5) 무음을 제거한 발화 조각들을 chunk_max초 단위로 다시 묶는다.
+    # 5) 무음을 제거한 발화 조각들을 chunk_max초 단위로 다시 묶음
     groups: list[list[tuple[float, float]]] = []
     current: list[tuple[float, float]] = []
     current_dur = 0.0
@@ -232,7 +236,7 @@ def build_speech_chunks(
     if current:
         groups.append(current)
 
-    # 마지막 그룹이 너무 짧고 직전 그룹에 붙여도 max를 넘지 않으면 합친다.
+    # 마지막 그룹이 너무 짧고 직전 그룹에 붙여도 max를 넘지 않으면 합침
     if len(groups) >= 2:
         last_dur = _range_group_duration(groups[-1])
         prev_dur = _range_group_duration(groups[-2])
@@ -243,10 +247,12 @@ def build_speech_chunks(
     return groups
 
 
+# 구간 목록의 총 길이 합산
 def _range_group_duration(ranges: list[tuple[float, float]]) -> float:
     return sum(max(0.0, e - s) for s, e in ranges)
 
 
+# 이어붙인(stitched) 시간 구간과 원본 시간 구간의 매핑 테이블 생성
 def _time_map_for_ranges(ranges: list[tuple[float, float]]) -> list[dict]:
     time_map = []
     cursor = 0.0
@@ -264,6 +270,7 @@ def _time_map_for_ranges(ranges: list[tuple[float, float]]) -> list[dict]:
     return time_map
 
 
+# stitched 시간을 time_map 기준으로 원본 오디오 시간으로 역변환
 def _map_stitched_time(t: float, time_map: list[dict]) -> float:
     if not time_map:
         return t
@@ -276,6 +283,7 @@ def _map_stitched_time(t: float, time_map: list[dict]) -> float:
     return last["source_end"]
 
 
+# 오디오에서 [start, start+duration] 구간만 잘라 저장
 def _extract_audio_slice(audio_path: str, out_path: Path, start: float, duration: float) -> bool:
     if duration <= 0:
         return False
@@ -288,6 +296,7 @@ def _extract_audio_slice(audio_path: str, out_path: Path, start: float, duration
     return out_path.exists() and out_path.stat().st_size > 0
 
 
+# 여러 시간 구간의 오디오 조각을 이어붙여 하나의 청크 파일 생성
 def _concat_audio_slices(audio_path: str, ranges: list[tuple[float, float]], chunk_path: Path, base_dir: Path, label: str) -> bool:
     if not ranges:
         return False
@@ -325,7 +334,7 @@ def _concat_audio_slices(audio_path: str, ranges: list[tuple[float, float]], chu
 # ── Groq 호출 ────────────────────────────────────────────────────
 
 def _call_groq(chunk_path: str) -> Optional[object]:
-    """Groq Whisper API 호출. 실패 시 None."""
+    """Groq Whisper API 호출, 실패 시 None"""
     try:
         with open(chunk_path, "rb") as f:
             return groq_client.audio.transcriptions.create(
@@ -348,10 +357,10 @@ def _transcribe_chunks_from_audio(
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> list[dict]:
     """
-    이미 추출된 audio_path에서 무음 제거 후 묶은 chunks를 Groq에 전송한다.
-    time_offset은 audio_path 기준 시간을 영상 절대 시간으로 변환하는 값.
+    이미 추출된 audio_path에서 무음 제거 후 묶은 chunks를 Groq에 전송
+    time_offset은 audio_path 기준 시간을 영상 절대 시간으로 변환하는 값
     chunks 개수는 루프 시작 전에 이미 확정돼 있으므로, progress_callback으로
-    실제 (완료 개수, 전체 개수)를 보고할 수 있다.
+    실제 (완료 개수, 전체 개수)를 보고 가능
     """
     segments: list[dict] = []
     total = len(chunks)
@@ -423,7 +432,7 @@ def transcribe_range(
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """
-    영상의 [start_sec, end_sec] 구간을 전사한다.
+    영상의 [start_sec, end_sec] 구간을 전사
 
     1. 해당 구간 오디오 추출
     2. 무음 감지 (0.6초 이상)
@@ -494,7 +503,7 @@ def transcribe_video(
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """
-    영상 전체를 전사한다 (metadata 없이 fallback 경로).
+    영상 전체를 전사 (metadata 없이 fallback 경로)
 
     Returns:
         {

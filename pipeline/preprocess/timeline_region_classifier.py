@@ -1,20 +1,20 @@
 """
-Classify sampled-cache timeline regions.
+샘플 캐시 타임라인 구간 분류
 
-Step 1 of the staged slide extraction pipeline:
+단계별 슬라이드 추출 파이프라인의 Step 1:
 
   sampled_frames.avi + sampled_manifest.json
     -> timeline_segments.json
-    -> segment preview images
+    -> 구간 미리보기 이미지
 
-The classifier is intentionally coarse. It only decides which broad regions
-should be processed by later slide-specific passes:
+이 분류기는 의도적으로 거칠게(coarse) 판정, 이후 슬라이드 전용 처리 단계가
+어떤 큰 구간을 처리해야 할지만 결정:
 
-  - slide: mostly static presentation screen, including small annotations
-  - video: continuous visual motion, including embedded videos and demos
-  - unknown: ambiguous region that should be inspected or handled cautiously
+  - slide: 대체로 정지된 발표 화면, 작은 판서 포함
+  - video: 지속적인 시각적 움직임, 삽입 영상/데모 포함
+  - unknown: 모호해서 별도 검토나 신중한 처리가 필요한 구간
 
-Usage:
+사용법:
     python -m pipeline.timeline_region_classifier \
         --cache sample_cache_dir \
         --output region_segments_dir
@@ -52,6 +52,7 @@ log = logging.getLogger(__name__)
 SEGMENTS_FILENAME = "timeline_segments.json"
 
 
+# 환경변수를 int로 파싱, 실패/미설정 시 default (파싱 실패는 경고 로그)
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None or value == "":
@@ -63,41 +64,42 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# 타임라인 구간 분류 임계값 모음
 @dataclass
 class RegionClassifierConfig:
     window_sec: float = 4.0
     min_segment_sec: float = 12.0
 
-    # Step 1 parallel motion-metric settings.
+    # Step 1 병렬 motion-metric 설정
     #
-    # motion metrics are the expensive part of this stage:
-    # each sampled frame is decoded from sampled_frames.avi, masked, converted to
-    # a decision frame, and compared with the previous sampled frame.
+    # motion metric 계산이 이 단계에서 가장 비용이 큼: 각 샘플 프레임을
+    # sampled_frames.avi에서 디코딩하고, 마스킹하고, 판정용 프레임으로 변환한 뒤
+    # 이전 샘플 프레임과 비교
     #
-    # The dependency is only one previous sample, so chunked workers can safely
-    # use a small guard overlap. Defaults target long lecture videos on a large
-    # CPU machine without overwhelming sampled_frames.avi random access.
+    # 의존성이 바로 앞 샘플 1개뿐이라 청크로 나눈 worker들이 작은 guard 겹침만으로도
+    # 안전하게 동작, 기본값은 sampled_frames.avi 임의 접근을 과도하게 만들지 않으면서
+    # 대형 CPU 머신에서 긴 강의 영상을 처리하도록 맞춰짐
     motion_workers: int = _env_int("VLVERIFIER_REGION_WORKERS", 8)
     motion_chunk_samples: int = _env_int("VLVERIFIER_REGION_CHUNK_SAMPLES", 2000)
     motion_guard_samples: int = _env_int("VLVERIFIER_REGION_GUARD_SAMPLES", 1)
 
-    # Per-sample coarse thresholds, based on sampled-cache prev_* metrics.
+    # 샘플 단위 대략적 임계값, sampled-cache의 prev_* 지표 기준
     active_mse: float = 90.0
     very_active_mse: float = 220.0
     active_hash: int = 4
     cut_mse: float = 500.0
     cut_hash: int = 10
 
-    # Pixel-level motion thresholds from sampled_frames.avi.
-    # Embedded videos often move only inside a small rectangle, so MSE/pHash
-    # alone can under-detect them. A low changed-pixel ratio sustained over time
-    # is a stronger signal than a few abrupt slide cuts.
+    # sampled_frames.avi 기준 픽셀 단위 움직임 임계값
+    # 삽입 영상은 작은 사각형 영역 안에서만 움직이는 경우가 많아 MSE/pHash만으로는
+    # 과소 감지될 수 있음, 시간에 걸쳐 지속되는 낮은 변화 픽셀 비율이 몇 번의 급격한
+    # 슬라이드 전환보다 더 강한 신호
     diff_threshold: int = 12
     motion_ratio: float = 0.006
     strong_motion_ratio: float = 0.025
 
-    # Window classification thresholds. Cut-like spikes are ignored for the
-    # continuous-motion ratios because slide decks can have abrupt page turns.
+    # 윈도우 분류 임계값, 슬라이드 자료도 급격한 페이지 전환이 있을 수 있어
+    # cut처럼 튀는 스파이크는 지속 움직임 비율 계산에서 제외
     slide_motion_ratio: float = 0.18
     slide_median_changed_ratio: float = 0.003
     video_motion_ratio: float = 0.42
@@ -111,10 +113,12 @@ class RegionClassifierConfig:
     crop_bottom: float = 0.98
 
 
+# None을 제외한 값들만 float 리스트로 변환
 def _safe_values(values: Iterable[float | int | None]) -> list[float]:
     return [float(v) for v in values if v is not None]
 
 
+# 정렬된 값 목록에서 지정 백분위수 값을 선형 보간으로 계산
 def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -126,6 +130,7 @@ def _percentile(values: list[float], pct: float) -> float:
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
 
 
+# 프레임에서 여백을 제외한 콘텐츠 영역만 크롭
 def _content_region(frame: np.ndarray, cfg: RegionClassifierConfig) -> np.ndarray:
     h, w = frame.shape[:2]
     x0 = max(0, min(w - 1, int(w * cfg.crop_left)))
@@ -135,34 +140,40 @@ def _content_region(frame: np.ndarray, cfg: RegionClassifierConfig) -> np.ndarra
     return frame[y0:y1, x0:x1]
 
 
+# 판정용 크롭+그레이스케일+블러 프레임 생성
 def _decision_frame(frame: np.ndarray, cfg: RegionClassifierConfig) -> np.ndarray:
     cropped = _content_region(frame, cfg)
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+# 마스크도 판정용 콘텐츠 영역으로 크롭
 def _decision_mask(mask: np.ndarray | None, cfg: RegionClassifierConfig) -> np.ndarray | None:
     if mask is None:
         return None
     return _content_region(mask.astype(np.uint8), cfg).astype(bool)
 
 
+# 임계값 초과 픽셀 비율 계산
 def _changed_ratio(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     return float(np.sum(diff > threshold) / diff.size)
 
 
+# 두 프레임 간 평균 제곱 오차(MSE) 계산
 def _mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     a = frame_a.astype(np.float32)
     b = frame_b.astype(np.float32)
     return float(np.mean((a - b) ** 2))
 
 
+# 프레임의 perceptual hash를 정수로 계산
 def _phash_int(frame: np.ndarray) -> int:
     pil_img = Image.fromarray(frame)
     return int(str(imagehash.phash(pil_img)), 16)
 
 
+# 두 hash 정수 간 해밍 거리(비트 차이 개수)
 def _phash_distance(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
 
@@ -172,26 +183,26 @@ def iter_sample_cache_range(
     start_pos: int,
     end_pos: int,
 ) -> Iterator[tuple[int, dict, np.ndarray]]:
-    """Yield sampled-cache frames by 0-based video-frame position.
+    """0-based 비디오 프레임 위치 기준으로 샘플 캐시 프레임 yield
 
-    This is intentionally separate from iter_sample_cache(), which always reads
-    sampled_frames.avi from the beginning. Step 1 parallel workers need true
-    range reads so that multiple workers do not all scan the full cache.
+    항상 sampled_frames.avi를 처음부터 읽는 iter_sample_cache()와 의도적으로 분리,
+    Step 1 병렬 worker는 여러 worker가 전체 캐시를 다 스캔하지 않도록 진짜 구간
+    읽기가 필요함
 
     Parameters
     ----------
     cache_dir:
-        Sample cache directory containing sampled_manifest.json and
-        sampled_frames.avi.
+        sampled_manifest.json과 sampled_frames.avi가 있는 샘플 캐시 디렉터리
     start_pos:
-        0-based inclusive frame position in sampled_frames.avi / manifest frames.
+        sampled_frames.avi/manifest frames 기준 0-based 시작 위치(포함)
     end_pos:
-        0-based exclusive frame position.
+        0-based 종료 위치(미포함)
     """
 
     yield from _cache_range(cache_dir, start_pos, end_pos)
 
 
+# 이전 샘플 대비 motion 지표(mse/hash 거리/변화 픽셀 비율) 계산, 첫 샘플이면 None 값들로 채움
 def _motion_metric_for_sample(
     cache_dir: str | Path,
     cfg: RegionClassifierConfig,
@@ -227,6 +238,7 @@ def _motion_metric_for_sample(
     return metric, decision, mask
 
 
+# 전체 샘플을 순차 순회하며 motion 지표 계산 (단일 프로세스 경로)
 def _sample_motion_metrics(
     cache_dir: str | Path,
     cfg: RegionClassifierConfig,
@@ -272,11 +284,11 @@ def _sample_motion_metrics_range(
     core_start_pos: int,
     core_end_pos: int,
 ) -> dict[int, dict]:
-    """Compute motion metrics for one core range.
+    """하나의 core 구간에 대해 motion 지표 계산
 
-    read_start_pos may be earlier than core_start_pos. Frames before
-    core_start_pos are guard frames used only to seed prev_decision/prev_mask.
-    Returned metrics include only positions in [core_start_pos, core_end_pos).
+    read_start_pos는 core_start_pos보다 이를 수 있음, core_start_pos 이전 프레임은
+    prev_decision/prev_mask를 초기화하는 데만 쓰이는 guard 프레임
+    반환되는 지표는 [core_start_pos, core_end_pos) 범위의 위치만 포함
     """
 
     metrics: dict[int, dict] = {}
@@ -301,6 +313,8 @@ def _sample_motion_metrics_range(
     return metrics
 
 
+# 전체 샘플을 chunk_samples 단위로 나눠 (read_start, core_start, core_end) 구간 목록 생성,
+# guard_samples만큼 앞쪽 여유를 둠
 def _motion_metric_ranges(total_samples: int, chunk_samples: int, guard_samples: int) -> list[tuple[int, int, int]]:
     chunk_samples = max(1, int(chunk_samples))
     guard_samples = max(0, int(guard_samples))
@@ -313,6 +327,7 @@ def _motion_metric_ranges(total_samples: int, chunk_samples: int, guard_samples:
     return ranges
 
 
+# 샘플 수가 충분히 많으면 프로세스 풀로 motion 지표를 병렬 계산, 적으면 순차 계산으로 폴백
 def _sample_motion_metrics_parallel(
     cache_dir: str | Path,
     cfg: RegionClassifierConfig,
@@ -348,9 +363,9 @@ def _sample_motion_metrics_parallel(
     merged: dict[int, dict] = {}
     completed = 0
 
-    # ProcessPool is used because pHash, masking, cv2 diff, and image conversion
-    # are CPU-heavy enough to benefit from process-level parallelism. Each worker
-    # opens its own VideoCapture to avoid sharing decoder state.
+    # pHash, 마스킹, cv2 diff, 이미지 변환이 CPU 부하가 커서 프로세스 단위 병렬화의
+    # 이득이 있어 ProcessPool 사용, 각 worker는 디코더 상태를 공유하지 않도록
+    # 자체 VideoCapture를 염
     with ProcessPoolExecutor(max_workers=workers) as executor:
         future_map = {
             executor.submit(
@@ -396,6 +411,7 @@ def _sample_motion_metrics_parallel(
     return ordered
 
 
+# 윈도우(연속 샘플 묶음) 안의 motion 지표들을 요약 통계(비율/평균/중앙값/p90)로 집계
 def _window_metrics(frames: list[dict], motion_metrics: dict[int, dict], cfg: RegionClassifierConfig) -> dict:
     mses = _safe_values(
         motion_metrics.get(int(f["sample_index"]), {}).get("motion_mse")
@@ -471,6 +487,7 @@ def _window_metrics(frames: list[dict], motion_metrics: dict[int, dict], cfg: Re
     }
 
 
+# 윈도우 요약 지표를 기준으로 slide/video/unknown과 신뢰도, 판단 근거를 결정
 def _classify_window(metrics: dict, cfg: RegionClassifierConfig) -> tuple[str, float, str]:
     pixel_motion_ratio = metrics["pixel_motion_ratio"]
     strong_pixel_motion_ratio = metrics["strong_pixel_motion_ratio"]
@@ -505,6 +522,7 @@ def _classify_window(metrics: dict, cfg: RegionClassifierConfig) -> tuple[str, f
     return "unknown", 0.45, "ambiguous_motion"
 
 
+# manifest 프레임을 window_sec 단위로 나눠 각 윈도우를 분류
 def _window_records(manifest: dict, motion_metrics: dict[int, dict], cfg: RegionClassifierConfig) -> list[dict]:
     frames = manifest.get("frames", [])
     sampled_fps = float(manifest.get("cache", {}).get("sampled_fps") or 1.0)
@@ -533,6 +551,7 @@ def _window_records(manifest: dict, motion_metrics: dict[int, dict], cfg: Region
     return windows
 
 
+# 연속된 같은 type의 윈도우를 하나의 그룹으로 병합
 def _merge_windows(windows: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for window in windows:
@@ -549,6 +568,7 @@ def _merge_windows(windows: list[dict]) -> list[dict]:
     return merged
 
 
+# 그룹(윈도우 목록)을 하나의 segment 레코드로 평탄화, 지표는 평균
 def _flatten_segment(segment: dict, index: int) -> dict:
     windows = segment["windows"]
     first = windows[0]
@@ -594,6 +614,7 @@ def _flatten_segment(segment: dict, index: int) -> dict:
     }
 
 
+# min_segment_sec보다 짧은 그룹을 양옆 타입이 같을 때 흡수 병합, 더 이상 합칠 게 없을 때까지 반복
 def _merge_short_groups(groups: list[dict], cfg: RegionClassifierConfig) -> list[dict]:
     if len(groups) < 3:
         return groups
@@ -632,6 +653,7 @@ def _merge_short_groups(groups: list[dict], cfg: RegionClassifierConfig) -> list
     return merged
 
 
+# 각 segment의 중간 지점 프레임을 미리보기 이미지로 저장
 def _save_segment_previews(cache_dir: str | Path, output_dir: Path, segments: list[dict]) -> None:
     midpoint_to_segment = {
         int(round((seg["start_sample_index"] + seg["end_sample_index"]) / 2)): seg
@@ -654,6 +676,8 @@ def _save_segment_previews(cache_dir: str | Path, output_dir: Path, segments: li
             break
 
 
+# 샘플 캐시 전체에 대해 motion 지표 계산 -> 윈도우 분류 -> 병합 -> 미리보기 저장까지
+# 전체 파이프라인 실행, timeline_segments.json 저장
 def classify_regions(
     cache_dir: str,
     output_dir: str,
@@ -722,10 +746,11 @@ def classify_regions(
     return result
 
 
+# CLI 인자 파싱
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Classify sampled-cache timeline regions.")
-    parser.add_argument("--cache", required=True, help="Sample cache directory")
-    parser.add_argument("--output", "-o", required=True, help="Output directory")
+    parser = argparse.ArgumentParser(description="샘플 캐시 타임라인 구간 분류")
+    parser.add_argument("--cache", required=True, help="샘플 캐시 디렉터리")
+    parser.add_argument("--output", "-o", required=True, help="출력 디렉터리")
     parser.add_argument("--window-sec", type=float, default=RegionClassifierConfig.window_sec)
     parser.add_argument("--min-segment-sec", type=float, default=RegionClassifierConfig.min_segment_sec)
     parser.add_argument("--motion-workers", type=int, default=RegionClassifierConfig.motion_workers)
@@ -735,6 +760,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# CLI 진입점, 인자로 RegionClassifierConfig 구성 후 classify_regions 실행
 def main() -> None:
     args = parse_args()
     if args.debug:

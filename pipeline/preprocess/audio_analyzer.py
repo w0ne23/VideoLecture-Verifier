@@ -111,8 +111,8 @@ def analyze_audio_features(audio_path: str) -> dict:
     }
 
     # 7. 템포 (말하기 속도)
-    # librosa.beat.beat_track can crash the native process on some long lecture
-    # inputs. It is non-critical for the pipeline, so keep it opt-in.
+    # librosa.beat.beat_track은 일부 긴 강의 입력에서 네이티브 프로세스를 크래시시킬 수 있음,
+    # 파이프라인에 필수는 아니므로 opt-in으로 유지
     tempo_flag = os.getenv("VLVERIFIER_AUDIO_TEMPO_ENABLED", "0").strip().lower()
     tempo_enabled = bool(tempo_flag) and tempo_flag not in {"0", "false", "no"}
     if tempo_enabled:
@@ -155,7 +155,7 @@ def analyze_audio_features(audio_path: str) -> dict:
 
 
 def _analyze_audio_features_basic(audio_path: str) -> dict:
-    """Fallback audio summary when librosa is unavailable."""
+    """librosa 미설치 시 사용하는 기본 오디오 요약 폴백"""
     print("  librosa 없음: 기본 PCM 오디오 요약만 생성합니다.")
     with wave.open(audio_path, "rb") as wav:
         sr = wav.getframerate()

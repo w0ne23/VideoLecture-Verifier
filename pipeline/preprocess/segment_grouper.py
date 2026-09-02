@@ -25,7 +25,7 @@ from .utils import api_call_with_retry
 
 
 # 기존: 아래 LLM 호출(decide_context_breaks)은
-# GEMINI_GENERATIVE_MODEL(gemini-2.5-flash)로 하드코딩되어 있었음.
+# GEMINI_GENERATIVE_MODEL(gemini-2.5-flash)로 하드코딩되어 있었음
 # 상용 API로 되돌리려면: VLVERIFIER_CONTEXT_GROUP_MODEL=gemini-2.5-flash (또는 GEMINI_GENERATIVE_MODEL)
 CONTEXT_GROUP_MODEL = os.getenv("VLVERIFIER_CONTEXT_GROUP_MODEL", "ollama:qwen3.8:27b-q4_K_M").strip()
 
@@ -33,13 +33,14 @@ CONTEXT_PARALLEL_REQUESTS = max(
     1,
     int(os.getenv("VLVERIFIER_CONTEXT_PARALLEL_REQUESTS", "20")),
 )
-# Ollama로 라우팅되면 서버 동시 처리 한도에 맞춰 상한을 낮춘다 (text_processor._effective_parallel_requests와 동일 패턴).
+# Ollama로 라우팅되면 서버 동시 처리 한도에 맞춰 상한을 낮춤 (text_processor._effective_parallel_requests와 동일 패턴)
 CONTEXT_OLLAMA_PARALLEL_REQUESTS = max(
     1,
     int(os.getenv("MERGE_CORRECTION_OLLAMA_PARALLEL_REQUESTS", "4")),
 )
 
 
+# CONTEXT_GROUP_MODEL이 Ollama면 서버 동시 처리 한도에 맞춰 낮은 상한 적용
 def _effective_context_parallel_requests() -> int:
     if _is_ollama_model(CONTEXT_GROUP_MODEL):
         return min(CONTEXT_PARALLEL_REQUESTS, CONTEXT_OLLAMA_PARALLEL_REQUESTS)
@@ -47,7 +48,7 @@ def _effective_context_parallel_requests() -> int:
 
 
 def _call_context_llm(prompt: str, *, max_output_tokens: int, json_mode: bool = True) -> str:
-    """설정된 모델에 따라 Ollama, OpenAI 호환 API 또는 Gemini로 호출한다."""
+    """설정된 모델에 따라 Ollama, OpenAI 호환 API 또는 Gemini로 호출"""
     if _is_ollama_model(CONTEXT_GROUP_MODEL):
         from .config import get_ollama_client
 
@@ -139,9 +140,9 @@ def _build_group_list_for_prompt(groups: list[dict], max_chars: int = 220) -> st
 def decide_context_breaks(groups: list[dict]) -> set[int]:
     """
     같은 scene 안의 연속 segment들을 의미/맥락 단위 context로 나누기 위해
-    context가 끝나는 지점(i, i+1 사이 break)을 LLM으로 판단한다.
+    context가 끝나는 지점(i, i+1 사이 break)을 LLM으로 판단
 
-    기본 전제는 "인접 segment는 이어지는 강의 흐름"이며, LLM은 끊을 지점만 고른다.
+    기본 전제는 "인접 segment는 이어지는 강의 흐름"이며, LLM은 끊을 지점만 고름
     """
     if len(groups) <= 1:
         return set()
@@ -190,10 +191,11 @@ break_after의 각 숫자 i는 "segment i까지 현재 context로 묶고, segmen
         break_after = data.get("break_after", [])
         return {int(i) for i in break_after if 0 <= int(i) < len(groups) - 1}
     except Exception:
-        # 실패 시 scene 내부 발화 흐름을 최대한 보존한다.
+        # 실패 시 scene 내부 발화 흐름을 최대한 보존
         return set()
 
 
+# 수업 운영/전환 멘트로 판단할 키워드 패턴
 _OPERATIONAL_CONTEXT_RE = re.compile(
     r"("
     r"감사합니다|수고하셨|고생하셨|"
@@ -208,8 +210,8 @@ _OPERATIONAL_CONTEXT_RE = re.compile(
 
 def _is_operational_or_transition_segment(text: str) -> bool:
     """
-    수업 운영/감사/짧은 전환 멘트를 본 설명 context와 섞지 않기 위한 보조 규칙.
-    긴 내용 설명 안에 우연히 포함된 표현은 과도하게 분리하지 않도록 짧은 segment에만 적용한다.
+    수업 운영/감사/짧은 전환 멘트를 본 설명 context와 섞지 않기 위한 보조 규칙
+    긴 내용 설명 안에 우연히 포함된 표현은 과도하게 분리하지 않도록 짧은 segment에만 적용
     """
     t = re.sub(r"\s+", " ", (text or "")).strip()
     if not t:
@@ -218,7 +220,7 @@ def _is_operational_or_transition_segment(text: str) -> bool:
 
 
 def _is_natural_context_boundary(groups: list[dict], boundary: int) -> bool:
-    """세그먼트 경계가 문장/호흡상 안전한 분할 지점인지 판단한다."""
+    """세그먼트 경계가 문장/호흡상 안전한 분할 지점인지 판단"""
     if boundary < 0 or boundary >= len(groups) - 1:
         return False
     left = groups[boundary]
@@ -235,11 +237,11 @@ def _apply_context_segment_limit(
     groups: list[dict],
     llm_breaks: set[int],
 ) -> set[int]:
-    """긴 context를 안전한 경계에서만 제한한다.
+    """긴 context를 안전한 경계에서만 제한
 
     soft limit에 도달하면 자연 경계를 찾고, hard limit에 도달한 뒤에도
-    경계가 없으면 짧은 lookahead 후 세그먼트 경계에서 비상 분할한다.
-    세그먼트 내부 텍스트는 절대 자르지 않는다.
+    경계가 없으면 짧은 lookahead 후 세그먼트 경계에서 비상 분할
+    세그먼트 내부 텍스트는 절대 자르지 않음
     """
     if len(groups) <= CONTEXT_SOFT_MAX_SEGMENTS:
         return set(llm_breaks)
@@ -291,7 +293,7 @@ def _apply_context_segment_limit(
             if candidate is not None:
                 pending_break = candidate
             else:
-                # 세그먼트 내부가 아니라 세그먼트 사이에서만 비상 분할한다.
+                # 세그먼트 내부가 아니라 세그먼트 사이에서만 비상 분할
                 enforced.add(boundary)
                 context_start = boundary + 1
 
@@ -304,8 +306,8 @@ def _apply_context_segment_limit(
 
 def load_slide_ranges(metadata_path: str, duration_sec: float) -> list[dict]:
     """
-    metadata.json에서 scene occurrence별 시간 구간 계산.
-    같은 scene_index의 base(annot_index=0)가 한 scene 시작.
+    metadata.json에서 scene occurrence별 시간 구간 계산
+    같은 scene_index의 base(annot_index=0)가 한 scene 시작
     반환: [ {"scene_index": 1, "slide_number": 1, "start_sec": 0.07, "end_sec": 46.73}, ... ]
     """
     with open(metadata_path, "r", encoding="utf-8") as f:
@@ -370,11 +372,11 @@ def group_segments_by_scene_and_context(
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[list[dict], list[dict]]:
     """
-    먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 의미 전환점 기준으로 컨텍스트 구성.
-    use_pause_sentence: True면 침묵/문장끝 기준 분할 추가 (나중에 사용할 옵션).
+    먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 의미 전환점 기준으로 컨텍스트 구성
+    use_pause_sentence: True면 침묵/문장끝 기준 분할 추가 (나중에 사용할 옵션)
     progress_callback(done, total)이 주어지면 scene별 LLM 경계 판단(job)이 하나
-    끝날 때마다 실측 진행률을 보고한다. 병렬 LLM job이 하나도 없으면(use_llm_merge=False
-    이거나 여러 세그먼트를 가진 scene이 없으면) 즉시 (0, 0)으로 완료 처리한다.
+    끝날 때마다 실측 진행률을 보고, 병렬 LLM job이 하나도 없으면(use_llm_merge=False
+    이거나 여러 세그먼트를 가진 scene이 없으면) 즉시 (0, 0)으로 완료 처리
 
     반환: (groups_flat, scenes_structure)
     - groups_flat: 강조 분석용 그룹 리스트 (start, end, text, segment_indices, scene_index, context_index_in_scene)
@@ -400,8 +402,8 @@ def group_segments_by_scene_and_context(
                 scene_idx = scene_ranges[-1]["scene_index"]
         seg_to_scene.append(scene_idx)
 
-    # Scene별 의미 경계 판단은 서로 독립적인 LLM 호출이므로 병렬 실행한다.
-    # 결과는 scene_ranges 순서로 다시 조립해 기존 JSON 순서를 유지한다.
+    # Scene별 의미 경계 판단은 서로 독립적인 LLM 호출이므로 병렬 실행
+    # 결과는 scene_ranges 순서로 다시 조립해 기존 JSON 순서를 유지
     scene_entries = []
     for r in scene_ranges:
         sidx = r["scene_index"]
@@ -443,7 +445,7 @@ def group_segments_by_scene_and_context(
                     progress_callback(done_jobs, total_jobs)
     elif progress_callback:
         # LLM 경계 판단이 필요한 scene이 하나도 없으면(use_llm_merge=False거나 전부
-        # 세그먼트 1개짜리 scene) band를 즉시 완료 처리한다.
+        # 세그먼트 1개짜리 scene) band를 즉시 완료 처리
         progress_callback(0, 0)
 
     scenes_structure = []
@@ -474,7 +476,7 @@ def group_segments_by_scene_and_context(
             break_after_by_entry.get(entry_index, set()),
         )
 
-        # 수업 운영/감사/짧은 전환 멘트는 본 설명 context와 섞이지 않도록 앞뒤를 끊는다.
+        # 수업 운영/감사/짧은 전환 멘트는 본 설명 context와 섞이지 않도록 앞뒤를 끊음
         for j, g in enumerate(initial_groups):
             if not _is_operational_or_transition_segment(g.get("text", "")):
                 continue

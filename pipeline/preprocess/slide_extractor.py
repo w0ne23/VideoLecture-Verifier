@@ -74,7 +74,7 @@ class Config:
     FADE_HASH_THRESHOLD          = 8     # oldest ↔ current phash 거리 임계
 
     # ── scene base 구조 비교 ─────────────────────────────────────────
-    # 반복 PPT 템플릿에서 pHash만으로 놓치는 장면 전환을 보완한다.
+    # 반복 PPT 템플릿에서 pHash만으로 놓치는 장면 전환을 보완
     BASE_HASH_THRESHOLD          = 8     # scene_base_phash ↔ current phash 거리 임계
     SCENE_BASE_MSE_THRESHOLD     = float(os.getenv("VLVERIFIER_SCENE_BASE_MSE_THRESHOLD", "350"))
     SCENE_BASE_CHANGED_RATIO     = float(os.getenv("VLVERIFIER_SCENE_BASE_CHANGED_RATIO", "0.045"))
@@ -83,8 +83,8 @@ class Config:
     CONTENT_CROP_TOP             = float(os.getenv("VLVERIFIER_CONTENT_CROP_TOP", "0.05"))
     CONTENT_CROP_RIGHT           = float(os.getenv("VLVERIFIER_CONTENT_CROP_RIGHT", "0.95"))
     CONTENT_CROP_BOTTOM          = float(os.getenv("VLVERIFIER_CONTENT_CROP_BOTTOM", "0.95"))
-    # Clear-reset detection must ignore presentation toolbars, which commonly
-    # occupy the lower edge while annotations are being erased.
+    # clear-reset 감지는 프레젠테이션 툴바를 무시해야 함, 필기가 지워지는 동안
+    # 툴바가 흔히 하단 영역을 차지하기 때문
     CLEAR_RESET_CROP_BOTTOM      = float(os.getenv("VLVERIFIER_CLEAR_RESET_CROP_BOTTOM", "0.90"))
     SAME_SCENE_EDGE_PRESERVE_THRESHOLD = float(
         os.getenv("VLVERIFIER_SAME_SCENE_EDGE_PRESERVE_THRESHOLD", "0.64")
@@ -149,8 +149,8 @@ class Config:
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
-    # 전역 판정/annotation 감지는 이 해상도로 수행한다.
-    # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많다.
+    # 전역 판정/annotation 감지는 이 해상도로 수행
+    # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많음
     DECISION_RESIZE_WIDTH        = int(os.getenv("VLVERIFIER_SLIDE_DECISION_WIDTH", "768"))
     RESIZE_WIDTH                 = 960
     DECODE_BACKEND               = os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")
@@ -185,10 +185,12 @@ def compute_phash(frame: np.ndarray) -> imagehash.ImageHash:
     return imagehash.phash(pil_img)
 
 
+# phash를 정수로 계산
 def compute_phash_int(frame: np.ndarray) -> int:
     return int(str(compute_phash(frame)), 16)
 
 
+# 두 phash 정수 간 해밍 거리 계산
 def phash_distance_int(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
 
@@ -217,12 +219,14 @@ def compute_dhash_hires(frame: np.ndarray) -> imagehash.ImageHash:
     return imagehash.dhash(pil_img, hash_size=16)
 
 
+# 프레임을 지정 너비로 비율 유지 리사이즈
 def resize_frame(frame: np.ndarray, width: int) -> np.ndarray:
     h, w = frame.shape[:2]
     scale = width / w
     return cv2.resize(frame, (width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+# 임계값을 넘는 픽셀 변화 비율 계산
 def count_changed_pixels(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     if diff.ndim == 2:
@@ -232,6 +236,7 @@ def count_changed_pixels(frame_a: np.ndarray, frame_b: np.ndarray, threshold: in
     return np.sum(max_diff > threshold) / max_diff.size
 
 
+# Canny edge 검출 후 팽창시킨 edge 마스크 생성
 def _edge_mask(frame: np.ndarray) -> np.ndarray:
     gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
@@ -239,6 +244,7 @@ def _edge_mask(frame: np.ndarray) -> np.ndarray:
     return cv2.dilate(edges, kernel, iterations=1) > 0
 
 
+# reference의 edge가 frame에서 얼마나 보존됐는지 비율 계산
 def edge_preservation_ratio(reference: np.ndarray, frame: np.ndarray) -> float:
     ref_edges = _edge_mask(reference)
     ref_count = int(ref_edges.sum())
@@ -251,6 +257,7 @@ def edge_preservation_ratio(reference: np.ndarray, frame: np.ndarray) -> float:
     return float(np.logical_and(ref_edges, frame_edges_dilated).sum() / ref_count)
 
 
+# 양방향 edge 보존율 중 최솟값(대칭 edge 겹침) 계산
 def symmetric_edge_overlap(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return min(
         edge_preservation_ratio(frame_a, frame_b),
@@ -264,7 +271,7 @@ def symmetric_edge_overlap_from_masks(
     edges_b: np.ndarray,
     dilated_edges_b: np.ndarray,
 ) -> float:
-    """Reuse precomputed edge masks for repeated duplicate comparisons."""
+    """반복되는 duplicate 비교를 위해 미리 계산된 edge 마스크 재사용"""
     count_a = int(edges_a.sum())
     count_b = int(edges_b.sum())
     if count_a <= 0 or count_b <= 0:
@@ -275,10 +282,12 @@ def symmetric_edge_overlap_from_masks(
     )
 
 
+# MSE를 0~1 범위로 정규화
 def normalized_mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return compute_mse(frame_a, frame_b) / (255.0 * 255.0)
 
 
+# 두 프레임의 그레이스케일 히스토그램 상관도 계산
 def grayscale_hist_correlation(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     gray_a = frame_a if frame_a.ndim == 2 else cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY)
     gray_b = frame_b if frame_b.ndim == 2 else cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY)
@@ -289,6 +298,7 @@ def grayscale_hist_correlation(frame_a: np.ndarray, frame_b: np.ndarray) -> floa
     return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
 
 
+# 프레임의 정규화된 그레이스케일 히스토그램 계산
 def grayscale_histogram(frame: np.ndarray) -> np.ndarray:
     gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
@@ -296,12 +306,13 @@ def grayscale_histogram(frame: np.ndarray) -> np.ndarray:
     return hist
 
 
+# 미리 계산된 두 히스토그램의 상관도 계산
 def histogram_correlation(hist_a: np.ndarray, hist_b: np.ndarray) -> float:
     return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
 
 
 def content_region(frame: np.ndarray, cfg: Config) -> np.ndarray:
-    """반복 템플릿/하단 footer 영향을 줄이고 실제 장표 본문 중심으로 비교한다."""
+    """반복 템플릿/하단 footer 영향을 줄이고 실제 장표 본문 중심으로 비교"""
     h, w = frame.shape[:2]
     x0 = max(0, min(w - 1, int(w * cfg.CONTENT_CROP_LEFT)))
     y0 = max(0, min(h - 1, int(h * cfg.CONTENT_CROP_TOP)))
@@ -310,6 +321,7 @@ def content_region(frame: np.ndarray, cfg: Config) -> np.ndarray:
     return frame[y0:y1, x0:x1]
 
 
+# content region 기준 mse/변경비율/edge보존율/해시거리 지표 묶음 계산
 def scene_content_metrics(reference: np.ndarray, frame: np.ndarray, cfg: Config) -> dict:
     ref = content_region(reference, cfg)
     cur = content_region(frame, cfg)
@@ -322,6 +334,7 @@ def scene_content_metrics(reference: np.ndarray, frame: np.ndarray, cfg: Config)
     }
 
 
+# content 변경비율/edge보존율 기준으로 같은 scene 내용인지 판정
 def is_same_scene_content(reference: np.ndarray, frame: np.ndarray, cfg: Config) -> bool:
     metrics = scene_content_metrics(reference, frame, cfg)
     if metrics["changed_ratio"] > cfg.SAME_SCENE_CHANGED_RATIO_MAX:
@@ -329,6 +342,7 @@ def is_same_scene_content(reference: np.ndarray, frame: np.ndarray, cfg: Config)
     return metrics["edge_preserve"] >= cfg.SAME_SCENE_EDGE_PRESERVE_THRESHOLD
 
 
+# duplicate 판정에 필요한 해시/edge/히스토그램 등 특징을 한 번에 계산해 캐싱용으로 반환
 def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | None = None) -> dict:
     full = resize_frame(frame, cfg.RESIZE_WIDTH)
     content = content_region(full, cfg)
@@ -355,6 +369,7 @@ def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | 
     }
 
 
+# 완화된 임계값으로 duplicate 후보 여부를 빠르게 1차 필터링(정밀 판정 이전 단계)
 def duplicate_pair_prefilter(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
     metrics = {
         "phash": int(rep_a["phash"] - rep_b["phash"]),
@@ -384,6 +399,7 @@ def duplicate_pair_prefilter(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[boo
     return bool(maybe_duplicate), metrics
 
 
+# 아젠다/목차 슬라이드의 흰색 원형 항목 영역들을 연결요소 분석으로 탐지
 def _agenda_white_components(content: np.ndarray, ignore_mask: np.ndarray | None = None) -> tuple[np.ndarray, int]:
     hsv = cv2.cvtColor(content, cv2.COLOR_BGR2HSV)
     white = (hsv[:, :, 1] <= 55) & (hsv[:, :, 2] >= 175)
@@ -414,12 +430,13 @@ def _agenda_white_components(content: np.ndarray, ignore_mask: np.ndarray | None
     return keep.astype(bool), component_count
 
 
+# 원형 텍스트가 바뀐 아젠다/목차 슬라이드 감지
 def agenda_text_guard_metrics(rep_a: dict, rep_b: dict) -> dict:
-    """Detect agenda/table-of-contents slides whose circle text changed.
+    """원형 텍스트가 바뀐 아젠다/목차 슬라이드 감지
 
-    Person masks intentionally remove lecturer bodies first, then the guard
-    compares dark text inside large white agenda/table regions. This catches
-    slides that share the same template but have different numbered items.
+    person mask로 먼저 발표자 몸을 의도적으로 제거한 뒤, 큰 흰색 아젠다/표
+    영역 안의 어두운 텍스트를 비교한다. 같은 템플릿을 쓰지만 번호가 매겨진
+    항목이 다른 슬라이드를 이렇게 잡아낸다
     """
     content_a = rep_a["content"]
     content_b = rep_b["content"]
@@ -453,6 +470,7 @@ def agenda_text_guard_metrics(rep_a: dict, rep_b: dict) -> dict:
             "agenda_shared_area": shared_area,
         }
 
+    # 공유 영역 내 어두운 텍스트 픽셀 마스크 추출
     def _dark_text_mask(content: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(content, cv2.COLOR_BGR2GRAY)
         text = ((gray < 165) & shared_region).astype(np.uint8) * 255
@@ -482,6 +500,8 @@ def agenda_text_guard_metrics(rep_a: dict, rep_b: dict) -> dict:
     }
 
 
+# 두 프레임 쌍이 실제 duplicate 슬라이드인지 정밀 판정(strict/near-identical/content 3단계 기준),
+# 아젠다 텍스트 변경 시 veto 처리
 def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
     full_a, full_b = masked_pair(rep_a["frame"], rep_a.get("mask"), rep_b["frame"], rep_b.get("mask"))
     content_a, content_b = masked_pair(
@@ -490,10 +510,9 @@ def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool
         rep_b["content"],
         rep_b.get("content_mask"),
     )
-    # The feature pass already computed these values for the common case where
-    # no person mask is present. Reuse them instead of hashing both images a
-    # second time during detailed pair evaluation. Masked pairs still need
-    # pair-specific hashes because masked_pair() uses the union of both masks.
+    # person mask가 없는 일반적인 경우는 feature pass에서 이미 이 값들을 계산해둠,
+    # 상세 pair 평가에서 두 이미지를 다시 해싱하지 않고 재사용. masked_pair()는
+    # 두 마스크의 합집합을 쓰므로, 마스크가 있는 pair는 여전히 pair별 해시가 필요
     can_reuse_cached_features = rep_a.get("mask") is None and rep_b.get("mask") is None
     if can_reuse_cached_features:
         phash_a = rep_a["phash"]
@@ -603,12 +622,13 @@ def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool
     return is_duplicate, metrics
 
 
+# 인접한 base 프레임들이 같은 슬라이드의 build 단계일 가능성이 있는지 판정
 def build_pair_decision(prev_rep: dict, curr_rep: dict, cfg: Config) -> tuple[bool, dict]:
-    """Return whether adjacent base frames are plausible same-slide build steps.
+    """인접 base 프레임이 같은 슬라이드의 build 단계일 가능성이 있는지 반환
 
-    This is intentionally a candidate detector, not an automatic merge rule.
-    A build step should preserve most of the previous slide structure while
-    adding or revealing a meaningful amount of content.
+    이 함수는 의도적으로 후보 탐지기일 뿐 자동 병합 규칙이 아니다. build 단계는
+    이전 슬라이드 구조를 대부분 보존하면서 의미 있는 양의 콘텐츠를 추가하거나
+    드러내야 한다
     """
     prev_full, curr_full = masked_pair(prev_rep["frame"], prev_rep.get("mask"), curr_rep["frame"], curr_rep.get("mask"))
     prev_content, curr_content = masked_pair(
@@ -652,12 +672,14 @@ def build_pair_decision(prev_rep: dict, curr_rep: dict, cfg: Config) -> tuple[bo
 
 
 
+# 프레임을 리사이즈 후 그레이스케일+블러 처리해 판정용 프레임 생성
 def to_decision_frame(frame: np.ndarray, width: int) -> np.ndarray:
     small = resize_frame(frame, width)
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+# 영상의 fps/프레임 수/너비/높이 메타데이터 조회
 def _video_metadata(input_path: str) -> tuple[float, int, int, int]:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -674,6 +696,7 @@ def _video_metadata(input_path: str) -> tuple[float, int, int, int]:
     return fps, total_frames, width, height
 
 
+# ffmpeg가 지원하는 하드웨어 가속 목록 조회
 def _ffmpeg_hwaccels() -> set[str]:
     if shutil.which("ffmpeg") is None:
         return set()
@@ -695,6 +718,7 @@ def _ffmpeg_hwaccels() -> set[str]:
     return accels
 
 
+# NVIDIA CUDA 런타임 사용 가능 여부 확인
 def _cuda_runtime_available() -> bool:
     system = platform.system().lower()
     if system == "darwin":
@@ -729,6 +753,7 @@ def _cuda_runtime_available() -> bool:
         return False
 
 
+# 지정 하드웨어 가속 장치가 실제로 동작하는지 ffmpeg로 시험, 결과는 캐싱
 def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
     hwaccel = (hwaccel or "").strip().lower()
     if not hwaccel:
@@ -782,6 +807,7 @@ def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
     return available
 
 
+# 설정값과 실제 사용 가능 여부를 종합해 디코드 백엔드(opencv/ffmpeg+hwaccel) 결정
 def _resolve_decode_backend(preferred_backend: str) -> tuple[str, str | None]:
     backend = (preferred_backend or "auto").strip().lower()
     hwaccels = _ffmpeg_hwaccels()
@@ -812,6 +838,7 @@ def _resolve_decode_backend(preferred_backend: str) -> tuple[str, str | None]:
     return "opencv", None
 
 
+# OpenCV로 영상 전체를 N프레임 간격으로 순회하며 디코딩
 def _iter_processed_frames_opencv(input_path: str, cfg: Config, fps: float):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -831,6 +858,7 @@ def _iter_processed_frames_opencv(input_path: str, cfg: Config, fps: float):
         cap.release()
 
 
+# OpenCV로 지정 구간(start_sec~end_sec)만 N프레임 간격으로 순회하며 디코딩
 def _iter_processed_frames_opencv_range(
     input_path: str,
     cfg: Config,
@@ -860,6 +888,7 @@ def _iter_processed_frames_opencv_range(
         cap.release()
 
 
+# ffmpeg 하드웨어 가속으로 영상 전체를 N프레임 간격으로 디코딩(raw video 파이프)
 def _iter_processed_frames_ffmpeg_hwaccel(
     input_path: str,
     cfg: Config,
@@ -926,6 +955,7 @@ def _iter_processed_frames_ffmpeg_hwaccel(
         raise RuntimeError(f"ffmpeg hwaccel 디코드 실패 (hwaccel={hwaccel}, exit={ret}): {err_text}")
 
 
+# ffmpeg 하드웨어 가속으로 지정 구간만 N프레임 간격으로 디코딩
 def _iter_processed_frames_ffmpeg_hwaccel_range(
     input_path: str,
     cfg: Config,
@@ -1000,6 +1030,7 @@ def _iter_processed_frames_ffmpeg_hwaccel_range(
         raise RuntimeError(f"ffmpeg hwaccel 디코드 실패 (hwaccel={hwaccel}, exit={ret}): {err_text}")
 
 
+# ffmpeg 디코드가 도중에 실패하면 이미 처리한 지점 이후부터 OpenCV로 이어서 디코딩
 def _iter_with_opencv_fallback(ffmpeg_iter, opencv_iter_factory, hwaccel: str):
     last_frame_no = 0
     try:
@@ -1016,6 +1047,7 @@ def _iter_with_opencv_fallback(ffmpeg_iter, opencv_iter_factory, hwaccel: str):
         yield frame_no, timestamp, frame
 
 
+# 백엔드를 해석해 영상 전체 프레임 이터레이터 생성
 def _frame_iterator(
     input_path: str,
     cfg: Config,
@@ -1041,6 +1073,7 @@ def _frame_iterator(
     return _iter_processed_frames_opencv(input_path, cfg, fps), "opencv"
 
 
+# 백엔드를 해석해 지정 구간의 프레임 이터레이터 생성
 def _frame_iterator_range(
     input_path: str,
     cfg: Config,
@@ -1090,6 +1123,7 @@ class SlideChangeDetector:
 
     슬라이드 전환 시 반드시 reset() 호출.
     """
+    # fade 감지용 sliding window 버퍼 크기 계산 후 상태 초기화
     def __init__(self, cfg: Config, fps: float):
         self.cfg = cfg
         buf_size = max(2, int(cfg.FADE_WINDOW_SEC * fps / cfg.PROCESS_EVERY_N_FRAMES))
@@ -1099,6 +1133,7 @@ class SlideChangeDetector:
         self.scene_base_frame = None
         self.scene_base_phash = None
 
+    # 새 scene 시작 시 기준 프레임/해시/버퍼를 현재 프레임으로 재설정
     def reset(self, frame: np.ndarray):
         phash = compute_phash(frame)
         self.prev_frame       = frame.copy()
@@ -1108,6 +1143,7 @@ class SlideChangeDetector:
         self.frame_buffer.clear()
         self.frame_buffer.append((frame.copy(), phash))
 
+    # Cut/scene base 구조/base pHash/Fade 4가지 방식을 순서대로 검사해 슬라이드 전환 여부 판정
     def is_slide_change(self, frame: np.ndarray, curr_phash: imagehash.ImageHash | None = None) -> bool:
         if self.prev_frame is None:
             self.reset(frame)
@@ -1171,6 +1207,7 @@ class SlideChangeDetector:
         self._update(frame, curr_phash)
         return False
 
+    # 직전 프레임/해시와 fade 버퍼를 현재 프레임으로 갱신
     def _update(self, frame: np.ndarray, phash: imagehash.ImageHash | None = None):
         if phash is None:
             phash = compute_phash(frame)
@@ -1193,12 +1230,14 @@ class AnnotationStabilityDetector:
     화면 자체가 바뀐 후보는 이 감지기에서 새 base로 만들지 않고,
     main loop의 annotation 저장 직전 가드에서 scene 전환으로 승격한다.
     """
+    # 안정화 판정에 필요한 프레임 수 계산 후 상태 초기화
     def __init__(self, cfg: Config, fps: float):
         self.cfg = cfg
         self.stability_frames = int(cfg.STABILITY_WINDOW_SEC * fps / cfg.PROCESS_EVERY_N_FRAMES)
         self.min_annot_frames = int(cfg.MIN_ANNOT_DURATION_SEC * fps / cfg.PROCESS_EVERY_N_FRAMES)
         self.reset()
 
+    # 상태를 STABLE로 되돌리고 base 프레임을 새로 지정
     def reset(self, base_frame: np.ndarray = None):
         self.state            = "STABLE"
         self.base_frame       = base_frame
@@ -1264,12 +1303,15 @@ class AnnotationStabilityDetector:
         self.prev_frame = frame.copy()
         return result
 
+    # 마지막으로 활동이 감지된 필기 프레임 조회, 없으면 현재 프레임 반환
     def get_capture_frame(self, current_frame: np.ndarray) -> np.ndarray:
         return self.last_annot_frame if self.last_annot_frame is not None else current_frame
 
+    # 마지막 필기 활동 프레임 번호 조회, 없으면 현재 프레임 번호 반환
     def get_capture_frame_no(self, current_frame_no: int) -> int:
         return self.last_annot_frame_no if self.last_annot_frame_no is not None else current_frame_no
 
+    # 마지막 필기 활동 타임스탬프 조회, 없으면 현재 타임스탬프 반환
     def get_capture_timestamp(self, current_timestamp: float) -> float:
         return self.last_annot_timestamp if self.last_annot_timestamp is not None else current_timestamp
 
@@ -1277,6 +1319,8 @@ class AnnotationStabilityDetector:
 # ──────────────────────────────────────────────
 # 메인 파이프라인
 # ──────────────────────────────────────────────
+# 프레임을 순회하며 SlideChangeDetector+AnnotationStabilityDetector로 scene 전환/필기
+# 안정화를 판정, 결과를 metadata 목록으로 축적하는 1차 판정 패스
 def _run_slide_decision_pass(
     frame_iter,
     cfg: Config,
@@ -1305,6 +1349,7 @@ def _run_slide_decision_pass(
     )
     progress_interval = max(1, int((duration * fps / cfg.PROCESS_EVERY_N_FRAMES) / 20)) if duration > 0 else 500
 
+    # 새 scene base를 등록하고 metadata에 기록, 두 감지기 상태 리셋
     def register_new_base(frame_no, small, timestamp, reason):
         nonlocal scene_idx, annot_idx, scene_base_frame, scene_base_phash
         scene_idx += 1
@@ -1317,12 +1362,14 @@ def _run_slide_decision_pass(
         slide_detector.reset(small)
         annot_detector.reset(base_frame=small)
 
+    # 후보 프레임이 현재 scene base와 같은 내용이면 새 base 등록을 억제
     def should_suppress_duplicate_base(candidate_small):
         return (
             scene_base_frame is not None
             and is_same_scene_content(scene_base_frame, candidate_small, cfg)
         )
 
+    # scene 전환 후보를 즉시 확정하지 않고 안정화 대기 상태로 등록
     def start_pending_scene(frame_no, timestamp, small, reason):
         nonlocal pending_scene
         pending_scene = {
@@ -1339,6 +1386,7 @@ def _run_slide_decision_pass(
         annot_detector.reset(base_frame=None)
         log.info(f"  [전환 후보] base 안정화 대기 ({reason}) @ {timestamp:.2f}s")
 
+    # 대기 중인 scene 후보를 확정, 직전 scene과 같은 내용이면 생략하고 되돌림
     def confirm_pending_scene(reason):
         nonlocal pending_scene
         if pending_scene is None:
@@ -1364,6 +1412,7 @@ def _run_slide_decision_pass(
             reason,
         )
 
+    # 대기 중인 scene 후보를 새 프레임으로 갱신, 안정화 여부 추적
     def update_pending_scene(frame_no, timestamp, small):
         nonlocal pending_scene
         if pending_scene is None:
@@ -1398,6 +1447,7 @@ def _run_slide_decision_pass(
 
         return False
 
+    # 필기 완료 후보가 사실은 화면 자체가 바뀐 것인지(새 scene) 판정
     def is_annotation_screen_change(candidate_small):
         if scene_base_frame is None or scene_base_phash is None:
             return False
@@ -1468,6 +1518,7 @@ def _run_slide_decision_pass(
     return metadata
 
 
+# 영상 메타데이터 조회 후 프레임 이터레이터를 구성해 판정 패스를 실행하는 단일/구간 공용 추출 핵심 로직
 def _extract_slides_core(
     input_path: str,
     output_dir: str,
@@ -1550,6 +1601,7 @@ def _extract_slides_core(
     return metadata
 
 
+# 청크 구간을 디코딩해 리사이즈된 프레임을 샘플 영상(MJPG)과 phash manifest로 저장
 def _extract_sampled_frames_chunk_worker(
     input_path: str,
     chunk_dir: str,
@@ -1624,6 +1676,8 @@ def _extract_sampled_frames_chunk_worker(
     return str(manifest_path)
 
 
+# 여러 청크의 샘플 manifest를 순서대로 읽어 중복 프레임 없이 (frame_no, timestamp,
+# decision_frame, phash) 튜플을 순회
 def _ordered_sampled_frames(manifest_paths: list[Path]):
     seen_frame_nos: set[int] = set()
     for manifest_path in manifest_paths:
@@ -1665,6 +1719,7 @@ def _ordered_sampled_frames(manifest_paths: list[Path]):
             cap.release()
 
 
+# metadata를 scene_index 기준으로 연속 그룹화하고 각 항목에 원본 디렉터리 기록
 def _group_chunk_metadata(metadata: list[dict], source_dir: Path) -> list[list[dict]]:
     groups: list[list[dict]] = []
     current: list[dict] = []
@@ -1685,20 +1740,24 @@ def _group_chunk_metadata(metadata: list[dict], source_dir: Path) -> list[list[d
     return groups
 
 
+# metadata 항목의 원본 디렉터리+파일명으로 전체 경로 구성
 def _item_source_path(item: dict) -> Path:
     return Path(item["_source_dir"]) / item["filename"]
 
 
+# scene 그룹의 대표 이미지 경로 조회, annotation/build가 있으면 마지막 것을 우선
 def _group_representative_path(group: list[dict]) -> Path:
     annotations = [item for item in group if item.get("capture_type") in {"annotation", "build"}]
     target = annotations[-1] if annotations else group[0]
     return _item_source_path(target)
 
 
+# scene 그룹의 base(첫 항목) 이미지 경로 조회
 def _group_base_path(group: list[dict]) -> Path:
     return _item_source_path(group[0])
 
 
+# 청크 병합 판정용으로 이미지를 로드해 hires phash 계산
 def _image_hash_for_merge(path: Path, resize_width: int) -> imagehash.ImageHash:
     img = cv2.imread(str(path))
     if img is None:
@@ -1706,6 +1765,7 @@ def _image_hash_for_merge(path: Path, resize_width: int) -> imagehash.ImageHash:
     return compute_phash_hires(resize_frame(img, resize_width))
 
 
+# 인접 청크 경계의 두 scene 그룹이 시간상 가깝고 대표/base 이미지가 유사하면 병합 대상으로 판정
 def _groups_match_for_merge(
     prev_group: list[dict],
     curr_group: list[dict],
@@ -1726,6 +1786,7 @@ def _groups_match_for_merge(
     return (prev_base - curr_base) < cfg.DUPLICATE_HASH_THRESHOLD
 
 
+# 두 scene 그룹의 프레임을 중복 없이 시간순으로 병합
 def _merge_group_frames(prev_group: list[dict], curr_group: list[dict]) -> list[dict]:
     seen = {
         (item.get("capture_type"), round(float(item.get("timestamp_sec", 0.0)), 2))
@@ -1742,6 +1803,7 @@ def _merge_group_frames(prev_group: list[dict], curr_group: list[dict]) -> list[
     return merged
 
 
+# 병합된 scene 그룹들을 최종 scene 번호로 재명명해 출력 디렉터리에 복사, metadata 재구성
 def _copy_merged_groups(merged_groups: list[list[dict]], out_path: Path) -> list[dict]:
     for stale in out_path.glob("slide_*.jpg"):
         stale.unlink(missing_ok=True)
@@ -1781,6 +1843,7 @@ def _copy_merged_groups(merged_groups: list[list[dict]], out_path: Path) -> list
     return metadata
 
 
+# 전체 길이를 겹치는 청크 구간들로 분할, 각 청크의 core(비겹침) 구간도 함께 계산
 def _chunk_specs(duration: float, cfg: Config, workers: int) -> list[dict]:
     if duration <= cfg.EXTRACT_CHUNK_SEC:
         return []
@@ -1804,6 +1867,7 @@ def _chunk_specs(duration: float, cfg: Config, workers: int) -> list[dict]:
     return specs
 
 
+# 청크 1개에 대해 전체 추출 코어를 후처리 없이 실행하고 chunk_metadata.json 저장
 def _extract_chunk_worker(
     input_path: str,
     chunk_dir: str,
@@ -1827,6 +1891,8 @@ def _extract_chunk_worker(
     return str(chunk_meta_path)
 
 
+# 레거시 슬라이드 추출 경로, 청크 병렬로 샘플 프레임을 만든 뒤 전역 판정/후처리를
+# 순차 실행하는 구버전 파이프라인
 def _extract_slides_legacy(
     input_path: str,
     output_dir: str,
@@ -1850,8 +1916,8 @@ def _extract_slides_legacy(
     if requested_workers <= 0:
         workers = len(specs)
     else:
-        # 5분 초과로 청크가 2개 이상 생긴 경우에는 항상 병렬로 처리한다.
-        # 서버 환경에서 잘못된 설정값(예: 1)으로 병렬성이 꺼지는 일을 막는다.
+        # 5분 초과로 청크가 2개 이상 생긴 경우에는 항상 병렬로 처리
+        # 서버 환경에서 잘못된 설정값(예: 1)으로 병렬성이 꺼지는 일을 방지
         workers = min(max(2, requested_workers), len(specs))
 
     out_path = Path(output_dir)
@@ -1959,6 +2025,8 @@ def _extract_slides_legacy(
         return metadata
 
 
+# 신버전 단계별(Step 0~4B-6) 슬라이드 추출 파이프라인, sample cache 기반으로 scene
+# 전환/필기/duplicate/VLM 검토까지 23단계를 순서대로 실행
 def _extract_slides_staged(
     input_path: str,
     output_dir: str,
@@ -1969,12 +2037,13 @@ def _extract_slides_staged(
     import time
 
     # 아래 Step 0 ~ 4B-6은 항상 이 순서대로, 정확히 이 개수(23개)만 실행되는 고정
-    # 시퀀스다 — 배치 크기처럼 실행 전에는 모르는 값이 아니라 코드에 이미 정해져
+    # 시퀀스 — 배치 크기처럼 실행 전에는 모르는 값이 아니라 코드에 이미 정해져
     # 있는 상수라서, 각 단계가 끝날 때마다 (완료 단계 수, 23)을 그대로 실측
-    # 진행률로 보고할 수 있다.
+    # 진행률로 보고 가능
     _STAGED_TOTAL_STEPS = 23
     _step_counter = 0
 
+    # 완료 단계 수를 1 증가시키고 진행률 콜백 호출
     def _tick() -> None:
         nonlocal _step_counter
         _step_counter += 1
@@ -2007,6 +2076,7 @@ def _extract_slides_staged(
     for path in (cache_dir, regions_dir, scenes_dir, annotations_dir, review_dir):
         path.mkdir(parents=True, exist_ok=True)
 
+    # 시작 시각으로부터 경과 시간(초) 계산
     def _elapsed(t0: float) -> float:
         return time.perf_counter() - t0
 
@@ -2092,9 +2162,9 @@ def _extract_slides_staged(
     _tick()
 
     step_t0 = time.perf_counter()
-    # Remove transient scenes before building OCR/VLM candidates.  Otherwise a
-    # short middle slide is dropped only after its two neighbours have already
-    # been judged as separate, so the newly-adjacent pair is never reviewed.
+    # OCR/VLM 후보 생성 전에 일시적인 scene을 제거, 그렇지 않으면 짧은 중간
+    # 슬라이드가 양쪽 이웃이 이미 별개로 판정된 뒤에야 드롭되어, 새로 인접하게 된
+    # 쌍이 결코 검토되지 않음
     metadata = drop_short_lived_slide_scenes(metadata, cfg)
     log.info("  Step 4A-1c done: drop_short_lived_slide_scenes elapsed=%.1fs", _elapsed(step_t0))
     _tick()
@@ -2114,11 +2184,10 @@ def _extract_slides_staged(
     log.info("  Step 4A-4 done: add_transition_review_candidates elapsed=%.1fs", _elapsed(step_t0))
     _tick()
 
-    # local_vlm._prepare_review_candidates regenerates chronological build
-    # candidates from review_slides/metadata.json.  The file originally written
-    # by materialization still has pre-reparent/pre-short-filter scene IDs, so
-    # regenerating from it shifts candidate IDs away from their image files.
-    # Persist the current compacted timeline before LocalVLM reads it.
+    # local_vlm._prepare_review_candidates는 review_slides/metadata.json에서
+    # 시간순 build 후보를 재생성함, materialization이 원래 기록한 파일은 여전히
+    # reparent/short-filter 이전의 scene ID를 담고 있어서, 그 파일로 재생성하면
+    # 후보 ID가 이미지 파일과 어긋남. LocalVLM이 읽기 전에 현재 압축된 타임라인을 먼저 기록
     step_t0 = time.perf_counter()
     with open(review_metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -2206,6 +2275,7 @@ def _extract_slides_staged(
     return metadata
 
 
+# 슬라이드 추출 공개 진입점, use_staged 여부에 따라 신버전/레거시 파이프라인으로 분기
 def extract_slides(
     input_path: str,
     output_dir: str,
@@ -2233,17 +2303,18 @@ def extract_slides(
     )
 
 
+# 프레임을 JPEG 품질 95로 저장
 def _save(frame: np.ndarray, path: Path):
     cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
 
+# cap에서 특정 0-기반 프레임 번호까지 순방향 디코딩해 프레임 반환
 def _read_frame_by_number(cap: cv2.VideoCapture, frame_no: int) -> np.ndarray | None:
     target = max(0, int(frame_no) - 1)
     cap.set(cv2.CAP_PROP_POS_FRAMES, target)
 
-    # Compressed-video seeks are keyframe-based. Decode forward until the
-    # requested zero-based frame is actually reached instead of trusting the
-    # first frame returned after cap.set().
+    # 압축 영상의 seek은 keyframe 기준, cap.set() 직후 반환되는 첫 프레임을
+    # 그대로 믿지 않고 요청한 0-기반 프레임에 실제로 도달할 때까지 순방향 디코딩
     for _ in range(10000):
         ret, frame = cap.read()
         if not ret or frame is None:
@@ -2254,6 +2325,7 @@ def _read_frame_by_number(cap: cv2.VideoCapture, frame_no: int) -> np.ndarray | 
     return None
 
 
+# 목표 프레임 번호들을 정렬 후 순서대로 seek/디코딩해 각 파일명으로 저장
 def _materialize_by_random_seek(
     input_path: str,
     out_path: Path,
@@ -2277,6 +2349,7 @@ def _materialize_by_random_seek(
     return saved_frame_nos
 
 
+# OpenCV로 타임스탬프 기준 프레임 1개 읽기
 def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float) -> np.ndarray | None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -2292,6 +2365,7 @@ def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float) -> np
         cap.release()
 
 
+# ffmpeg로 타임스탬프 기준 프레임 1개를 추출해 읽기(임시 JPG 경유)
 def _read_frame_by_timestamp_ffmpeg(input_path: str, timestamp_sec: float) -> np.ndarray | None:
     if shutil.which("ffmpeg") is None:
         return None
@@ -2333,6 +2407,8 @@ def _read_frame_by_timestamp_ffmpeg(input_path: str, timestamp_sec: float) -> np
         tmp_path.unlink(missing_ok=True)
 
 
+# 순번 기반 seek으로 프레임을 못 읽으면 여러 타임스탬프 오프셋으로 ffmpeg/OpenCV
+# 폴백을 시도해 프레임 복구
 def _materialize_frame_with_fallback(
     input_path: str,
     cap: cv2.VideoCapture,
@@ -2346,8 +2422,8 @@ def _materialize_frame_with_fallback(
     if timestamp_sec is None:
         return None
 
-    # Some VFR or slightly damaged MP4s report a frame count that OpenCV cannot
-    # seek to near the tail. In that case, timestamp-based extraction is safer.
+    # 일부 VFR이거나 약간 손상된 MP4는 OpenCV가 끝부분 근처로 seek할 수 없는
+    # 프레임 수를 보고함, 이런 경우 타임스탬프 기반 추출이 더 안전
     offsets = (0.0, -0.05, 0.05, -0.2, 0.2, -0.5, 0.5, -1.0)
     for offset in offsets:
         ts = max(0.0, timestamp_sec + offset)
@@ -2376,6 +2452,8 @@ def _materialize_frame_with_fallback(
     return None
 
 
+# metadata의 모든 frame_no를 원본 영상에서 실제 이미지로 저장, random seek → 순차
+# 디코딩 → 개별 폴백 순으로 시도
 def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list[dict]):
     for stale in out_path.glob("slide_*.jpg"):
         stale.unlink(missing_ok=True)
@@ -2472,13 +2550,14 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
         cap.release()
 
 
+# 각 최종 파일명이 metadata가 참조하는 프레임을 실제로 담고 있는지 검증
 def _verify_materialized_metadata_frames(input_path: str, out_path: Path, metadata: list[dict]) -> None:
-    """Ensure each final filename contains the frame referenced by metadata.
+    """각 최종 파일명이 metadata가 참조하는 프레임을 실제로 담고 있는지 검증
 
-    Final scene remapping can change filenames without changing frame numbers.
-    A stale or shifted materialize result is otherwise hard to detect because
-    metadata.json still looks internally consistent. Re-read sparse targets,
-    compare their pHash with the saved image, and repair mismatches in place.
+    최종 scene 재매핑은 프레임 번호는 그대로 두고 파일명만 바꿀 수 있다.
+    metadata.json이 내부적으로는 여전히 일관돼 보이기 때문에 오래되거나 어긋난
+    materialize 결과는 그렇지 않으면 발견하기 어렵다. sparse 타겟을 다시 읽어
+    phash를 저장된 이미지와 비교하고, 불일치는 그 자리에서 복구한다
     """
     if os.getenv("VLVERIFIER_VERIFY_FINAL_MATERIALIZE", "1") == "0":
         return
@@ -2531,6 +2610,7 @@ def _verify_materialized_metadata_frames(input_path: str, out_path: Path, metada
         checked,
         repaired,
     )
+# scene/annotation 프레임 metadata 레코드 생성
 def _meta(
     fname: str,
     scene_idx: int,
@@ -2587,7 +2667,7 @@ def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
 
 
 def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
-    """scene별 base 프레임을 clean final로 표시한다."""
+    """scene별 base 프레임을 clean final로 표시"""
     from collections import defaultdict
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
@@ -2604,18 +2684,18 @@ def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
     return metadata
 
 
+# 놓친 scene cut 이후에 캡처된 annotation을 다음 base로 재소속
 def reparent_annotations_to_next_base(
     metadata: list[dict],
     review_dir: Path,
 ) -> list[dict]:
-    """Move annotations captured after a missed scene cut to the next base.
+    """놓친 scene cut 이후 캡처된 annotation을 다음 base로 이동
 
-    Scene probing can occasionally keep a newly displayed slide in the prior
-    scene long enough for its first handwritten frames to be labeled as that
-    scene's annotations.  Compare each annotation with its current and next
-    base; only a large, multi-metric improvement toward the next base is
-    allowed to change ownership.  This prevents a normal handwritten frame
-    from being moved merely because the next slide shares a template.
+    scene probing이 새로 표시된 슬라이드를 이전 scene에 너무 오래 남겨두어,
+    그 첫 필기 프레임이 이전 scene의 annotation으로 라벨링되는 경우가 있다.
+    각 annotation을 현재/다음 base와 비교해, 다음 base 쪽으로 크고 다중 지표에서
+    개선되는 경우에만 소속 변경을 허용한다. 이렇게 하면 다음 슬라이드가 같은
+    템플릿을 쓴다는 이유만으로 정상적인 필기 프레임이 옮겨지는 것을 방지한다
     """
     if os.getenv("VLVERIFIER_REPARENT_MISSED_ANNOTATIONS", "1").strip().lower() in {
         "0", "false", "no", "off",
@@ -2645,11 +2725,13 @@ def reparent_annotations_to_next_base(
 
     image_cache: dict[str, np.ndarray | None] = {}
 
+    # 이미지 로드 결과를 캐싱해 반환
     def load_image(filename: str) -> np.ndarray | None:
         if filename not in image_cache:
             image_cache[filename] = cv2.imread(str(review_dir / filename))
         return image_cache[filename]
 
+    # 두 이미지의 phash 거리/정규화 mse/edge 겹침을 한 번에 계산
     def metrics(left: np.ndarray, right: np.ndarray) -> tuple[float, float, float]:
         if left.shape[:2] != right.shape[:2]:
             right = cv2.resize(right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA)
@@ -2719,11 +2801,12 @@ def reparent_annotations_to_next_base(
     return metadata
 
 
+# 후보 생성 후 설정에 따라 선택적으로 LocalVLM 검토 실행
 def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dict]:
-    """Optionally run LocalVLM review after candidate generation.
+    """후보 생성 후 선택적으로 LocalVLM 검토 실행
 
-    VLVERIFIER_VLM_ENABLED=1 writes llm_review_results.json.
-    VLVERIFIER_VLM_APPLY=1 additionally applies confident decisions to metadata.
+    VLVERIFIER_VLM_ENABLED=1이면 llm_review_results.json을 기록한다.
+    VLVERIFIER_VLM_APPLY=1이면 확신도 높은 판정을 metadata에 추가로 적용한다
     """
     try:
         from .local_vlm import (
@@ -2756,6 +2839,7 @@ def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dic
     return metadata
 
 
+# 선택적 scene index 값을 index_map으로 재매핑, 없으면 None 유지
 def _remap_optional_scene_index(value, index_map: dict[int, int]):
     if value is None:
         return None
@@ -2765,6 +2849,7 @@ def _remap_optional_scene_index(value, index_map: dict[int, int]):
         return value
 
 
+# scene index 목록을 index_map으로 재매핑, 중복 없이 반환
 def _remap_scene_index_list(values, index_map: dict[int, int]) -> list[int]:
     remapped: list[int] = []
     for value in values or []:
@@ -2777,6 +2862,7 @@ def _remap_scene_index_list(values, index_map: dict[int, int]) -> list[int]:
     return remapped
 
 
+# 최종 scene index와 캡처 유형(base/build/annotation/video)에 맞는 파일명 생성
 def _filename_for_final_scene(item: dict, scene_index: int) -> str:
     scene_type = item.get("scene_type", "slide")
     capture_type = item.get("capture_type", "base")
@@ -2795,18 +2881,18 @@ def _filename_for_final_scene(item: dict, scene_index: int) -> str:
     return f"scene_{scene_index:03d}_base.jpg"
 
 
+# VLM이 같은 슬라이드 build로 승인한 인접 scene들을 물리적으로 하나로 collapse
 def collapse_contiguous_same_slide_scenes(
     metadata: list[dict],
     review_dir: Path | None = None,
 ) -> list[dict]:
-    """Collapse adjacent scenes that VLM accepted as the same slide build.
+    """VLM이 같은 슬라이드 build로 승인한 인접 scene들을 collapse
 
-    The first scene in a contiguous same-slide run remains the scene base.
-    Annotation frames from later scenes are moved into that first scene and
-    renumbered, so final filenames become scene_XXX_annot_01..N. A clean base
-    that appears after all handwriting was erased is omitted, preserving the
-    last visible annotation as the final state. Non-adjacent revisits are
-    intentionally left as separate scenes.
+    연속된 same-slide 구간의 첫 scene이 scene base로 남는다. 이후 scene의
+    annotation 프레임은 그 첫 scene으로 옮겨져 재번호가 매겨지므로, 최종
+    파일명은 scene_XXX_annot_01..N이 된다. 모든 필기가 지워진 뒤 나타나는
+    깨끗한 base는 생략되어 마지막으로 보인 annotation이 최종 상태로 유지된다.
+    비인접 재방문은 의도적으로 별도 scene으로 남긴다
     """
     if not metadata:
         return metadata
@@ -2817,12 +2903,14 @@ def collapse_contiguous_same_slide_scenes(
 
     parent = {idx: idx for idx in scenes}
 
+    # union-find find 연산(경로 압축 포함)
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    # 인접한 scene 쌍만 union-find union 연산
     def union(a: int, b: int) -> None:
         if a not in parent or b not in parent or abs(a - b) != 1:
             return
@@ -2837,6 +2925,7 @@ def collapse_contiguous_same_slide_scenes(
     approved_annotation_pairs: set[tuple[int, int]] = set()
     veto_pairs: set[tuple[int, int]] = set()
 
+    # VLM 판정에서 유효한(parent에 존재하는) scene index만 추출
     def _decision_scene_indices(decision: dict) -> list[int]:
         indices: list[int] = []
         for value in decision.get("scene_indices") or []:
@@ -2891,17 +2980,16 @@ def collapse_contiguous_same_slide_scenes(
     build_promoted_scenes: set[int] = set()
     annotation_promoted_scenes: set[int] = set()
     for members in groups.values():
-        # Collapse only a continuous run; any accidental non-contiguous members
-        # stay untouched rather than merging separated revisits.
+        # 연속된 구간만 collapse, 우연히 비연속인 멤버는 분리된 재방문을
+        # 병합하지 않고 그대로 둠
         ordered = sorted(members)
         if any(b - a != 1 for a, b in zip(ordered, ordered[1:])):
             continue
         rep = ordered[0]
         for idx in ordered:
             representative_by_scene[idx] = rep
-        # Only a scene connected to the representative through approved build
-        # edges is promoted to an annotation. Duplicate-only edges still drop
-        # the later base as before.
+        # 승인된 build edge로 대표 scene과 연결된 scene만 annotation으로 승격,
+        # duplicate-only edge는 이전과 마찬가지로 이후 base를 그대로 드롭
         for left, right in zip(ordered, ordered[1:]):
             pair = (left, right)
             if pair in approved_build_pairs:
@@ -2912,10 +3000,9 @@ def collapse_contiguous_same_slide_scenes(
     if not representative_by_scene:
         return metadata
 
-    # A presenter can erase all handwriting and briefly return to the clean
-    # slide before moving on. Compare the later base to the group's original
-    # base: it is a reset only when it is substantially closer than the last
-    # visible annotation. Later annotations remain intact.
+    # 발표자가 모든 필기를 지우고 넘어가기 전 잠깐 깨끗한 슬라이드로 돌아올 수
+    # 있음, 이후 base를 그룹의 원본 base와 비교해 마지막으로 보인 annotation보다
+    # 상당히 가까울 때만 reset으로 판정, 이후의 annotation들은 그대로 유지
     clear_reset_base_scenes: set[int] = set()
     if review_dir is not None:
         from collections import defaultdict
@@ -2929,6 +3016,7 @@ def collapse_contiguous_same_slide_scenes(
 
         image_cache: dict[str, np.ndarray | None] = {}
 
+        # review 이미지를 캐싱해 로드
         def review_image(item: dict | None) -> np.ndarray | None:
             if item is None or not item.get("filename"):
                 return None
@@ -2937,6 +3025,7 @@ def collapse_contiguous_same_slide_scenes(
                 image_cache[filename] = cv2.imread(str(review_dir / filename))
             return image_cache[filename]
 
+        # content 영역 기준 두 이미지의 phash 거리/정규화 mse 계산
         def image_distance(left: np.ndarray, right: np.ndarray) -> tuple[int, float]:
             if left.shape[:2] != right.shape[:2]:
                 right = cv2.resize(right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA)
@@ -2972,10 +3061,9 @@ def collapse_contiguous_same_slide_scenes(
                     key=lambda x: (float(x.get("timestamp_sec", 0.0) or 0.0), int(x.get("frame_no", 0) or 0)),
                 )
                 right_base = next((x for x in right_items if x.get("capture_type") == "base"), None)
-                # A VLM may call the clean, post-erase frame either an
-                # annotation or a build.  The visual reset test is
-                # independent of that label: never promote a return to an
-                # earlier clean slide state as either capture type.
+                # VLM은 지운 뒤 깨끗해진 프레임을 annotation 또는 build 중 무엇으로든
+                # 부를 수 있음, 시각적 reset 판정은 그 라벨과 무관 — 이전의 깨끗한
+                # 슬라이드 상태로 돌아간 것을 어느 캡처 유형으로도 승격시키지 않음
                 if (left, right) in approved_pairs and previous_annotation is not None and right_base is not None:
                     previous_image = review_image(previous_annotation)
                     reset_image = review_image(right_base)
@@ -2986,11 +3074,10 @@ def collapse_contiguous_same_slide_scenes(
                             previous_hash >= 8
                             and reset_hash <= 12
                             and reset_mse <= 0.025
-                            # normalized_mse is typically in the 0.001~0.01
-                            # range for pen strokes.  An absolute 0.012 gap
-                            # therefore never recognized a real erase.  The
-                            # later base must instead be materially closer to
-                            # the clean origin than the preceding annotation.
+                            # normalized_mse는 펜 필기 기준 보통 0.001~0.01 범위,
+                            # 그래서 절대값 0.012 격차로는 실제 지우기를 인식하지
+                            # 못함. 대신 이후 base가 이전 annotation보다 원본
+                            # 깨끗한 슬라이드에 실질적으로 더 가까워야 함
                             and previous_mse >= 0.001
                             and reset_mse <= previous_mse * 0.5
                         ):
@@ -3137,10 +3224,10 @@ def collapse_contiguous_same_slide_scenes(
             item["scene_annotation_start_index"] = 1 if annots else 0
             item["scene_annotation_end_index"] = len(annots)
 
-    # After physically collapsing scenes, relation fields must describe the
-    # materialized scene set, not the provisional VLM grouping. Leaving old
-    # duplicate/same-slide links here lets refresh_slide_group_relations()
-    # reconnect non-contiguous bases after remap.
+    # scene을 물리적으로 collapse한 뒤, relation 필드는 잠정 VLM 그룹핑이 아니라
+    # materialize된 scene 집합을 서술해야 함. 여기 옛 duplicate/same-slide 링크를
+    # 남겨두면 refresh_slide_group_relations()가 remap 이후 비연속 base를 다시
+    # 연결시켜 버림
     for item in collapsed:
         try:
             idx = int(item["scene_index"])
@@ -3185,13 +3272,13 @@ def collapse_contiguous_same_slide_scenes(
     return collapsed
 
 
+# 일시적으로 나타난 슬라이드를 제거하고, 새로 인접하게 된 scene들의 번호를 연속으로 재부여
 def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dict]:
-    """Remove transient slides and make the newly adjacent scenes contiguous.
+    """일시적인 슬라이드를 제거하고 새로 인접한 scene을 연속 번호로 정리
 
-    A short A -> B -> A interruption must become A -> A *before* OCR/VLM
-    candidate generation.  Keeping the original IDs after removing B leaves
-    A(scene_008) and A(scene_010) numerically non-adjacent, which incorrectly
-    bypasses chronological merge/collapse handling.
+    짧은 A -> B -> A 중단은 OCR/VLM 후보 생성 *이전에* A -> A가 되어야 한다.
+    B를 제거한 뒤 원래 ID를 그대로 두면 A(scene_008)와 A(scene_010)가 숫자상
+    비인접이 되어, 시간순 병합/collapse 처리를 잘못 건너뛰게 된다
     """
     from collections import defaultdict
 
@@ -3254,8 +3341,8 @@ def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dic
         new_idx = index_map.get(old_idx)
         if new_idx is None:
             continue
-        # source_scene_index remains the Step 2 ID. add_transition_review_candidates
-        # uses it to map transition clusters onto this compacted timeline.
+        # source_scene_index는 Step 2 ID를 그대로 유지, add_transition_review_candidates가
+        # 이를 사용해 transition cluster를 이 압축된 타임라인에 매핑
         item.setdefault("source_scene_index", old_idx)
         item["pre_short_lived_scene_index"] = old_idx
         item["scene_index"] = new_idx
@@ -3269,19 +3356,22 @@ def drop_short_lived_slide_scenes(metadata: list[dict], cfg: Config) -> list[dic
     return survivors
 
 
+# scene ID가 압축된 이후 same-slide 관계 필드 재계산
 def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
-    """Recompute same-slide relation fields after scene IDs are compacted."""
+    """scene ID 압축 이후 same-slide 관계 필드 재계산"""
     from collections import defaultdict
 
     scenes = sorted({int(item["scene_index"]) for item in metadata if item.get("scene_index") is not None})
     parent = {idx: idx for idx in scenes}
 
+    # union-find find 연산(경로 압축 포함)
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    # union-find union 연산
     def union(a: int, b: int):
         if a not in parent or b not in parent:
             return
@@ -3364,14 +3454,14 @@ def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
     return metadata
 
 
+# 최종 materialize 전에 남은 timeline scene을 압축하고 파일명을 재작성
 def remap_metadata_for_final_materialize(metadata: list[dict]) -> list[dict]:
-    """Compact surviving timeline scenes and rewrite filenames before final materialize.
+    """최종 materialize 이전에 남은 timeline scene을 압축하고 파일명 재작성
 
-    LocalVLM review runs against provisional images. After its decisions are
-    applied, dropped transition scenes can leave gaps such as scene 1, 3. The
-    final artifact should instead contain continuous scene indices and matching
-    filenames, so this remaps metadata before reading final frames from the
-    original video again.
+    LocalVLM 검토는 잠정 이미지를 대상으로 실행된다. 그 판정을 적용한 뒤 드롭된
+    transition scene은 scene 1, 3 같은 공백을 남길 수 있다. 최종 산출물은
+    연속된 scene index와 그에 맞는 파일명을 가져야 하므로, 원본 영상에서 최종
+    프레임을 다시 읽기 전에 metadata를 여기서 재매핑한다
     """
     if not metadata:
         return metadata
@@ -3453,8 +3543,9 @@ def remap_metadata_for_final_materialize(metadata: list[dict]) -> list[dict]:
     return refresh_slide_group_relations(remapped)
 
 
+# transition scene 드롭 이후 scene/slide 시간 구간 갱신
 def refresh_scene_time_ranges(metadata: list[dict], video_duration: float) -> list[dict]:
-    """Refresh scene/slide time ranges after transition scenes are dropped."""
+    """transition scene 드롭 이후 scene/slide 시간 구간 갱신"""
     from collections import defaultdict
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
@@ -3492,8 +3583,9 @@ def refresh_scene_time_ranges(metadata: list[dict], video_duration: float) -> li
     return metadata
 
 
+# LocalVLM 디버그 산출물을 최종 슬라이드 출력 옆에 복사 보관
 def copy_local_vlm_review_artifacts(review_dir: Path, out_path: Path) -> None:
-    """Keep LocalVLM debug artifacts next to the final slides output."""
+    """LocalVLM 디버그 산출물을 최종 슬라이드 출력 옆에 보관"""
     for filename in (
         "llm_review_candidates.json",
         "llm_review_results.json",
@@ -3508,13 +3600,13 @@ def copy_local_vlm_review_artifacts(review_dir: Path, out_path: Path) -> None:
             dst.unlink(missing_ok=True)
 
 
+# Step 2의 빠른 전환 cluster를 LocalVLM 검토 후보로 병합
 def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata: list[dict]) -> None:
-    """Merge Step 2 rapid-transition clusters into LocalVLM review candidates.
+    """Step 2 빠른 전환 cluster를 LocalVLM 검토 후보로 병합
 
-    Step 2 keeps all rapid cluster bases now. This converts its source
-    scene_index values into the final materialized scene_index values so the
-    VLM can judge [previous, middle, next] base images before anything is
-    dropped from metadata.
+    Step 2는 이제 빠른 cluster의 모든 base를 유지한다. 이 함수는 그 소스
+    scene_index 값을 최종 materialize된 scene_index 값으로 변환해, metadata에서
+    아무것도 드롭되기 전에 VLM이 [이전, 중간, 다음] base 이미지를 판단할 수 있게 한다
     """
     candidates_path = out_path / "llm_review_candidates.json"
     if not candidates_path.exists() or not scenes_path.exists():
@@ -3605,9 +3697,9 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
             added += 1
             rapid_cluster_added += 1
 
-    # A whiteboard/editor frame can last much longer than the rapid-transition
-    # probe window. Detect the general [matching outer slides, unlike middle]
-    # sandwich so LocalVLM can drop only the middle and reconnect the endpoints.
+    # 화이트보드/에디터 프레임은 빠른 전환 probe 윈도우보다 훨씬 오래 지속될 수
+    # 있음, 일반적인 [양 끝 슬라이드는 일치, 중간은 다름] 샌드위치를 감지해
+    # LocalVLM이 중간만 드롭하고 양 끝을 다시 연결할 수 있게 함
     timeline_bases = sorted(
         (
             item for item in metadata
@@ -3620,6 +3712,7 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     )
     feature_cache: dict[int, dict] = {}
 
+    # scene의 duplicate feature를 캐싱해 조회
     def scene_feature(scene_index: int) -> dict | None:
         cached = feature_cache.get(scene_index)
         if cached is not None:
@@ -3695,13 +3788,14 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     )
 
 
+# LocalVLM에 보낼 시각 입력을 후보 유형별로 최소화
 def limit_vlm_review_candidate_images(candidate: dict) -> dict:
-    """Keep LocalVLM visual inputs small and type-specific.
+    """LocalVLM 시각 입력을 후보 유형에 맞게 작고 특화되게 유지
 
-    - transition_noise: exactly the local [previous, middle, next] context.
-    - same_slide_duplicate: at most 3 images, preserving broad context if a
-      future grouped candidate contains more than pairwise inputs.
-    - same_slide_build: previous and completed/base candidate only.
+    - transition_noise: 정확히 지역 [이전, 중간, 다음] 문맥만
+    - same_slide_duplicate: 최대 3개 이미지, 향후 그룹화된 후보가 pairwise 입력보다
+      많은 경우를 대비해 넓은 문맥을 보존
+    - same_slide_build: 이전 상태와 완성/base 후보만
     """
     candidate = dict(candidate)
     candidate_type = candidate.get("candidate_type")
@@ -3764,6 +3858,7 @@ def limit_vlm_review_candidate_images(candidate: dict) -> dict:
     return candidate
 
 
+# scene 그룹별 시작/끝 scene index를 조회할 수 있는 맵 생성
 def _scene_group_boundary_maps(group_of: dict[int, set[int]]) -> tuple[dict[int, int], dict[int, int]]:
     start_by_scene: dict[int, int] = {}
     end_by_scene: dict[int, int] = {}
@@ -3779,6 +3874,7 @@ def _scene_group_boundary_maps(group_of: dict[int, set[int]]) -> tuple[dict[int,
     return start_by_scene, end_by_scene
 
 
+# scene의 경계 대표 파일명 조회(prefer="previous"면 annotation 우선, 아니면 base 우선)
 def _scene_boundary_filename(scene_index: int, groups: dict[int, list[dict]], *, prefer: str) -> str | None:
     rows = groups.get(scene_index, [])
     if prefer == "previous":
@@ -3804,6 +3900,7 @@ def _scene_boundary_filename(scene_index: int, groups: dict[int, list[dict]], *,
     return None
 
 
+# 후보의 scene_indices를 provisional 그룹의 시작/끝 boundary scene으로 재작성
 def _rewrite_candidate_to_block_boundary(
     candidate: dict,
     *,
@@ -3812,11 +3909,10 @@ def _rewrite_candidate_to_block_boundary(
     groups: dict[int, list[dict]],
 ) -> dict | None:
     candidate_type = candidate.get("candidate_type")
-    # Adjacent build/boundary candidates must retain their original
-    # chronological pair. Rewriting them through provisional duplicate
-    # groups can skip a base (for example 8 -> 9 becoming 8 -> 10) before
-    # LocalVLM sees it. Only non-adjacent duplicate candidates need boundary
-    # normalization here.
+    # 인접한 build/boundary 후보는 원래의 시간순 쌍을 그대로 유지해야 함,
+    # 잠정 duplicate 그룹으로 재작성하면 LocalVLM이 보기 전에 base를 건너뛸 수
+    # 있음(예: 8 -> 9가 8 -> 10이 됨). 여기서 boundary 정규화가 필요한 건
+    # 비인접 duplicate 후보뿐
     if candidate_type != "same_slide_duplicate":
         return dict(candidate)
 
@@ -3866,6 +3962,7 @@ def _duplicate_parallel_candidate_score(candidate: dict) -> tuple:
     )
 
 
+# 병렬 duplicate 비교의 pair 1개 워커, prefilter 통과 시에만 정밀 판정 실행
 def _duplicate_parallel_pair_worker(args: tuple) -> dict:
     i, j, la, lb, idx_a, idx_b, rep_a, rep_b, cfg = args
     should_compare, prefilter_metrics = duplicate_pair_prefilter(rep_a, rep_b, cfg)
@@ -3899,11 +3996,10 @@ def _duplicate_parallel_pair_worker(args: tuple) -> dict:
 
 
 def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
-    # Parallel Step 4A visual duplicate grouping.
+    # Step 4A 시각적 duplicate 그룹핑을 병렬화
     #
-    # This replaces only the slow all-pairs duplicate comparison with a threaded
-    # implementation. The old implementation is preserved as
-    # mark_visual_duplicates_sequential() and is used automatically on failure.
+    # 느린 all-pairs duplicate 비교만 스레드 기반 구현으로 교체함, 기존 구현은
+    # mark_visual_duplicates_sequential()로 보존되어 실패 시 자동으로 사용됨
 
     if os.getenv("VLVERIFIER_DUPLICATE_PARALLEL", "1") == "0":
         return mark_visual_duplicates_sequential(metadata, out_path, cfg)
@@ -3923,6 +4019,7 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     try:
         cache_dir = out_path.parent / "sample_cache"
 
+        # metadata 항목의 person mask 파일 로드
         def _load_metadata_person_mask(item: dict) -> np.ndarray | None:
             filename = item.get("person_mask_filename")
             if not filename:
@@ -3936,6 +4033,7 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 log.warning("  [중복 감지] person mask 로드 실패: %s", path, exc_info=True)
                 return None
 
+        # metadata 항목의 인물 등장 비율 조회, presence ratio가 없으면 mask 파일에서 계산
         def _metadata_presence_ratio(item: dict | None) -> float:
             if not item:
                 return 0.0
@@ -3992,17 +4090,17 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 log.warning("  [중복 감지] 이미지 로드 실패: %s", fname)
         feature_elapsed = time.perf_counter() - feature_started_at
 
-        # Non-adjacent duplicate discovery needs one stable representative per
-        # scene.  Keeping both base and final annotation here turns N scenes
-        # into roughly 2N representatives and therefore about four times as
-        # many all-pairs comparisons.  The annotation endpoint is still used
-        # below for every chronological boundary (last annot/build -> next
-        # base), where it is semantically required.
+        # 비인접 duplicate 탐색은 scene당 대표 하나만 있으면 됨, base와 최종
+        # annotation을 둘 다 유지하면 N개 scene이 대략 2N개 대표가 되어 all-pairs
+        # 비교가 약 4배로 늘어남. annotation 끝점은 여전히 아래의 모든 시간순
+        # boundary(마지막 annot/build -> 다음 base)에서 의미상 필요해 사용됨
         labels = sorted(label for label in representatives if label.startswith("base"))
         duplicate_map: dict[int, set[int]] = defaultdict(set)
         auto_confirmed_scene_pairs: set[tuple[int, int]] = set()
         review_candidates_by_key: dict[tuple[str, int, int], dict] = {}
 
+        # 같은 키의 review 후보를 추가, 이미 자동 확정된 쌍은 기본적으로 건너뜀,
+        # 더 나은 점수의 후보로 교체 가능
         def _add_review_candidate(candidate: dict, allow_auto_confirmed: bool = False):
             scene_a, scene_b = sorted(candidate["scene_indices"])
             if not allow_auto_confirmed and (scene_a, scene_b) in auto_confirmed_scene_pairs:
@@ -4012,9 +4110,11 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             if previous is None or _duplicate_parallel_candidate_score(candidate) < _duplicate_parallel_candidate_score(previous):
                 review_candidates_by_key[key] = candidate
 
+        # 라벨이 base(annotation이 아닌) 항목인지 확인
         def _is_base_label(label: str) -> bool:
             return label.startswith("base")
 
+        # 강한 base-base 매치를 metadata에 자동 반영할지 판정
         def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
             if not (_is_base_label(label_a) and _is_base_label(label_b)):
                 return False
@@ -4197,12 +4297,11 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 "metrics": boundary_metrics,
                 "base_metrics": base_metrics,
             })
-            # Every adjacent base boundary must remain reviewable.  A visual
-            # duplicate auto-confirmation is not sufficient here: the next
-            # base may be the last state of the same chronological slide, and
-            # OCR/VLM still needs to distinguish annotation/build from a new
-            # slide.  Skipping this pair was the reason boundaries such as
-            # scene 19 -> 20 never reached LocalVLM.
+            # 모든 인접 base boundary는 검토 가능한 상태로 남아야 함, 시각적
+            # duplicate 자동 확정만으로는 부족함 — 다음 base가 같은 시간순
+            # 슬라이드의 마지막 상태일 수 있고, OCR/VLM은 여전히 annotation/build를
+            # 새 슬라이드와 구분해야 함. 이 쌍을 건너뛴 것이 scene 19 -> 20 같은
+            # boundary가 LocalVLM에 도달하지 못한 원인이었음
             if boundary_is_build:
                 build_count += 1
             review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
@@ -4220,12 +4319,14 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
 
         provisional_parent = {idx: idx for idx in groups.keys()}
 
+        # 임시 union-find find 연산(경로 압축 포함)
         def provisional_find(x: int) -> int:
             while provisional_parent[x] != x:
                 provisional_parent[x] = provisional_parent[provisional_parent[x]]
                 x = provisional_parent[x]
             return x
 
+        # 임시 union-find union 연산
         def provisional_union(x: int, y: int) -> None:
             if x not in provisional_parent or y not in provisional_parent:
                 return
@@ -4241,10 +4342,9 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         for idx in groups.keys():
             provisional_groups[provisional_find(idx)].add(idx)
 
-        # Non-adjacent boundary candidates are no longer generated here.
-        # The pipeline now keeps the chronological chain and only compares
-        # adjacent boundaries, so a merged chain ending at 29 will advance
-        # to 30 rather than emitting 25 -> 31 style jumps.
+        # 비인접 boundary 후보는 더 이상 여기서 생성하지 않음, 파이프라인은 이제
+        # 시간순 체인을 유지하고 인접 boundary만 비교하므로, 29에서 끝나는 병합
+        # 체인은 25 -> 31 같은 점프 대신 30으로 진행
         boundary_elapsed = 0.0
         boundary_count = 0
 
@@ -4312,12 +4412,14 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         all_indices = list(groups.keys())
         parent = {idx: idx for idx in all_indices}
 
+        # union-find find 연산(경로 압축 포함)
         def find(x):
             while parent[x] != x:
                 parent[x] = parent[parent[x]]
                 x = parent[x]
             return x
 
+        # union-find union 연산
         def union(x, y):
             px, py = find(x), find(y)
             if px != py:
@@ -4355,9 +4457,8 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 family_prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
                 family_next_visit[idx] = ordered[pos] if pos < len(ordered) else None
 
-        # Non-contiguous matches are revisits, not chronological merges. Keep
-        # their concise status visible without enabling the extremely verbose
-        # per-pair comparison log.
+        # 비연속 매치는 시간순 병합이 아니라 재방문, 극도로 장황한 pair별 비교
+        # 로그를 켜지 않고도 그 상태를 간결하게 볼 수 있도록 유지
         revisit_groups = [
             sorted(members)
             for members in dup_groups.values()
@@ -4459,6 +4560,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
 
     cache_dir = out_path.parent / "sample_cache"
 
+    # metadata 항목의 person mask 파일 로드
     def _load_metadata_person_mask(item: dict) -> np.ndarray | None:
         filename = item.get("person_mask_filename")
         if not filename:
@@ -4472,6 +4574,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
             log.warning("  [중복 감지] person mask 로드 실패: %s", path, exc_info=True)
             return None
 
+    # metadata 항목의 인물 등장 비율 조회, presence ratio가 없으면 mask 파일에서 계산
     def _metadata_presence_ratio(item: dict | None) -> float:
         if not item:
             return 0.0
@@ -4515,7 +4618,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
         if annot_list:
             pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"], annot_list[-1])
 
-    # full frame은 보조로, content region은 실제 장표 본문 identity 판정에 사용한다.
+    # full frame은 보조로, content region은 실제 장표 본문 identity 판정에 사용
     representatives: dict[str, dict] = {}
     for label, (_, fname, item) in pool.items():
         img = cv2.imread(str(out_path / fname))
@@ -4531,6 +4634,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
     auto_confirmed_scene_pairs: set[tuple[int, int]] = set()
     review_candidates_by_key: dict[tuple[str, int, int], dict] = {}
 
+    # 같은 (유형, scene_a, scene_b) 키의 후보 중 더 나은 것을 고르기 위한 정렬 키 계산
     def _candidate_score(candidate: dict) -> tuple:
         metrics = candidate.get("metrics", {})
         if candidate.get("candidate_type") == "same_slide_duplicate":
@@ -4545,6 +4649,8 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
             int(metrics.get("content_phash", 9999)),
         )
 
+    # 같은 키의 review 후보를 추가, 이미 자동 확정된 쌍은 기본적으로 건너뜀,
+    # 더 나은 점수의 후보로 교체 가능
     def _add_review_candidate(candidate: dict, allow_auto_confirmed: bool = False):
         scene_a, scene_b = sorted(candidate["scene_indices"])
         if not allow_auto_confirmed and (scene_a, scene_b) in auto_confirmed_scene_pairs:
@@ -4554,16 +4660,17 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
         if previous is None or _candidate_score(candidate) < _candidate_score(previous):
             review_candidates_by_key[key] = candidate
 
+    # 라벨이 base(annotation이 아닌) 항목인지 확인
     def _is_base_label(label: str) -> bool:
         return label.startswith("base")
 
+    # 강한 base-base 매치를 metadata에 자동 반영
     def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
-        """Reflect strong base-base matches into metadata.
+        """강한 base-base 매치를 metadata에 자동 반영
 
-        Annot-derived matches and looser content matches stay in the LocalVLM
-        queue. Base-base strict matches are allowed a little more motion/noise
-        because lecturer regions may be present before representative selection
-        chooses the least-occluded base.
+        annotation에서 파생된 매치와 느슨한 content 매치는 LocalVLM 대기열에
+        남는다. base-base strict 매치는 강사 영역이 대표 선정에서 가장 덜 가려진
+        base를 고르기 전에 존재할 수 있으므로 약간 더 많은 움직임/노이즈를 허용한다
         """
         if not (_is_base_label(label_a) and _is_base_label(label_b)):
             return False
@@ -4700,8 +4807,8 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
             base_representatives[idx_b],
             cfg,
         )
-        # Keep every adjacent base boundary for OCR/VLM review, including
-        # pairs that were also marked as visual duplicates.
+        # 시각적 duplicate로도 표시된 쌍을 포함해, 모든 인접 base boundary를
+        # OCR/VLM 검토 대상으로 유지
         review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
         review_candidates_by_key.pop(("same_slide_build", idx_a, idx_b), None)
         _add_review_candidate({
@@ -4807,12 +4914,14 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
     all_indices = list(groups.keys())
     parent = {idx: idx for idx in all_indices}
 
+    # union-find find 연산(경로 압축 포함)
     def find(x):
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    # union-find union 연산
     def union(x, y):
         px, py = find(x), find(y)
         if px != py:
@@ -4842,7 +4951,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
         for idx in members:
             canonical_by_scene[idx] = canonical
 
-    # 같은 slide family 내 scene 방문 순서도 함께 기록한다.
+    # 같은 slide family 내 scene 방문 순서도 함께 기록
     family_visit_order: dict[int, int] = {}
     family_prev_visit: dict[int, int | None] = {}
     family_next_visit: dict[int, int | None] = {}
@@ -4853,7 +4962,7 @@ def mark_visual_duplicates_sequential(metadata: list, out_path: Path, cfg: Confi
             family_prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
             family_next_visit[idx] = ordered[pos] if pos < len(ordered) else None
 
-    # duplicate_of는 "같은 슬라이드 계열의 다른 scene_index"를 뜻한다.
+    # duplicate_of는 "같은 슬라이드 계열의 다른 scene_index"를 뜻함
     for m in metadata:
         idx = m["scene_index"]
         members = sorted(group_of.get(idx, {idx}))
@@ -4954,6 +5063,7 @@ def finalize_scene_slide_metadata(metadata: list[dict]) -> list[dict]:
     return metadata
 
 
+# scene 시작 시각 순서에 따라 canonical slide index에 1부터 번호를 부여하는 조회표 생성
 def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
     from collections import defaultdict
 
@@ -4976,6 +5086,7 @@ def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
     return lookup
 
 
+# slide-scene 매핑을 타임라인과 상세 정보로 로그에 출력
 def log_scene_slide_summary(metadata: list[dict]):
     scene_slide_map = build_scene_slide_map(metadata)
     mappings = scene_slide_map.get("mappings", [])
@@ -5008,6 +5119,7 @@ def log_scene_slide_summary(metadata: list[dict]):
     log.info("────────────────────────────────────\n")
 
 
+# 초를 HH:MM:SS 문자열로 포맷
 def _fmt_hms(sec: float) -> str:
     total = max(0, int(round(float(sec or 0.0))))
     hours, remainder = divmod(total, 3600)
@@ -5015,6 +5127,7 @@ def _fmt_hms(sec: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+# scene별로 대응 slide 번호/타이밍/annotation 개수를 정리한 매핑 테이블 생성
 def build_scene_slide_map(metadata: list[dict]) -> dict:
     from collections import defaultdict
 
@@ -5081,6 +5194,7 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
     }
 
 
+# canonical slide 번호 기준으로 재방문 scene들을 묶어 annotation 목록을 정리한 결과 생성
 def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
     from collections import defaultdict
 

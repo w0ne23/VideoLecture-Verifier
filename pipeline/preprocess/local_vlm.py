@@ -1,9 +1,9 @@
 """
-Local VLM review for slide duplicate/build candidates.
+슬라이드 중복/build 후보에 대한 로컬 VLM 검토
 
-The VLM stage is intentionally optional. By default it writes review results
-without changing metadata, so CPU-only environments can test model quality
-before enabling automatic application.
+VLM 단계는 의도적으로 선택 사항, 기본값으로는 메타데이터를 바꾸지 않고
+검토 결과만 기록하므로, CPU 전용 환경에서도 자동 적용을 켜기 전에 모델 품질을
+먼저 테스트 가능
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ _OLLAMA_BASE_URL_LOCK = threading.Lock()
 _OLLAMA_BASE_URL_INDEX = 0
 
 
+# 로컬 VLM 응답 파싱/검증 실패 시 발생, 원본 응답과 콘텐츠를 함께 보관
 class LocalVLMResponseError(ValueError):
     def __init__(self, message: str, *, raw_response: dict[str, Any] | None = None, content: str = ""):
         super().__init__(message)
@@ -89,6 +90,7 @@ class LocalVLMResponseError(ValueError):
         self.content = content
 
 
+# 환경변수를 bool로 읽음
 def env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -96,6 +98,7 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# 환경변수를 float로 읽음
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -106,6 +109,7 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+# 환경변수를 int로 읽음
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -116,14 +120,17 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+# 로컬 VLM 검토 단계 활성화 여부 조회
 def local_vlm_enabled() -> bool:
     return env_bool("VLVERIFIER_VLM_ENABLED", False)
 
 
+# VLM 검토 결과를 메타데이터에 자동 반영할지 여부 조회
 def local_vlm_apply_enabled() -> bool:
     return env_bool("VLVERIFIER_VLM_APPLY", False)
 
 
+# VLM 검토 병렬 worker 수 조회, 후보 개수를 넘지 않도록 제한
 def local_vlm_worker_count(candidate_count: int) -> int:
     if candidate_count <= 1:
         return 1
@@ -131,35 +138,43 @@ def local_vlm_worker_count(candidate_count: int) -> int:
     return max(1, min(workers, candidate_count))
 
 
+# 배치당 최대 이미지 수 조회, timeline context 이미지 수 이상을 보장
 def local_vlm_batch_image_limit() -> int:
     timeline_images = local_vlm_timeline_context_images()
     return max(1, env_int("VLVERIFIER_VLM_BATCH_IMAGES", 10), timeline_images)
 
 
+# 배치 간 겹치는 이미지 수 조회
 def local_vlm_batch_overlap_images() -> int:
     return max(0, env_int("VLVERIFIER_VLM_BATCH_OVERLAP_IMAGES", 0))
 
 
+# 배치당 최대 후보 수 조회
 def local_vlm_batch_candidate_limit() -> int:
     return max(1, env_int("VLVERIFIER_VLM_BATCH_CANDIDATES", 5))
 
 
+# 타임라인 컨텍스트로 함께 제공할 이미지 수 조회
 def local_vlm_timeline_context_images() -> int:
     return max(0, env_int("VLVERIFIER_VLM_TIMELINE_CONTEXT_IMAGES", 10))
 
 
+# build 후보 자동 생성 활성화 여부 조회
 def local_vlm_auto_build_candidates_enabled() -> bool:
     return env_bool("VLVERIFIER_VLM_AUTO_BUILD_CANDIDATES", True)
 
 
+# 이미지 파일을 base64 문자열로 인코딩
 def _image_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+# VLM에 전달할 이미지 리사이즈 목표 너비 조회
 def _vlm_image_width() -> int:
     return max(0, env_int("VLVERIFIER_VLM_IMAGE_WIDTH", 768))
 
 
+# VLM 전송용으로 이미지를 목표 너비로 리사이즈 후 JPEG로 재인코딩
 def _image_b64_for_vlm(path: Path) -> str:
     width = _vlm_image_width()
     if width <= 0:
@@ -174,6 +189,7 @@ def _image_b64_for_vlm(path: Path) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+# 응답 텍스트에서 코드펜스를 제거하고 JSON 객체 파싱, 실패 시 중괄호 블록만 추출해 재시도
 def _extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
@@ -188,6 +204,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
+# Ollama 응답 body에서 message content 텍스트 추출
 def _response_content(body: dict[str, Any]) -> str:
     message = body.get("message", {})
     content = message.get("content", "") if isinstance(message, dict) else ""
@@ -212,6 +229,7 @@ def _response_content(body: dict[str, Any]) -> str:
     return ""
 
 
+# 후보의 scene_indices를 int 리스트로 파싱
 def _candidate_scene_indices(candidate: dict[str, Any]) -> list[int]:
     indices = []
     for value in candidate.get("scene_indices") or []:
@@ -222,11 +240,13 @@ def _candidate_scene_indices(candidate: dict[str, Any]) -> list[int]:
     return indices
 
 
+# 후보의 두 scene index가 연속(인접)한 쌍인지 확인
 def _is_adjacent_scene_pair(candidate: dict[str, Any]) -> bool:
     scenes = sorted(set(_candidate_scene_indices(candidate)))
     return len(scenes) == 2 and scenes[1] - scenes[0] == 1
 
 
+# same_slide 계열 후보 중 비인접 scene 쌍은 이번 검토에서 보류할지 판단
 def _should_defer_same_slide_candidate(candidate: dict[str, Any]) -> bool:
     candidate_type = str(candidate.get("candidate_type") or "")
     if candidate_type not in {"same_slide_build", "same_slide_duplicate"}:
@@ -237,6 +257,7 @@ def _should_defer_same_slide_candidate(candidate: dict[str, Any]) -> bool:
     return not _is_adjacent_scene_pair(candidate)
 
 
+# 보류된 후보를 기록용 dict로 변환
 def _deferred_candidate_record(candidate_index: int, candidate: dict[str, Any]) -> dict[str, Any]:
     scenes = sorted(set(_candidate_scene_indices(candidate)))
     return {
@@ -252,6 +273,7 @@ def _deferred_candidate_record(candidate_index: int, candidate: dict[str, Any]) 
     }
 
 
+# 인접 슬라이드 OCR 유사도 병합 임계값 조회
 def adjacent_ocr_similarity_threshold() -> float:
     return max(
         0.0,
@@ -262,6 +284,7 @@ def adjacent_ocr_similarity_threshold() -> float:
     )
 
 
+# OCR 유사도 비교 결과에 임계값을 적용해 merge/reject/uncertain/unavailable 판정 추가
 def _apply_ocr_threshold(comparison: dict[str, Any], threshold: float) -> dict[str, Any]:
     updated = dict(comparison)
     try:
@@ -285,16 +308,16 @@ def _apply_ocr_threshold(comparison: dict[str, Any], threshold: float) -> dict[s
     return updated
 
 
+# 후보 유형별로 VLM에 보여줄 이미지 파일명을 대표 위치만 골라 축소
 def _limited_candidate_filenames(candidate: dict[str, Any]) -> list[str]:
     filenames = list(candidate.get("filenames") or [])
     scene_indices = list(candidate.get("scene_indices") or [])
     candidate_type = str(candidate.get("candidate_type") or "")
 
-    # Build decisions are endpoint-only boundary decisions.  Supplying the
-    # base and annotation context for both scenes lets a VLM confuse a prior
-    # title/base image with the actual next base.  Always show exactly the
-    # prior terminal state and the next scene base (or the two supplied
-    # filenames when explicit endpoints are unavailable).
+    # build 판정은 endpoint만 보는 경계 판정, 두 scene 모두에 base/annotation
+    # context를 함께 주면 VLM이 이전 title/base 이미지와 실제 다음 base를 혼동할
+    # 수 있음, 항상 이전 최종 상태와 다음 scene의 base만 보여줌(명시적 endpoint가
+    # 없으면 제공된 두 filename 사용)
     if candidate_type == "same_slide_build":
         boundary_filenames = [
             candidate.get("previous_final_filename") or (filenames[0] if filenames else None),
@@ -345,6 +368,7 @@ def _limited_candidate_filenames(candidate: dict[str, Any]) -> list[str]:
     return [filenames[pos] for pos in positions]
 
 
+# metadata.json에서 base 캡처 프레임만 골라 타임라인 컨텍스트 행 목록 구성
 def _load_timeline_context(slides_dir: Path) -> list[dict[str, Any]]:
     metadata_path = slides_dir / "metadata.json"
     if not metadata_path.exists():
@@ -375,6 +399,7 @@ def _load_timeline_context(slides_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+# 후보의 scene index를 기준으로 앞뒤 반경을 넓혀가며 타임라인 컨텍스트 행을 limit개까지 선택
 def _timeline_rows_for_candidate(
     candidate: dict[str, Any],
     timeline_rows: list[dict[str, Any]],
@@ -418,6 +443,7 @@ def _timeline_rows_for_candidate(
     return [timeline_rows[pos] for pos in sorted(selected)]
 
 
+# 후보별로 타임라인 컨텍스트 행을 미리 계산해 candidate_index 기준 dict로 구성
 def _timeline_context_by_candidate(
     indexed_candidates: list[tuple[int, dict[str, Any]]],
     slides_dir: Path,
@@ -432,6 +458,7 @@ def _timeline_context_by_candidate(
     }
 
 
+# metadata.json 로드, 없거나 파싱 실패 시 빈 리스트
 def _load_local_vlm_metadata(slides_dir: Path) -> list[dict[str, Any]]:
     metadata_path = slides_dir / "metadata.json"
     if not metadata_path.exists():
@@ -443,6 +470,7 @@ def _load_local_vlm_metadata(slides_dir: Path) -> list[dict[str, Any]]:
     return metadata if isinstance(metadata, list) else []
 
 
+# 인접 scene 쌍을 OpenCV 기반 build 판정 알고리즘으로 자동 스캔해 VLM 검토용 build 후보 생성
 def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not local_vlm_auto_build_candidates_enabled():
         return [], {"enabled": False}
@@ -477,6 +505,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             continue
         groups.setdefault(scene_index, []).append(item)
 
+    # 항목의 person_mask 파일을 로드해 bool 배열로 반환
     def load_person_mask(item: dict[str, Any]):
         filename = item.get("person_mask_filename")
         if not filename:
@@ -521,6 +550,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
             mask=load_person_mask(base_item),
         )
 
+    # 두 scene의 base/최종 annotation 파일명을 중복 없이 모음
     def candidate_filenames(scene_a: int, scene_b: int) -> list[str]:
         filenames: list[str] = []
         for scene_index in (scene_a, scene_b):
@@ -529,6 +559,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
                     filenames.append(filename)
         return filenames
 
+    # 두 scene 상단 title 영역의 픽셀 차이/잉크 IoU를 계산해 agenda 텍스트 변경 감지에 사용
     def title_band_metrics(scene_a: int, scene_b: int) -> dict[str, Any]:
         path_a = slides_dir / str(base_pool.get(scene_a) or "")
         path_b = slides_dir / str(base_pool.get(scene_b) or "")
@@ -586,9 +617,8 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
                 "labels": [],
                 "filenames": candidate_filenames(scene_a, scene_b),
                 "previous_final_filename": final_annot_pool.get(scene_a) or base_pool.get(scene_a),
-                # The chronological boundary is compared to the next scene's
-                # base.  Its annotations belong to a later state and must not
-                # hide a clear/reset at the boundary.
+                # 시간순 경계는 다음 scene의 base와 비교, 그 annotation은 이후 상태에
+                # 속하므로 경계에서의 clear/reset을 가려서는 안 됨
                 "next_final_filename": base_pool.get(scene_b) or final_annot_pool.get(scene_b),
                 "reason": metrics.get("reason") or "adjacent_sequence_review",
                 "metrics": metrics,
@@ -642,6 +672,7 @@ def _generate_adjacent_build_candidates(slides_dir: Path) -> tuple[list[dict[str
     }
 
 
+# 자동 build 후보 생성이 켜져 있으면 same_slide_build 후보를 재생성해서 교체
 def _prepare_review_candidates(
     candidates_payload: dict[str, Any],
     slides_dir: Path,
@@ -669,6 +700,7 @@ def _prepare_review_candidates(
     }
 
 
+# 후보를 프롬프트에 보여줄 이미지 파일명 목록 구성, timeline context와 대표 이미지를 결합
 def _candidate_prompt_filenames(
     candidate_index: int,
     candidate: dict[str, Any],
@@ -688,6 +720,7 @@ def _candidate_prompt_filenames(
     return filenames
 
 
+# VLM 원시 응답을 검증/보정해 표준 결과 dict로 정규화, 알려진 오탐 패턴에 대해 override 적용
 def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     scene_indices = _candidate_scene_indices(candidate)
     context_scene_indices = _candidate_scene_indices({"scene_indices": candidate.get("context_scene_indices")})
@@ -727,9 +760,8 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
         "different_slide",
         "uncertain",
     }:
-        # OCR can hallucinate changes in book-cover text, handwriting, or
-        # screen overlays. When the actual pixels are effectively identical,
-        # do not let that OCR/VLM false negative split a chronological slide.
+        # OCR은 표지 텍스트, 손글씨, 화면 오버레이에서 변경을 잘못 인식할 수 있음,
+        # 실제 픽셀이 사실상 동일하면 그 OCR/VLM 오탐이 시간순 슬라이드를 나누지 않도록 함
         metrics = candidate.get("metrics") or {}
         try:
             edge_preserve = min(
@@ -808,6 +840,7 @@ def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[st
     }
 
 
+# 후보를 프롬프트에 넣을 수 있는 압축 dict로 변환, 이미지 라벨과 타임라인 정보 포함
 def _compact_candidate_for_prompt(
     candidate_index: int,
     candidate: dict[str, Any],
@@ -816,6 +849,7 @@ def _compact_candidate_for_prompt(
 ) -> dict[str, Any]:
     filenames = _limited_candidate_filenames(candidate)
 
+    # 파일명 패턴으로 이미지 역할(base/final_annotation/context) 분류
     def image_role(filename: str) -> str:
         if "_annot_" in filename:
             return "final_annotation"
@@ -853,6 +887,7 @@ def _compact_candidate_for_prompt(
     }
 
 
+# 이미지 파일들의 OCR 힌트 블록을 생성해 하나의 텍스트로 결합
 def _ocr_hint_block(image_filenames: list[str], slides_dir: Path) -> str:
     if not ocr_enabled():
         return ""
@@ -867,6 +902,7 @@ def _ocr_hint_block(image_filenames: list[str], slides_dir: Path) -> str:
     return "\n\n".join(blocks).strip()
 
 
+# 인접한 두 scene 경계의 OCR 비교용 파일명(이전 scene 최종 상태, 다음 scene base) 조회
 def _scene_boundary_ocr_filenames(
     candidate: dict[str, Any],
     slides_dir: Path,
@@ -900,6 +936,7 @@ def _scene_boundary_ocr_filenames(
     if next_scene - prev_scene != 1:
         return None, None
 
+    # 해당 scene의 base 캡처 파일명 조회
     def _base_filename(scene_index: int) -> str | None:
         for item in grouped.get(scene_index, []):
             if item.get("capture_type") == "base" and item.get("filename"):
@@ -908,6 +945,7 @@ def _scene_boundary_ocr_filenames(
                     return filename
         return None
 
+    # 해당 scene의 마지막 annotation/build 캡처 파일명 조회, 없으면 base로 대체
     def _last_annot_filename(scene_index: int) -> str | None:
         annots = [
             item for item in grouped.get(scene_index, [])
@@ -921,6 +959,8 @@ def _scene_boundary_ocr_filenames(
     return _last_annot_filename(prev_scene), _base_filename(next_scene)
 
 
+# OCR 유사도가 충분히 높은 same_slide 후보를 VLM 호출 없이 미리 병합 판정,
+# 실질적 시각 변화가 있으면 VLM 검토로 넘김
 def _ocr_prefilter_same_slide_candidate(
     candidate: dict[str, Any],
     slides_dir: Path,
@@ -986,11 +1026,9 @@ def _ocr_prefilter_same_slide_candidate(
         diagnostic["status"] = "not_prefiltered"
         return None, diagnostic
 
-    # OCR similarity is dominated by shared titles, section headings, and
-    # boilerplate.  It must not auto-merge a slide whose body was replaced by
-    # another slide with the same title/topic.  Large visual changes remain a
-    # LocalVLM decision, while ordinary handwriting-only boundaries still
-    # complete in the OCR fast path.
+    # OCR 유사도는 공통 제목, 섹션 헤딩, 상투적 문구에 좌우되기 쉬움, 같은 제목/주제를
+    # 가진 다른 슬라이드로 본문이 바뀐 경우를 자동 병합해서는 안 됨. 큰 시각적 변화는
+    # 여전히 LocalVLM 판정으로 넘기고, 일반적인 손글씨만의 경계는 OCR fast path에서 처리
     metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
     content_changed = float(metrics.get("content_changed", 0.0) or 0.0)
     content_mse = float(metrics.get("content_mse", 0.0) or 0.0)
@@ -1011,12 +1049,11 @@ def _ocr_prefilter_same_slide_candidate(
         diagnostic["reason"] = "high OCR similarity but substantive visual body change requires LocalVLM"
         return None, diagnostic
 
-    # OCR can establish text similarity but cannot distinguish a real printed
-    # build, temporary ink, and a duplicate base captured while a lecturer
-    # moves.  Auto-labeling a build candidate as an annotation promoted later
-    # base frames (including presenter-only differences) into fake annot JPGs.
-    # Keep OCR as the cheap candidate signal, then let the VLM choose the
-    # capture type for every same_slide_build boundary.
+    # OCR은 텍스트 유사도는 확인할 수 있지만, 실제 인쇄된 build, 일시적 잉크,
+    # 강사가 움직이는 동안 캡처된 중복 base를 구분하지 못함. build 후보를 자동으로
+    # annotation으로 라벨링하면 이후 base 프레임(발표자만 다른 경우 포함)이 가짜
+    # annot JPG로 승격됨. OCR은 저비용 후보 신호로만 유지하고, 모든 same_slide_build
+    # 경계의 캡처 유형은 VLM이 선택하도록 함
     if candidate_type == "same_slide_build":
         diagnostic["status"] = "review_required"
         diagnostic["reason"] = "OCR merge candidate requires LocalVLM build/annotation/duplicate labeling"
@@ -1048,6 +1085,7 @@ def _ocr_prefilter_same_slide_candidate(
     return decision, diagnostic
 
 
+# 배치 내 후보들을 하나의 VLM 프롬프트로 구성
 def _batch_prompt(
     batch_items: list[tuple[int, dict[str, Any]]],
     image_filenames: list[str],
@@ -1119,6 +1157,7 @@ def _batch_prompt(
     )
 
 
+# 후보들을 이미지 수/후보 수 제한에 맞춰 배치로 묶음, same_slide_build 후보는 항상 단독 배치
 def _pack_candidate_batches(
     indexed_candidates: list[tuple[int, dict[str, Any]]],
     *,
@@ -1131,10 +1170,12 @@ def _pack_candidate_batches(
     current_items: list[tuple[int, dict[str, Any]]] = []
     current_images: list[str] = []
 
+    # 현재 배치 이미지 목록에 파일명을 중복 없이 추가
     def add_image(filename: str) -> None:
         if filename and filename not in current_images:
             current_images.append(filename)
 
+    # 후보가 필요로 하는 이미지 중 현재 배치에 아직 없는 것만 반환
     def candidate_new_images(candidate_index: int, candidate: dict[str, Any]) -> list[str]:
         return [
             filename
@@ -1142,6 +1183,7 @@ def _pack_candidate_batches(
             if filename not in current_images
         ]
 
+    # 현재까지 쌓인 후보/이미지를 하나의 배치로 확정하고 초기화
     def flush() -> None:
         if current_items:
             batches.append({
@@ -1182,6 +1224,7 @@ def _pack_candidate_batches(
     return batches
 
 
+# 후보 1건 단독 검토용 VLM 프롬프트 생성
 def _prompt(candidate: dict[str, Any], ocr_hint_text: str = "") -> str:
     ocr_block = ""
     if str(ocr_hint_text or "").strip():
@@ -1229,11 +1272,13 @@ def _prompt(candidate: dict[str, Any], ocr_hint_text: str = "") -> str:
     )
 
 
+# Ollama 로컬 VLM 서버에 후보 이미지를 보내 검토 결과를 받아오는 provider
 class OllamaVLMProvider:
     def __init__(self):
         self.base_url = self._next_base_url()
         self.model = os.getenv("VLVERIFIER_OLLAMA_MODEL", "qwen3.5:9b")
 
+    # 환경변수에서 Ollama base URL 목록 조회, 콤마로 여러 서버 지정 가능
     @staticmethod
     def _base_urls() -> list[str]:
         raw = os.getenv("VLVERIFIER_OLLAMA_BASE_URLS") or os.getenv(
@@ -1243,6 +1288,7 @@ class OllamaVLMProvider:
         urls = [url.strip().rstrip("/") for url in raw.split(",") if url.strip()]
         return urls or ["http://host.docker.internal:11434"]
 
+    # 여러 base URL을 순환(round-robin)하며 다음 URL 선택
     @classmethod
     def _next_base_url(cls) -> str:
         global _OLLAMA_BASE_URL_INDEX
@@ -1304,6 +1350,7 @@ class OllamaVLMProvider:
             ) from exc
         return _normalize_result(candidate, raw)
 
+    # Ollama /api/chat 엔드포인트로 프롬프트+이미지를 보내 JSON 응답 파싱
     def _chat_json(self, prompt: str, image_filenames: list[str], slides_dir: Path) -> dict[str, Any]:
         images = []
         for filename in image_filenames:
@@ -1352,6 +1399,7 @@ class OllamaVLMProvider:
                 content=content,
             ) from exc
 
+    # 배치 전체를 한 번에 Ollama에 검토 요청, 응답에서 누락된 후보는 오류 목록으로 반환
     def review_batch(
         self,
         batch_items: list[tuple[int, dict[str, Any]]],
@@ -1400,6 +1448,7 @@ class OllamaVLMProvider:
 
 
 
+# OpenAI 호환 vision API 서버(vLLM 등)에 후보 이미지를 보내 검토 결과를 받아오는 provider
 class OpenAICompatibleVLMProvider:
     def __init__(self):
         self.base_url = os.getenv("VLVERIFIER_OPENAI_BASE_URL", "http://host.docker.internal:8000/v1").rstrip("/")
@@ -1409,9 +1458,10 @@ class OpenAICompatibleVLMProvider:
             os.getenv("VLVERIFIER_OLLAMA_MODEL", "google/diffusiongemma-26B-A4B-it"),
         )
 
+    # 이미지를 OpenAI 호환 image_url 콘텐츠 블록으로 변환
     @staticmethod
     def _image_content(path: Path) -> dict[str, Any]:
-        # OpenAI-compatible vision servers generally accept base64 data URLs.
+        # OpenAI 호환 vision 서버는 일반적으로 base64 data URL을 지원
         return {
             "type": "image_url",
             "image_url": {
@@ -1419,6 +1469,7 @@ class OpenAICompatibleVLMProvider:
             },
         }
 
+    # OpenAI 호환 /chat/completions 엔드포인트로 프롬프트+이미지를 보내 JSON 응답 파싱
     def _chat_json(self, prompt: str, image_filenames: list[str], slides_dir: Path) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
         for filename in image_filenames:
@@ -1428,8 +1479,8 @@ class OpenAICompatibleVLMProvider:
         if not content:
             raise FileNotFoundError(f"batch images not found: {image_filenames}")
 
-        # Put images before text. DiffusionGemma's model card recommends image
-        # content before text for multimodal inputs.
+        # 텍스트보다 이미지를 먼저 배치, DiffusionGemma 모델 카드는 멀티모달 입력에서
+        # 텍스트보다 이미지 콘텐츠를 먼저 두도록 권장
         content.append({"type": "text", "text": prompt})
 
         payload: dict[str, Any] = {
@@ -1437,9 +1488,8 @@ class OpenAICompatibleVLMProvider:
             "messages": [{"role": "user", "content": content}],
             "max_completion_tokens": env_int("VLVERIFIER_VLM_NUM_PREDICT", 1024),
         }
-        # GPT-5.6 models accept only their server-side default temperature.
-        # Sending the inherited LocalVLM default (0.0) makes every request,
-        # including the single-candidate fallback, fail with HTTP 400.
+        # GPT-5.6 모델은 서버 측 기본 temperature만 허용, LocalVLM에서 물려받은
+        # 기본값(0.0)을 보내면 단일 후보 fallback을 포함한 모든 요청이 HTTP 400으로 실패
         if not self.model.strip().lower().startswith("gpt-5.6"):
             payload["temperature"] = env_float("VLVERIFIER_VLM_TEMPERATURE", 0.0)
         if env_bool("VLVERIFIER_OPENAI_RESPONSE_FORMAT", True):
@@ -1496,6 +1546,7 @@ class OpenAICompatibleVLMProvider:
                 content=content_text,
             ) from exc
 
+    # 후보 1건을 OpenAI 호환 VLM에 보내 검토 요청
     def review(self, candidate: dict[str, Any], slides_dir: Path) -> dict[str, Any]:
         image_filenames = []
         for filename in _limited_candidate_filenames(candidate):
@@ -1507,6 +1558,7 @@ class OpenAICompatibleVLMProvider:
         raw = self._chat_json(_prompt(candidate, ocr_hint_text=ocr_hint_text), image_filenames, slides_dir)
         return _normalize_result(candidate, raw)
 
+    # 배치 전체를 한 번에 OpenAI 호환 VLM에 검토 요청
     def review_batch(
         self,
         batch_items: list[tuple[int, dict[str, Any]]],
@@ -1555,6 +1607,7 @@ class OpenAICompatibleVLMProvider:
 
 
 
+# 환경변수로 지정된 VLM provider(ollama/openai 호환) 인스턴스 생성
 def load_provider():
     provider = os.getenv("VLVERIFIER_VLM_PROVIDER", "ollama").strip().lower()
     if provider == "ollama":
@@ -1567,6 +1620,7 @@ def load_provider():
     )
 
 
+# scene_indices에서 가능한 모든 (scene_a, scene_b) 쌍 조합 생성
 def _pair_keys(scene_indices: Any) -> set[tuple[int, int]]:
     scenes = _candidate_scene_indices({"scene_indices": scene_indices})
     pairs: set[tuple[int, int]] = set()
@@ -1576,6 +1630,8 @@ def _pair_keys(scene_indices: Any) -> set[tuple[int, int]]:
     return pairs
 
 
+# 강한 확신의 same_slide_duplicate=different_slide 결과를 근거로, 같은 scene 쌍에 대한
+# same_slide_build 판정을 veto하여 결과 간 모순을 정리(제자리에서 수정)
 def _resolve_cross_candidate_conflicts(results: list[dict[str, Any]]) -> None:
     different_pairs: set[tuple[int, int]] = set()
 
@@ -1624,6 +1680,7 @@ def _resolve_cross_candidate_conflicts(results: list[dict[str, Any]]) -> None:
         ).strip()
 
 
+# 같은 scene 쌍에 여러 결과가 있을 때 우선순위를 매기는 정렬 키(결정 유형 우선순위, confidence 순)
 def _result_preference_key(result: dict[str, Any]) -> tuple[int, float]:
     decision = str(result.get("decision") or "")
     candidate_type = str(result.get("candidate_type") or "")
@@ -1647,6 +1704,7 @@ def _result_preference_key(result: dict[str, Any]) -> tuple[int, float]:
     return (rank, confidence)
 
 
+# 인접 scene 쌍에 대해 여러 후보 결과가 있으면 우선순위가 가장 높은 것만 남겨 통합
 def _consolidate_pair_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[int, ...], list[dict[str, Any]]] = {}
     passthrough: list[dict[str, Any]] = []
@@ -1685,9 +1743,11 @@ def _consolidate_pair_results(results: list[dict[str, Any]]) -> list[dict[str, A
     return consolidated
 
 
+# should_merge_slide_group=true인 인접 결과들을 union-find로 묶어 연속된 scene 그룹 목록 생성
 def _scene_chain_components_from_results(results: list[dict[str, Any]]) -> list[list[int]]:
     parent: dict[int, int] = {}
 
+    # union-find find 연산(경로 압축 포함)
     def find(scene: int) -> int:
         parent.setdefault(scene, scene)
         while parent[scene] != scene:
@@ -1695,6 +1755,7 @@ def _scene_chain_components_from_results(results: list[dict[str, Any]]) -> list[
             scene = parent[scene]
         return scene
 
+    # union-find union 연산
     def union(scene_a: int, scene_b: int) -> None:
         root_a = find(scene_a)
         root_b = find(scene_b)
@@ -1719,10 +1780,12 @@ def _scene_chain_components_from_results(results: list[dict[str, Any]]) -> list[
     return [members for members in sorted(groups.values(), key=lambda members: (members[0], len(members)))]
 
 
+# scene index 목록을 "001 -> 002 -> 003" 형태 문자열로 포맷
 def _format_scene_chain(scene_indices: list[int]) -> str:
     return " -> ".join(f"{scene:03d}" for scene in scene_indices)
 
 
+# scene 그룹/build 대표/드롭된 scene 정보를 바탕으로 metadata 각 항목에 최종 resolved_scene_group 필드 부여
 def _assign_resolved_scene_groups(
     metadata: list[dict[str, Any]],
     *,
@@ -1818,6 +1881,8 @@ def _assign_resolved_scene_groups(
                 item.pop("manual_review", None)
 
 
+# 슬라이드 디렉터리의 review 후보 전체를 OCR prefilter → VLM 배치 검토 → 결과 통합 →
+# scene 그룹 확정까지 처리하는 로컬 VLM 검토 파이프라인 전체 진입점
 def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
     slides_dir = Path(slides_dir)
     candidates_path = slides_dir / "llm_review_candidates.json"
@@ -1847,12 +1912,14 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
     })
     provisional_parent = {scene: scene for scene in provisional_scenes}
 
+    # OCR prefilter 도중 병합된 scene들을 추적하는 임시 union-find find 연산
     def provisional_find(scene: int) -> int:
         while provisional_parent.get(scene, scene) != scene:
             provisional_parent[scene] = provisional_parent[provisional_parent[scene]]
             scene = provisional_parent[scene]
         return scene
 
+    # 임시 union-find union 연산
     def provisional_union(scene_a: int, scene_b: int) -> None:
         if scene_a not in provisional_parent or scene_b not in provisional_parent:
             return
@@ -1861,6 +1928,7 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
         if root_a != root_b:
             provisional_parent[max(root_a, root_b)] = min(root_a, root_b)
 
+    # 후보의 scene들이 OCR prefilter로 이미 같은 그룹에 병합되었는지 확인
     def scenes_in_same_provisional_group(candidate: dict[str, Any]) -> bool:
         scenes = sorted(set(_candidate_scene_indices(candidate)))
         if len(scenes) < 2:
@@ -1994,6 +2062,7 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
         len(reviewable_candidates),
     )
 
+    # 후보들을 배치로 묶어 병렬 VLM 검토, 배치 단위 실패 시 후보별 단건 재시도로 폴백
     def _run_vlm_phase(
         phase_name: str,
         phase_candidates: list[tuple[int, dict[str, Any]]],
@@ -2026,6 +2095,7 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
         phase_results: list[dict[str, Any]] = []
         phase_errors: list[dict[str, Any]] = []
 
+        # 배치 하나를 검토, provider 오류 시 후보별 단건 review()로 폴백
         def review_batch(batch: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             batch_index = int(batch.get("batch_index", 0) or 0)
             batch_items = batch.get("items", [])
@@ -2149,7 +2219,7 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
     log.info("LocalVLM 1-pass 시작: adjacent_candidates=%s", len(adjacent_reviewable))
     adjacent_results, adjacent_errors, adjacent_meta = _run_vlm_phase("adjacent", adjacent_reviewable)
 
-    # Apply adjacent VLM approvals to the provisional chain before inspecting distant candidates.
+    # 먼 후보를 검사하기 전에, 인접 VLM 승인 결과를 임시 체인에 먼저 반영
     adjacent_vlm_merges = 0
     for result in adjacent_results:
         scenes = _candidate_scene_indices(result)
@@ -2290,6 +2360,8 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
     return payload
 
 
+# VLM 검토 결과를 실제 슬라이드 metadata에 반영, scene 그룹/드롭/build 대표를 확정하고
+# 각 항목에 resolved_scene_group 필드를 부여
 def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: dict[str, Any]) -> list[dict[str, Any]]:
     min_confidence = env_float("VLVERIFIER_VLM_APPLY_MIN_CONFIDENCE", 0.65)
     merge_min_confidence = max(min_confidence, env_float("VLVERIFIER_VLM_MERGE_MIN_CONFIDENCE", 0.95))
@@ -2298,17 +2370,20 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
     scenes = sorted({int(item.get("scene_index")) for item in metadata if item.get("scene_index") is not None})
     parent = {scene: scene for scene in scenes}
 
+    # union-find find 연산(경로 압축 포함)
     def find(x: int) -> int:
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    # union-find union 연산
     def union(a: int, b: int):
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
+    # 주어진 값들 중 metadata에 실제 존재하는 scene index만 걸러서 반환
     def known_scene_indices(values: Any) -> list[int]:
         indices = []
         for value in values or []:
@@ -2344,6 +2419,7 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
     approved_pairs: set[tuple[int, int]] = set()
     reviewed_pairs: set[tuple[int, int]] = set()
 
+    # 두 scene index가 인접한지 확인
     def is_adjacent_pair(scene_a: int, scene_b: int) -> bool:
         return abs(int(scene_a) - int(scene_b)) == 1
 
@@ -2380,9 +2456,9 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
         elif decision == "transition_noise" and result.get("should_drop_scene", True):
             drop_indices = known_scene_indices(result.get("middle_scene_indices") or scene_indices)
             dropped_scenes.update(drop_indices)
-            # A verified [same slide, transient middle, same slide] sandwich
-            # makes the two outer states adjacent after the middle is dropped.
-            # This is the sole intentional non-adjacent union in this stage.
+            # 검증된 [같은 슬라이드, 일시적 중간 프레임, 같은 슬라이드] 샌드위치는
+            # 중간 프레임을 드롭한 후 양쪽 외곽 상태를 인접하게 만듦, 이 단계에서
+            # 의도적으로 비인접 union을 허용하는 유일한 경우
             middle_set = set(drop_indices)
             outer_scenes = [scene for scene in scene_indices if scene not in middle_set]
             if len(outer_scenes) == 2:
@@ -2393,14 +2469,17 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
                 for scene_b in scene_indices[i + 1:]:
                     veto_pairs.add(tuple(sorted((scene_a, scene_b))))
 
+    # veto_pairs(different_slide로 확정된 쌍)를 존중하는 제약된 union-find로 재구성
     constrained_parent = {scene: scene for scene in scenes}
 
+    # 제약된 union-find find 연산
     def constrained_find(x: int) -> int:
         while constrained_parent[x] != x:
             constrained_parent[x] = constrained_parent[constrained_parent[x]]
             x = constrained_parent[x]
         return x
 
+    # veto된 쌍은 병합하지 않는 제약된 union-find union 연산
     def constrained_union(a: int, b: int) -> None:
         if a not in constrained_parent or b not in constrained_parent:
             return

@@ -1,11 +1,10 @@
 """
-Scene transition probe.
+씬 전환 탐지 프로브
 
-This script intentionally ignores annotations. It scans an input video in order,
-detects slide/screen scene transitions, waits for the new screen to stabilize,
-and saves only scene base frames.
+annotation 없이 영상을 순서대로 스캔해 슬라이드/화면 전환을 감지, 새 화면이
+안정될 때까지 대기한 뒤 씬 base 프레임만 저장
 
-Usage:
+사용법:
     python -m pipeline.scene_transition_probe --input lecture.mp4 --output scene_probe/
 """
 
@@ -33,6 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
+# 환경변수를 float로 파싱, 실패/미설정 시 default
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or value == "":
@@ -43,12 +43,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# 씬 전환 판정에 쓰는 임계값 모음
 @dataclass
 class ProbeConfig:
     sample_every: int = 2
     resize_width: int = 768
-    # Hold a candidate longer so a slide-build animation can settle before
-    # the first frame is committed as the scene base.
+    # 슬라이드 빌드업 애니메이션이 정착할 때까지 후보를 더 오래 붙잡아둔 뒤
+    # 첫 프레임을 씬 base로 확정
     delay_sec: float = _env_float("VLVERIFIER_SCENE_BASE_DELAY_SEC", 2.0)
     max_pending_sec: float = _env_float("VLVERIFIER_SCENE_BASE_MAX_PENDING_SEC", 5.0)
     stable_mse: float = 80.0
@@ -76,24 +77,28 @@ class ProbeConfig:
     crop_bottom: float = 0.90
 
 
+# 프레임을 지정 너비로 축소, 비율 유지
 def resize_frame(frame: np.ndarray, width: int) -> np.ndarray:
     h, w = frame.shape[:2]
     scale = width / w
     return cv2.resize(frame, (width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+# 판정용 축소+그레이스케일+블러 프레임 생성
 def to_decision_frame(frame: np.ndarray, width: int) -> np.ndarray:
     small = resize_frame(frame, width)
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+# 두 프레임 간 평균 제곱 오차(MSE) 계산
 def compute_mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     a = frame_a.astype(np.float32) if frame_a.ndim == 2 else cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY).astype(np.float32)
     b = frame_b.astype(np.float32) if frame_b.ndim == 2 else cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY).astype(np.float32)
     return float(np.mean((a - b) ** 2))
 
 
+# 프레임의 perceptual hash 계산
 def compute_phash(frame: np.ndarray) -> imagehash.ImageHash:
     if frame.ndim == 2:
         pil_img = Image.fromarray(frame)
@@ -102,12 +107,14 @@ def compute_phash(frame: np.ndarray) -> imagehash.ImageHash:
     return imagehash.phash(pil_img)
 
 
+# 임계값 초과 픽셀 비율 계산
 def count_changed_pixels(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     max_diff = diff if diff.ndim == 2 else np.max(diff, axis=2)
     return float(np.sum(max_diff > threshold) / max_diff.size)
 
 
+# Canny edge 검출 후 팽창한 edge 마스크 반환
 def edge_mask(frame: np.ndarray) -> np.ndarray:
     gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
@@ -115,6 +122,7 @@ def edge_mask(frame: np.ndarray) -> np.ndarray:
     return cv2.dilate(edges, kernel, iterations=1) > 0
 
 
+# reference의 edge 중 frame에도 남아있는 비율
 def edge_preservation_ratio(reference: np.ndarray, frame: np.ndarray) -> float:
     ref_edges = edge_mask(reference)
     ref_count = int(ref_edges.sum())
@@ -126,10 +134,12 @@ def edge_preservation_ratio(reference: np.ndarray, frame: np.ndarray) -> float:
     return float(np.logical_and(ref_edges, frame_edges_dilated).sum() / ref_count)
 
 
+# 양방향 edge 보존 비율 중 최솟값
 def symmetric_edge_overlap(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return min(edge_preservation_ratio(frame_a, frame_b), edge_preservation_ratio(frame_b, frame_a))
 
 
+# 프레임에서 여백을 제외한 콘텐츠 영역만 크롭
 def content_region(frame: np.ndarray, cfg: ProbeConfig) -> np.ndarray:
     h, w = frame.shape[:2]
     x0 = max(0, min(w - 1, int(w * cfg.crop_left)))
@@ -139,12 +149,14 @@ def content_region(frame: np.ndarray, cfg: ProbeConfig) -> np.ndarray:
     return frame[y0:y1, x0:x1]
 
 
+# 마스크도 content_region과 동일하게 크롭
 def mask_content_region(mask: np.ndarray | None, cfg: ProbeConfig) -> np.ndarray | None:
     if mask is None:
         return None
     return content_region(mask.astype(np.uint8), cfg).astype(bool)
 
 
+# 두 프레임(사람 마스크 제외)의 차이 지표(mse/변화 비율/edge 보존/hash 거리) 계산
 def scene_metrics(
     reference: np.ndarray,
     frame: np.ndarray,
@@ -165,6 +177,7 @@ def scene_metrics(
     }
 
 
+# 두 프레임이 사실상 같은 씬인지 판정
 def is_duplicate_scene(
     reference: np.ndarray,
     frame: np.ndarray,
@@ -176,6 +189,7 @@ def is_duplicate_scene(
     return is_same_scene_content(metrics, cfg)
 
 
+# 지표 기준으로 변화가 거의 없는(같은 씬) 프레임인지 판정
 def is_same_scene_content(metrics: dict, cfg: ProbeConfig) -> bool:
     if metrics["changed_ratio"] > cfg.same_scene_changed_ratio_max:
         return False
@@ -184,6 +198,8 @@ def is_same_scene_content(metrics: dict, cfg: ProbeConfig) -> bool:
     return metrics["edge_preserve"] >= cfg.same_scene_edge_preserve
 
 
+# 현재 프레임이 base 씬과 달라졌는지 여러 지표를 순서대로 검사해 전환 사유를 판정,
+# 어떤 조건도 만족 안 하면 None(같은 씬으로 간주)
 def transition_reason(
     base_frame: np.ndarray,
     prev_frame: np.ndarray,
@@ -211,9 +227,11 @@ def transition_reason(
         **metrics,
     }
 
+    # 급격한 전체 화면 전환(예: 화면 전환 효과) 감지
     if not same_content and prev_mse >= cfg.cut_mse and prev_hash_dist >= cfg.cut_hash:
         return "cut", details
 
+    # mse/변화 비율이 큰 구조적 변화 감지
     if (
         not same_content
         and metrics["mse"] >= cfg.base_mse
@@ -221,6 +239,7 @@ def transition_reason(
     ):
         return "base_structure", details
 
+    # 변화 비율과 hash 거리 모두 큰 강한 변화 감지
     if (
         not same_content
         and metrics["changed_ratio"] >= cfg.strong_changed_ratio
@@ -228,6 +247,7 @@ def transition_reason(
     ):
         return "base_strong_change", details
 
+    # 텍스트 일부만 바뀌는 미세한 변화 감지 (여러 지표 조합으로 오탐 방지)
     if (
         not same_content
         and metrics["fine_changed_ratio"] >= cfg.subtle_changed_ratio
@@ -248,6 +268,7 @@ def transition_reason(
     ):
         return "subtle_text_change", details
 
+    # mse/변화 비율/hash 거리가 모두 기준 이상인 명확한 차이 감지
     if (
         not same_content
         and metrics["mse"] >= cfg.base_mse
@@ -256,6 +277,7 @@ def transition_reason(
     ):
         return "base_diff", details
 
+    # edge 구조가 크게 깨진 경우 감지
     if (
         not same_content
         and metrics["mse"] >= cfg.base_mse
@@ -267,6 +289,7 @@ def transition_reason(
     return None, details
 
 
+# 씬 base 프레임을 JPEG로 저장하고 메타데이터 레코드 생성
 def save_scene(out_dir: Path, scene_index: int, frame: np.ndarray, frame_no: int, timestamp: float, reason: str, details: dict) -> dict:
     filename = f"scene_{scene_index:03d}_base.jpg"
     cv2.imwrite(str(out_dir / filename), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -282,6 +305,9 @@ def save_scene(out_dir: Path, scene_index: int, frame: np.ndarray, frame_no: int
     return record
 
 
+# 영상을 프레임 단위로 순회하며 씬 전환 감지, 전환 후보(pending)가 stable_frames_required
+# 프레임 연속으로 안정되면 그 시점 프레임을 씬 base로 확정, max_pending_sec 안에 안정되지
+# 않아도 강제로 확정, 확정된 base가 직전 base와 사실상 같은 씬이면(is_duplicate_scene) 버림
 def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -297,6 +323,7 @@ def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
     for stale in out_dir.glob("scene_*.jpg"):
         stale.unlink(missing_ok=True)
 
+    # 안정 판정에 필요한 연속 프레임 수 / 대기 상한 프레임 수 (둘 다 sample_every 반영)
     stable_frames_required = max(2, int(cfg.delay_sec * fps / cfg.sample_every))
     pending_max_frames = max(stable_frames_required, int(cfg.max_pending_sec * fps / cfg.sample_every))
 
@@ -331,6 +358,7 @@ def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
                 records.append(save_scene(out_dir, scene_index, frame, frame_no, timestamp, "first_frame", {}))
                 continue
 
+            # 전환 후보가 있으면 안정성만 갱신 (실제 확정은 stable/observed 카운트 도달 시)
             if pending is not None:
                 anchor_mse = compute_mse(pending["anchor_decision"], decision)
                 anchor_hash_dist = int(pending["anchor_hash"] - decision_hash)
@@ -365,6 +393,7 @@ def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
                 pending["last_decision"] = decision.copy()
                 pending["last_hash"] = decision_hash
 
+                # 연속 안정 프레임 수 도달 또는 대기 상한 초과 시 후보를 씬으로 확정
                 if pending["stable"] >= stable_frames_required or pending["observed"] >= pending_max_frames:
                     if base_decision is not None and is_duplicate_scene(base_decision, pending["decision"], cfg):
                         log.info("[suppress] duplicate pending scene @ %.3fs frame=%s", pending["timestamp"], pending["frame_no"])
@@ -417,6 +446,7 @@ def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
     finally:
         cap.release()
 
+    # 영상이 끝날 때 미확정 pending이 남아있으면 강제로 flush
     if pending is not None:
         if base_decision is None or not is_duplicate_scene(base_decision, pending["decision"], cfg):
             scene_index += 1
@@ -443,10 +473,11 @@ def run_probe(input_path: str, output_dir: str, cfg: ProbeConfig) -> list[dict]:
     return records
 
 
+# CLI 인자 파싱
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture only stabilized scene transition frames from an MP4.")
-    parser.add_argument("--input", "-i", required=True, help="Input .mp4 path")
-    parser.add_argument("--output", "-o", required=True, help="Output directory")
+    parser = argparse.ArgumentParser(description="MP4에서 안정된 씬 전환 프레임만 캡처")
+    parser.add_argument("--input", "-i", required=True, help="입력 .mp4 경로")
+    parser.add_argument("--output", "-o", required=True, help="출력 디렉터리")
     parser.add_argument("--sample-every", type=int, default=ProbeConfig.sample_every)
     parser.add_argument("--resize-width", type=int, default=ProbeConfig.resize_width)
     parser.add_argument("--delay-sec", type=float, default=ProbeConfig.delay_sec)
@@ -457,6 +488,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# CLI 진입점, 인자로 ProbeConfig 구성 후 run_probe 실행
 def main():
     args = parse_args()
     if args.debug:

@@ -1,11 +1,10 @@
 """
-Build a lightweight sampled-frame cache from an input video.
+입력 영상에서 경량 샘플 프레임 캐시 생성
 
-This replacement keeps the existing single-pass behavior and adds chunked cache
-creation for long lecture videos. The chunked path preserves the independently
-written chunk videos and records each core frame's exact local position in one
-downstream-compatible manifest. Overlap trimming is virtual: no chunk video is
-decoded, cut, or re-encoded after parallel creation.
+기존 단일 패스 동작은 유지하면서 긴 강의 영상을 위한 청크 단위 캐시 생성을 추가.
+청크 방식은 독립적으로 기록된 청크 영상을 그대로 보존하고, 각 core 프레임의
+정확한 로컬 위치를 후속 단계와 호환되는 하나의 manifest에 기록. overlap 트리밍은
+가상으로만 처리되어, 병렬 생성 이후 어떤 청크 영상도 디코딩/자르기/재인코딩되지 않음
 """
 
 from __future__ import annotations
@@ -50,6 +49,7 @@ VIDEO_FILENAME = "sampled_frames.avi"
 SCHEMA_VERSION = 1
 
 
+# 환경변수를 float로 읽음
 def _env_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or value == "":
@@ -60,6 +60,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# 환경변수를 int로 읽음
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None or value == "":
@@ -70,6 +71,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# 환경변수를 bool로 읽음
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None or value == "":
@@ -77,6 +79,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+# 시스템 물리 메모리 전체 크기 조회
 def _system_memory_bytes() -> int | None:
     try:
         pages = int(os.sysconf("SC_PHYS_PAGES"))
@@ -87,7 +90,7 @@ def _system_memory_bytes() -> int | None:
 
 
 def _available_memory_bytes() -> int | None:
-    """Return the conservative memory budget visible to this container."""
+    """이 컨테이너에서 보이는 보수적인 사용 가능 메모리 예산 반환"""
     candidates: list[int] = []
     try:
         for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
@@ -97,8 +100,8 @@ def _available_memory_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         pass
 
-    # Docker Desktop and Kubernetes usually expose a cgroup v2 memory limit.
-    # Prefer its remaining budget over host-wide /proc memory information.
+    # Docker Desktop과 Kubernetes는 보통 cgroup v2 메모리 제한을 노출함,
+    # 호스트 전체 /proc 메모리 정보보다 그 남은 예산을 우선 사용
     for root in (Path("/sys/fs/cgroup"), Path("/sys/fs/cgroup/memory")):
         try:
             limit_raw = (root / "memory.max").read_text(encoding="utf-8").strip()
@@ -113,6 +116,7 @@ def _available_memory_bytes() -> int | None:
     return min(candidates) if candidates else _system_memory_bytes()
 
 
+# 리소스 admission 판단에만 쓰이는 보수적인 MJPEG 캐시 크기 추정
 def _estimate_sample_cache_bytes(
     video_meta: dict,
     duration_sec: float,
@@ -120,17 +124,18 @@ def _estimate_sample_cache_bytes(
     *,
     resize_width: int,
 ) -> int:
-    """Conservative MJPEG cache estimate used only for resource admission."""
+    """리소스 admission 판단에만 사용하는 보수적인 MJPEG 캐시 크기 추정치"""
     source_width = max(1, int(video_meta.get("width") or 1))
     source_height = max(1, int(video_meta.get("height") or 1))
     width = max(1, int(resize_width))
     height = max(1, int(source_height * (width / source_width)))
     samples = max(1, int(math.ceil(max(0.0, duration_sec) * max(0.1, sample_fps))))
-    # 35% of raw BGR size is deliberately conservative for lecture imagery.
+    # 강의 이미지 특성상 raw BGR 크기의 35%로 의도적으로 보수적으로 추정
     bytes_per_frame = max(96 * 1024, int(width * height * 3 * 0.35))
     return samples * bytes_per_frame
 
 
+# 지정 경로의 여유 공간이 필요량 이상인지 확인, 부족하면 예외 발생
 def _require_free_space(path: Path, required_bytes: int, *, purpose: str) -> int:
     free_bytes = shutil.disk_usage(path).free
     if free_bytes < required_bytes:
@@ -141,6 +146,7 @@ def _require_free_space(path: Path, required_bytes: int, *, purpose: str) -> int
     return free_bytes
 
 
+# 샘플 캐시 작업용 임시 루트 경로 결정, 설정/가용 메모리에 따라 RAM(tmpfs) 또는 디스크 선택
 def _sample_cache_temp_root(
     output_path: Path,
     *,
@@ -150,8 +156,8 @@ def _sample_cache_temp_root(
     if mode not in {"auto", "ram", "disk"}:
         mode = "auto"
 
-    # Chunk files coexist with the merged cache during Step 0. Reserve enough
-    # room for both plus manifests instead of discovering ENOSPC mid-merge.
+    # Step 0 동안 청크 파일과 병합 캐시가 공존함, 병합 도중 ENOSPC를 만나지 않도록
+    # 둘 다와 manifest를 위한 공간을 미리 충분히 확보
     disk_required = max(2 * 1024**3, int(estimated_cache_bytes * 2.25 + 512 * 1024**2))
     output_root = output_path.parent
     output_root.mkdir(parents=True, exist_ok=True)
@@ -180,6 +186,7 @@ def _sample_cache_temp_root(
     return output_root, "disk", disk_free
 
 
+# 샘플 캐시 생성 설정, 대부분 환경변수로 오버라이드 가능
 @dataclass
 class SampleCacheConfig:
     sample_every: int = _env_int("VLVERIFIER_SAMPLE_CACHE_EVERY", 2)
@@ -211,16 +218,14 @@ class SampleCacheConfig:
     person_mask_max_bbox_aspect: float = _env_float(
         "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_MAX_BBOX_ASPECT", 1.50
     )
-    # Detector boxes can miss a presenter's hair or outstretched hand.  The
-    # fixed ROI must include this boundary motion or it leaks into annotation
-    # detection as a tiny false write.
+    # detector 박스가 발표자의 머리카락이나 뻗은 손을 놓칠 수 있음, 고정 ROI가 이
+    # 경계 움직임을 포함하지 못하면 작은 오탐 필기로 annotation 감지에 새어 들어감
     person_mask_dilate_px: int = _env_int("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_DILATE_PX", 48)
     person_mask_static_diff_threshold: float = 1.0
     person_mask_static_changed_ratio_threshold: float = 0.003
     person_mask_match_iou_threshold: float = 0.05
-    # A fixed ROI must only cover frames where movement was confirmed.  Filling
-    # from a single nearby detection turns static false positives into long
-    # masks, so this is disabled unless a deployment explicitly opts in.
+    # 고정 ROI는 움직임이 확인된 프레임만 커버해야 함, 인접한 단일 detection으로
+    # 채우면 정적인 오탐이 긴 마스크로 바뀌므로 배포에서 명시적으로 켜지 않는 한 비활성화
     person_mask_fill_gap_sec: float = _env_float(
         "VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_FILL_GAP_SEC", 0.0
     )
@@ -241,23 +246,27 @@ class SampleCacheConfig:
     person_mask_preview_limit: int = 30
 
 
+# 프레임을 지정 너비로 비율 유지 리사이즈
 def resize_frame(frame: np.ndarray, width: int) -> np.ndarray:
     h, w = frame.shape[:2]
     scale = width / w
     return cv2.resize(frame, (width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+# 프레임을 그레이스케일+가우시안 블러로 변환해 비교용 프레임 생성
 def to_decision_frame(frame: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+# 두 프레임의 평균제곱오차(MSE) 계산
 def compute_mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     a = frame_a.astype(np.float32) if frame_a.ndim == 2 else cv2.cvtColor(frame_a, cv2.COLOR_BGR2GRAY).astype(np.float32)
     b = frame_b.astype(np.float32) if frame_b.ndim == 2 else cv2.cvtColor(frame_b, cv2.COLOR_BGR2GRAY).astype(np.float32)
     return float(np.mean((a - b) ** 2))
 
 
+# 프레임의 perceptual hash를 정수로 계산
 def compute_phash_int(frame: np.ndarray) -> int:
     if frame.ndim == 2:
         pil_img = Image.fromarray(frame)
@@ -266,10 +275,12 @@ def compute_phash_int(frame: np.ndarray) -> int:
     return int(str(imagehash.phash(pil_img)), 16)
 
 
+# 두 phash 정수 간 해밍 거리 계산
 def phash_distance_int(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
 
 
+# YOLO 인물 탐지 모델 로드, ultralytics 미설치나 로드 실패 시 None 반환하고 person mask 비활성화
 def _load_person_model(model_name: str):
     try:
         from ultralytics import YOLO
@@ -284,8 +295,9 @@ def _load_person_model(model_name: str):
         return None
 
 
+# 설정된 TensorRT engine 파일 경로 조회, 빈 값을 '.'으로 취급하지 않음
 def _existing_person_mask_engine(path_value: str | Path | None) -> Path | None:
-    """Return a configured TensorRT engine, never treating an empty value as '.'."""
+    """설정된 TensorRT engine 반환, 빈 값을 '.'으로 취급하지 않음"""
     raw = str(path_value or "").strip()
     if not raw:
         return None
@@ -293,6 +305,7 @@ def _existing_person_mask_engine(path_value: str | Path | None) -> Path | None:
     return path if path.is_file() else None
 
 
+# YOLO 추론 결과에서 bbox/confidence/mask 목록 추출
 def _detections_from_result(result, height: int, width: int) -> list[dict]:
     if result.boxes is None:
         return []
@@ -317,11 +330,13 @@ def _detections_from_result(result, height: int, width: int) -> list[dict]:
     return detections
 
 
+# 예외 메시지가 CUDA OOM(메모리 부족)인지 확인
 def _cuda_oom_message(exc: Exception) -> bool:
     text = str(exc).lower()
     return "cuda" in text and "out of memory" in text
 
 
+# torch CUDA 캐시 비우기, torch 미설치/미사용 시 조용히 무시
 def _empty_torch_cuda_cache() -> None:
     try:
         import torch  # type: ignore
@@ -335,6 +350,7 @@ def _empty_torch_cuda_cache() -> None:
         pass
 
 
+# nvidia-smi로 GPU 여유 메모리(MB) 조회
 def _gpu_free_memory_mb() -> int | None:
     try:
         proc = subprocess.run(
@@ -360,6 +376,7 @@ def _gpu_free_memory_mb() -> int | None:
     return max(values)
 
 
+# person mask 추론 시작 전 GPU 여유 메모리/stagger 조건을 만족할 때까지 파일 락으로 대기
 def _wait_for_person_mask_gpu_gate(cfg: SampleCacheConfig, batch_size: int) -> None:
     min_free_mb = max(0, int(cfg.person_mask_gpu_min_free_mb))
     stagger_sec = max(0.0, float(cfg.person_mask_gpu_stagger_sec))
@@ -412,13 +429,14 @@ def _wait_for_person_mask_gpu_gate(cfg: SampleCacheConfig, batch_size: int) -> N
         time.sleep(sleep_sec)
 
 
+# person 모델 배치 1개를 프로세스 전역 GPU 실행 락 아래에서 실행
 def _run_person_model_serialized(model, frames: list[np.ndarray], conf: float):
-    """Run one person-model batch under a process-wide GPU execution lock.
+    """프로세스 전역 GPU 실행 락 아래에서 person 모델 배치 1개 실행
 
-    Chunk decoding remains parallel, but TensorRT execution contexts from
-    separate spawned workers are not safe to enqueue concurrently with this
-    dynamic engine.  Queueing only the short inference call avoids CUDA
-    dispatch crashes without serializing video decode.
+    청크 디코딩은 계속 병렬로 진행하지만, 별도 spawn된 worker의 TensorRT 실행
+    컨텍스트를 이 동적 engine에 동시에 enqueue하는 것은 안전하지 않다. 짧은
+    추론 호출만 큐잉하면 비디오 디코드를 직렬화하지 않고도 CUDA dispatch
+    충돌을 피할 수 있다
     """
     if not _env_bool("VLVERIFIER_SAMPLE_CACHE_PERSON_MASK_GPU_SERIALIZE", True):
         return model(frames, classes=[0], conf=conf, verbose=False, stream=False)
@@ -446,12 +464,13 @@ def _run_person_model_serialized(model, frames: list[np.ndarray], conf: float):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+# 이 청크 프로세스를 위해 제한된 TensorRT context slot 1개 예약
 def _acquire_person_mask_trt_context_slot() -> tuple[object, int]:
-    """Reserve one bounded TensorRT context slot for this chunk process.
+    """이 청크 프로세스를 위해 제한된 TensorRT context slot 1개 예약
 
-    A YOLO TensorRT context consumes about 1.4 GiB for this dynamic engine.
-    Keeping one context per decode chunk exhausts GPU memory even when batch
-    execution is serialized, because context allocations remain resident.
+    YOLO TensorRT context는 이 동적 engine 기준 약 1.4 GiB를 소비한다. 디코드
+    청크마다 context를 하나씩 유지하면, 배치 실행을 직렬화해도 context 할당이
+    계속 상주하기 때문에 GPU 메모리가 고갈된다
     """
     limit = max(
         1,
@@ -485,6 +504,7 @@ def _acquire_person_mask_trt_context_slot() -> tuple[object, int]:
         time.sleep(0.05)
 
 
+# 예약했던 TensorRT context slot 해제
 def _release_person_mask_trt_context_slot(slot: tuple[object, int] | None) -> None:
     if slot is None:
         return
@@ -495,6 +515,7 @@ def _release_person_mask_trt_context_slot(slot: tuple[object, int] | None) -> No
         handle.close()
 
 
+# 탐지된 인물 bbox가 최소 높이 비율/최대 종횡비 조건을 만족하는지 확인
 def _person_bbox_allowed(
     bbox: tuple[int, int, int, int],
     width: int,
@@ -512,6 +533,8 @@ def _person_bbox_allowed(
     return width_to_height <= max(0.1, float(cfg.person_mask_max_bbox_aspect))
 
 
+# 청크 구간을 저해상도로 seek 샘플링해 인물이 등장하는지 빠르게 확인,
+# 등장 시각 주변 구간만 person mask 계산 대상으로 반환
 def _run_person_presence_gate(
     input_path: str,
     cfg: SampleCacheConfig,
@@ -528,9 +551,8 @@ def _run_person_presence_gate(
         1.0,
         float(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_INTERVAL_SEC", "20")),
     )
-    # The gate is an activation guard, not the final person-mask decision.
-    # Keep it conservative against false negatives: one positive seek sample
-    # is enough to enable masking for the whole chunk.
+    # 이 gate는 최종 person-mask 판정이 아니라 활성화 가드, 오탐(미검출) 방지를 위해
+    # 보수적으로 설정 — seek 샘플 1개만 양성이어도 청크 전체 마스킹을 활성화
     min_hits = max(
         1,
         int(os.getenv("VLVERIFIER_SAMPLE_CACHE_PERSON_GATE_MIN_HITS", "1")),
@@ -574,6 +596,7 @@ def _run_person_presence_gate(
     batch: list[tuple[float, np.ndarray]] = []
     fallback_used = False
 
+    # 배치의 각 프레임에 대해 인물 탐지 실행, engine 로드 실패 시 기본 모델로 폴백
     def check_batch(batch_items: list[tuple[float, np.ndarray]]) -> None:
         nonlocal sampled, hits, model, model_source, fallback_used
         if not batch_items:
@@ -582,9 +605,9 @@ def _run_person_presence_gate(
         try:
             gate_cfg = copy.deepcopy(cfg)
             gate_cfg.person_mask_conf = gate_conf
-            # Do not apply the stricter final-mask geometry filters to the
-            # presence gate. A partial or edge-of-frame person must activate
-            # the chunk so the full-resolution mask pass can decide later.
+            # presence gate에는 더 엄격한 최종 마스크 geometry 필터를 적용하지 않음,
+            # 프레임 일부만 걸쳐 있거나 가장자리에 있는 인물도 청크를 활성화시켜야
+            # 이후 원해상도 마스크 패스에서 최종 판단 가능
             gate_cfg.person_mask_min_bbox_height_ratio = 0.0
             gate_cfg.person_mask_max_bbox_aspect = 10.0
             detections = _person_detections_from_frames(
@@ -666,6 +689,7 @@ def _run_person_presence_gate(
     return ranges
 
 
+# 주어진 시각이 person mask 활성 구간에 속하는지 확인, ranges가 None이면 항상 활성
 def _person_mask_active_at(timestamp_sec: float, ranges: list[tuple[float, float]] | None) -> bool:
     if ranges is None:
         return True
@@ -673,6 +697,7 @@ def _person_mask_active_at(timestamp_sec: float, ranges: list[tuple[float, float
     return any(start - 1e-6 <= timestamp <= end + 1e-6 for start, end in ranges)
 
 
+# 프레임 배치에 대해 YOLO 인물 탐지 실행, GPU gate 대기와 CUDA OOM 폴백 포함
 def _person_detections_from_frames(
     model,
     frames: list[np.ndarray],
@@ -706,6 +731,7 @@ def _person_detections_from_frames(
     return detections_by_frame
 
 
+# 두 bbox 간 IoU(교집합/합집합 비율) 계산
 def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -719,6 +745,7 @@ def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> flo
     return inter / (area_a + area_b - inter)
 
 
+# bbox 영역 내 두 프레임 간 평균 밝기 차/변경 픽셀 비율 계산
 def _bbox_motion_metrics(frame_a: np.ndarray, frame_b: np.ndarray, bbox: tuple[int, int, int, int]) -> tuple[float, float]:
     h, w = frame_a.shape[:2]
     x1, y1, x2, y2 = bbox
@@ -737,7 +764,7 @@ def _bbox_ring_changed_ratio(
     frame_b: np.ndarray,
     bbox: tuple[int, int, int, int],
 ) -> float:
-    """Measure nearby background motion without including the person box."""
+    """인물 박스를 제외한 주변 배경 영역의 움직임 비율 측정"""
     height, width = frame_a.shape[:2]
     x1, y1, x2, y2 = bbox
     box_width = max(1, x2 - x1)
@@ -762,6 +789,7 @@ def _bbox_ring_changed_ratio(
     return float(np.count_nonzero(changed & ring) / ring_pixels)
 
 
+# 다음 프레임과 비교해 실제로 움직인(정적이지 않은) 인물 bbox만 마스크로 생성
 def _moving_person_mask(
     frame: np.ndarray,
     detections: list[dict],
@@ -795,6 +823,7 @@ def _moving_person_mask(
     return (mask > 0).astype(np.uint8)
 
 
+# 움직임 여부와 무관하게 탐지된 모든 인물 bbox로 존재 마스크 생성
 def _person_presence_mask(frame: np.ndarray, detections: list[dict], dilate_px: int) -> np.ndarray | None:
     if not detections:
         return None
@@ -812,12 +841,14 @@ def _person_presence_mask(frame: np.ndarray, detections: list[dict], dilate_px: 
     return (mask > 0).astype(np.uint8)
 
 
+# 마스크 영역을 검게 칠한 미리보기 이미지 생성(디버그용)
 def _masked_preview(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
     preview = frame.copy()
     preview[mask.astype(bool)] = 0
     return preview
 
 
+# 마스크 없는 짧은 구간을 가장 가까운 마스크로 채움(max_gap 이내만)
 def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
     if max_gap <= 0:
         return 0
@@ -849,6 +880,7 @@ def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
     return filled
 
 
+# 출력 디렉터리 및 하위 경로 준비, 기존 산출물 정리 후 재생성
 def _prepare_output_dirs(output_path: Path, cfg: SampleCacheConfig) -> tuple[Path, Path, Path, Path, Path]:
     output_path.mkdir(parents=True, exist_ok=True)
     video_path = output_path / VIDEO_FILENAME
@@ -875,6 +907,7 @@ def _prepare_output_dirs(output_path: Path, cfg: SampleCacheConfig) -> tuple[Pat
     return video_path, manifest_path, masks_path, presence_masks_path, mask_previews_path
 
 
+# 샘플 캐시 생성 핵심 구현, 단일 패스 또는 청크 일부 구간 처리에 공용으로 사용
 def _create_sample_cache_impl(
     input_path: str,
     output_dir: str,
@@ -952,6 +985,7 @@ def _create_sample_cache_impl(
             person_model_source,
         )
 
+    # 배치의 인물 탐지 실행, 모델을 lazy 로드하고 TensorRT context 오류 시 PyTorch로 폴백
     def detect_person_batch(
         batch_frames: list[np.ndarray],
         conf_override: float | None = None,
@@ -1009,6 +1043,7 @@ def _create_sample_cache_impl(
                 inference_cfg,
             )
 
+    # 샘플 1개에 대해 presence/moving person mask를 계산해 저장하고 최종 frame 목록에 추가
     def finalize_sample(sample: dict, next_frame: np.ndarray | None, next_detections: list[dict]) -> None:
         nonlocal preview_count
         frame_record = dict(sample["record"])
@@ -1075,6 +1110,7 @@ def _create_sample_cache_impl(
     )
     log.info("sample cache decode backend: %s", active_backend)
 
+    # 디코딩된 배치를 프레임별로 처리, phash/mse 계산 후 캐시 영상에 기록하고 직전 샘플을 finalize
     def process_batch(batch_samples: list[dict], detections_batch: list[list[dict]]) -> None:
         nonlocal sample_index, pending_sample, prev_decision, prev_phash
         if not batch_samples:
@@ -1115,6 +1151,7 @@ def _create_sample_cache_impl(
                 pct = (sample["frame_no"] / total_frame_count * 100.0) if total_frame_count > 0 else 0.0
                 log.info("sample cache progress: samples=%s frame=%s %.1f%%", sample_index, sample["frame_no"], pct)
 
+    # 큐에서 가장 오래된 탐지 배치의 결과를 기다려 process_batch로 전달
     def process_oldest_detection_batch() -> None:
         ready_samples, ready_indices, ready_future = detection_queue.pop(0)
         ready_detections = [[] for _ in ready_samples]
@@ -1122,10 +1159,12 @@ def _create_sample_cache_impl(
             ready_detections[index] = detections
         process_batch(ready_samples, ready_detections)
 
+    # 탐지 큐에 남은 배치를 모두 순서대로 처리
     def drain_detection_queue() -> None:
         while detection_queue:
             process_oldest_detection_batch()
 
+    # 배치를 person mask 활성 구간 판단 후 비동기 탐지에 제출하거나 즉시 처리
     def flush_batch(batch_samples: list[dict]) -> None:
         nonlocal person_gate_next_timestamp, person_gate_active, person_model_warmed
         if not batch_samples:
@@ -1169,18 +1208,17 @@ def _create_sample_cache_impl(
         else:
             active_indices = list(range(len(batch_samples)))
         if not active_indices:
-            # A preceding active-range batch may still be running on the GPU.
-            # Flush it before recording this later inactive batch; otherwise
-            # frames near an active-range boundary are written out of order.
+            # 앞선 활성 구간 배치가 아직 GPU에서 실행 중일 수 있음, 이 뒤의 비활성
+            # 배치를 기록하기 전에 먼저 flush해야 함 — 그렇지 않으면 활성 구간
+            # 경계 근처 프레임이 순서를 벗어나 기록됨
             drain_detection_queue()
             process_batch(batch_samples, [[] for _ in batch_samples])
             return
 
         if not person_model_warmed:
-            # Ultralytics creates the TensorRT execution context lazily at the
-            # first prediction.  Initializing it from the chunk process main
-            # thread is reliable; doing so first from the async worker thread
-            # can leave its context as None and trigger the PyTorch fallback.
+            # Ultralytics는 첫 예측 시점에 TensorRT 실행 컨텍스트를 지연 생성함,
+            # 청크 프로세스의 메인 스레드에서 초기화하면 안정적이지만, 비동기 worker
+            # 스레드에서 먼저 초기화하면 컨텍스트가 None으로 남아 PyTorch 폴백을 유발할 수 있음
             warmup_detections = detect_person_batch(
                 [batch_samples[index]["frame"] for index in active_indices],
             )
@@ -1292,10 +1330,12 @@ def _create_sample_cache_impl(
     return manifest
 
 
+# 영상 전체에 대해 단일 패스로 샘플 캐시 생성
 def create_sample_cache(input_path: str, output_dir: str, cfg: SampleCacheConfig | None = None) -> dict:
     return _create_sample_cache_impl(input_path, output_dir, cfg)
 
 
+# 영상의 특정 구간(청크)에 대해 샘플 캐시 생성
 def create_sample_cache_range(
     input_path: str,
     output_dir: str,
@@ -1319,6 +1359,7 @@ def create_sample_cache_range(
     )
 
 
+# 전체 길이를 겹치는 청크 구간들로 분할, 각 청크의 core(비겹침) 구간도 함께 계산
 def _chunk_specs(duration: float, chunk_sec: float, overlap_sec: float) -> list[dict]:
     if duration <= chunk_sec:
         return []
@@ -1342,12 +1383,14 @@ def _chunk_specs(duration: float, chunk_sec: float, overlap_sec: float) -> list[
     return specs
 
 
+# 값 목록의 분위수 계산
 def _quantile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
     return float(np.quantile(np.asarray(values, dtype=np.float32), min(1.0, max(0.0, q))))
 
 
+# person mask 후처리를 병렬 task로 나누기 위해 프레임 타임라인을 겹치는 구간들로 분할
 def _person_mask_task_specs(frames: list[dict], task_sec: float, overlap_sec: float) -> list[dict]:
     if not frames:
         return []
@@ -1372,13 +1415,14 @@ def _person_mask_task_specs(frames: list[dict], task_sec: float, overlap_sec: fl
     return specs
 
 
+# worker 프로세스가 시작되기 전에 공유 TensorRT detector engine 1개를 미리 빌드
 def _ensure_person_mask_engine(cfg: SampleCacheConfig) -> Path:
-    """Build the one shared TensorRT detector engine before worker processes start."""
+    """worker 프로세스 시작 전에 공유 TensorRT detector engine 1개 빌드"""
     source_path = Path(cfg.person_mask_model)
     configured_engine = str(cfg.person_mask_engine or "").strip()
     if not configured_engine:
-        # CPU-only deployments intentionally have no TensorRT engine.  Return
-        # the portable .pt detector so the caller can continue with YOLO CPU.
+        # CPU 전용 배포는 의도적으로 TensorRT engine이 없음, 호출자가 YOLO CPU로
+        # 계속할 수 있도록 이식 가능한 .pt detector를 반환
         log.info("person mask TensorRT disabled; using portable model: %s", source_path)
         return source_path
     try:
@@ -1422,6 +1466,7 @@ def _ensure_person_mask_engine(cfg: SampleCacheConfig) -> Path:
     return engine_path
 
 
+# 고정 ROI 계산용 인물 bbox 탐지(비동기 파이프라인과 별도의 동기 경로)
 def _detect_person_boxes(model, frames: list[np.ndarray], cfg: SampleCacheConfig) -> list[list[tuple[int, int, int, int]]]:
     if not frames:
         return []
@@ -1446,6 +1491,7 @@ def _detect_person_boxes(model, frames: list[np.ndarray], cfg: SampleCacheConfig
     return boxes_by_frame
 
 
+# bbox 목록으로부터 프레임 대비 인물 점유 비율 계산
 def _presence_ratio_from_boxes(
     boxes: list[tuple[int, int, int, int]],
     height: int,
@@ -1463,13 +1509,14 @@ def _presence_ratio_from_boxes(
     return round(float(np.mean(mask)), 6)
 
 
+# 탐지 결과를 안정적인 발표자 구간(epoch)으로 묶어 구간마다 고정 박스 하나를 도출
 def _fixed_box_epochs(
     records: list[dict],
     cfg: SampleCacheConfig,
     width: int,
     height: int,
 ) -> list[dict]:
-    """Group detections into stable presenter epochs and derive one fixed box per epoch."""
+    """탐지 결과를 안정적인 발표자 구간으로 묶고 구간별 고정 박스 도출"""
     if not records:
         return []
     max_gap = max(0.1, float(cfg.person_mask_roi_max_gap_sec))
@@ -1483,7 +1530,7 @@ def _fixed_box_epochs(
         boxes = record.get("boxes") or []
         if not boxes:
             continue
-        # One fixed ROI covers every detected person in this epoch.
+        # 고정 ROI 하나가 이 구간에서 탐지된 모든 인물을 커버
         centers = [((x1 + x2) / 2.0, (y1 + y2) / 2.0) for x1, y1, x2, y2 in boxes]
         center_x = float(np.median([p[0] for p in centers]))
         center_y = float(np.median([p[1] for p in centers]))
@@ -1529,12 +1576,13 @@ def _fixed_box_epochs(
     return epochs
 
 
+# 트래킹으로 geometry 변화 또는 박스 내 국소적 움직임이 확인된 탐지만 유지, 정적 오탐 제거
 def _motion_filter_person_boxes(
     frames: list[np.ndarray],
     boxes_by_frame: list[list[tuple[int, int, int, int]]],
     cfg: SampleCacheConfig,
 ) -> tuple[list[list[tuple[int, int, int, int]]], int]:
-    """Keep tracks after geometry or localized in-box motion proves movement."""
+    """geometry 또는 박스 내 국소적 움직임으로 이동이 증명된 트랙만 유지"""
     filtered: list[list[tuple[int, int, int, int]]] = []
     vetoed = 0
     min_center_shift = max(0.0, float(cfg.person_mask_fixed_min_center_shift_px))
@@ -1548,9 +1596,11 @@ def _motion_filter_person_boxes(
         int(round(max(0.1, float(cfg.person_mask_roi_max_gap_sec)) * float(cfg.sample_fps))),
     )
 
+    # bbox 중심 좌표 계산
     def center(box: tuple[int, int, int, int]) -> tuple[float, float]:
         return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
 
+    # bbox 면적 계산
     def area(box: tuple[int, int, int, int]) -> float:
         return max(1.0, float((box[2] - box[0]) * (box[3] - box[1])))
 
@@ -1571,8 +1621,8 @@ def _motion_filter_person_boxes(
                     best_iou = score
 
             if best_track is None or best_iou < match_iou:
-                # A newly seen box needs a second observation before it can
-                # prove motion.  This avoids masking static artwork/portraits.
+                # 새로 관측된 박스는 움직임을 증명하려면 두 번째 관측이 필요함,
+                # 이렇게 하면 정적인 그림/인물 사진을 마스킹하는 것을 방지
                 tracks.append({
                     "anchor": bbox,
                     "last": bbox,
@@ -1614,8 +1664,8 @@ def _motion_filter_person_boxes(
                 or localized_pixel_motion
             ):
                 best_track["confirmed"] = True
-                # Keep a fresh baseline for diagnostics and a future track
-                # split, but retain this confirmed presenter track.
+                # 진단과 향후 트랙 분할을 위해 새 기준점을 유지하되, 이 확정된
+                # 발표자 트랙 자체는 그대로 보존
                 best_track["anchor"] = bbox
 
             if bool(best_track["confirmed"]):
@@ -1626,8 +1676,9 @@ def _motion_filter_person_boxes(
     return filtered, vetoed
 
 
+# 캐시 task 구간(기본 8분)에 대해 TensorRT 인물 탐지를 실행하고 metadata 업데이트 파일 생성
 def _run_person_mask_task(cache_dir: str, task_dir: str, spec: dict, cfg: SampleCacheConfig) -> str:
-    """Run TensorRT person detection over an 8-minute cache task and emit metadata updates."""
+    """캐시 task 구간에 대해 TensorRT 인물 탐지를 실행하고 metadata 업데이트 생성"""
     cache_path = Path(cache_dir)
     task_path = Path(task_dir)
     payload = json.loads((cache_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -1732,9 +1783,9 @@ def _run_person_mask_task(cache_dir: str, task_dir: str, spec: dict, cfg: Sample
                 presence_boxes, height, width, max(0, int(cfg.person_mask_dilate_px))
             ),
         }
-        # An epoch gives the ROI geometry, but a static frame within that
-        # epoch must remain unmasked.  Only a frame with confirmed box motion
-        # receives the fixed ROI mask.
+        # epoch는 ROI geometry를 제공하지만, 그 epoch 내 정적인 프레임은
+        # 마스킹되지 않은 채로 남아야 함, 박스 움직임이 확정된 프레임만
+        # 고정 ROI 마스크를 받음
         if epoch_match is not None and record["boxes"]:
             update["person_mask_filename"] = epoch_match["filename"]
         updates.append(update)
@@ -1749,8 +1800,9 @@ def _run_person_mask_task(cache_dir: str, task_dir: str, spec: dict, cfg: Sample
     return str(task_path)
 
 
+# 청크 병합 완료 후, task들을 병렬 실행해 안정적인 고정 박스 person mask를 캐시에 부착
 def materialize_fixed_person_masks(cache_dir: str | Path, cfg: SampleCacheConfig) -> dict:
-    """Attach stable fixed-box person masks after chunked sample-cache merge."""
+    """청크 단위 sample-cache 병합 이후 안정적인 고정 박스 person mask 부착"""
     cache_path = Path(cache_dir)
     manifest_path = cache_path / MANIFEST_FILENAME
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1856,10 +1908,11 @@ def materialize_fixed_person_masks(cache_dir: str | Path, cfg: SampleCacheConfig
     return {"enabled": True, "tasks": len(specs), "workers": workers, "epochs": epoch_count}
 
 
+# 청크 1개를 별도 프로세스에서 생성하는 worker 함수, 부모가 계산한 person gate 결과를 그대로 사용
 def _create_chunk_worker(input_path: str, chunk_dir: str, cfg: SampleCacheConfig, spec: dict) -> str:
     worker_cfg = copy.deepcopy(cfg)
-    # The parent process performs the single-model presence gate. Workers only
-    # receive the result and never load a gate model themselves.
+    # 부모 프로세스가 단일 모델로 presence gate를 수행함, worker는 그 결과만
+    # 전달받을 뿐 gate 모델을 직접 로드하지 않음
     active_ranges = spec.get("person_mask_active_ranges")
     worker_cfg.person_mask_active_ranges = active_ranges
     worker_cfg.person_masks = bool(active_ranges) if cfg.person_masks else False
@@ -1882,6 +1935,7 @@ def _create_chunk_worker(input_path: str, chunk_dir: str, cfg: SampleCacheConfig
     return str(Path(chunk_dir) / MANIFEST_FILENAME)
 
 
+# 선택적 마스크 파일을 원본 청크 캐시에서 병합 캐시로 복사, 없으면 None
 def _copy_optional_mask(
     src_cache_dir: Path,
     dst_cache_dir: Path,
@@ -1898,8 +1952,9 @@ def _copy_optional_mask(
     return dst_rel_filename
 
 
+# 임시 캐시 파일을 내용 재작성 없이 하드링크(우선) 또는 복사로 영구 저장
 def _materialize_file(src: Path, dst: Path) -> str:
-    """Persist a temporary cache artifact without rewriting its contents."""
+    """임시 캐시 파일을 내용 재작성 없이 영구 저장"""
     if not src.exists() or src.stat().st_size <= 0:
         raise FileNotFoundError(f"Cannot materialize missing or empty cache artifact: {src}")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1912,12 +1967,13 @@ def _materialize_file(src: Path, dst: Path) -> str:
         return "copy"
 
 
+# 원본 청크 AVI 1개를 영구 저장하고, 그 core(비겹침) 프레임을 가상으로(디코딩 없이) 선택
 def _materialize_chunk_segment_worker(
     chunk_manifest_path: str,
     spec: dict,
     segment_path: str,
 ) -> dict:
-    """Persist one original chunk AVI and select its core frames virtually."""
+    """원본 청크 AVI 1개를 영구 저장하고 core 프레임을 가상으로 선택"""
 
     started_at = time.perf_counter()
     chunk_manifest = Path(chunk_manifest_path)
@@ -1932,6 +1988,7 @@ def _materialize_chunk_segment_worker(
     core_end = float(spec["core_end_sec"])
     is_last = bool(spec.get("is_last"))
 
+    # 프레임 timestamp가 core(비겹침) 구간에 속하는지 확인
     def in_core(item: dict) -> bool:
         timestamp = float(item["timestamp_sec"])
         if timestamp < core_start - 1e-6:
@@ -1976,6 +2033,8 @@ def _materialize_chunk_segment_worker(
     }
 
 
+# 청크별로 생성된 캐시들을 병합해 하나의 논리적 샘플 캐시(가상 조립)로 만듦, 실제
+# 영상 재인코딩 없이 각 청크의 core 프레임만 선택해 전체 manifest 구성
 def _assemble_chunk_caches(
     input_path: str,
     output_dir: str,
@@ -1987,9 +2046,9 @@ def _assemble_chunk_caches(
 
     video_meta = read_video_metadata(input_path)
     output_path = Path(output_dir)
-    # Chunk workers already wrote the final MJPEG bytes in parallel. Persist
-    # those exact files and trim overlaps only in the global manifest; do not
-    # decode, packet-trim, concatenate, or re-encode them here.
+    # 청크 worker들이 이미 최종 MJPEG 바이트를 병렬로 기록해둠, 그 파일들을 그대로
+    # 영구 저장하고 overlap 제거는 전역 manifest에서만 처리 — 여기서는 디코딩,
+    # 패킷 트리밍, 연결, 재인코딩을 하지 않음
     _, merged_manifest_path, _, _, _ = _prepare_output_dirs(output_path, cfg)
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
@@ -2071,8 +2130,8 @@ def _assemble_chunk_caches(
     if not ordered_results:
         raise RuntimeError("No chunk cache segments were materialized")
 
-    # Each segment is the original chunk cache, including overlap frames. The
-    # manifest exposes only core frames and preserves their original local index.
+    # 각 segment는 overlap 프레임을 포함한 원본 청크 캐시임, manifest는 core 프레임만
+    # 노출하고 그 원본 로컬 인덱스를 그대로 보존
     concat_mode = "none-direct-chunks"
 
     manifest_started_at = time.perf_counter()
@@ -2091,6 +2150,7 @@ def _assemble_chunk_caches(
     mask_copy_started_at = time.perf_counter()
     mask_future_map = {}
 
+    # presence mask 파일명/비율을 frame_record에 반영
     def _apply_presence_result(frame_record: dict, item: dict, rel_filename: str | None) -> None:
         if not rel_filename:
             return
@@ -2098,10 +2158,11 @@ def _assemble_chunk_caches(
         if item.get("person_presence_ratio") is not None:
             frame_record["person_presence_ratio"] = item.get("person_presence_ratio")
 
+    # person mask 파일명/비율/승계 정보를 frame_record에 반영
     def _apply_person_result(frame_record: dict, item: dict, rel_filename: str | None) -> None:
-        # Fixed-box person masking intentionally does not emit a separate
-        # per-frame presence-mask file. Its presence ratio therefore travels
-        # with the person-mask record and must survive the chunk merge.
+        # 고정 박스 person masking은 의도적으로 프레임별 별도 presence-mask 파일을
+        # 만들지 않음, 그래서 그 presence 비율은 person-mask 레코드와 함께 이동하며
+        # 청크 병합 이후에도 유지되어야 함
         if item.get("person_presence_ratio") is not None:
             frame_record["person_presence_ratio"] = item.get("person_presence_ratio")
         if not rel_filename:
@@ -2111,6 +2172,7 @@ def _assemble_chunk_caches(
             frame_record["person_mask_inherited"] = True
             frame_record["person_mask_inherited_distance"] = item.get("person_mask_inherited_distance")
 
+    # 마스크 파일 복사를 executor에 제출하거나(병렬) 즉시 동기 복사(직렬)
     def _schedule_or_copy_mask(
         executor: ThreadPoolExecutor | None,
         frame_record: dict,
@@ -2217,9 +2279,9 @@ def _assemble_chunk_caches(
     mask_materialize_elapsed = time.perf_counter() - mask_copy_started_at
 
     post_started_at = time.perf_counter()
-    # Segment-local frame indices are assigned before this point. Reordering
-    # only the manifest would detach those indices from their video frames, so
-    # reject an ordering bug instead of hiding it with a timestamp sort.
+    # segment-local 프레임 인덱스는 이 지점 이전에 이미 부여됨, manifest만 재정렬하면
+    # 그 인덱스가 실제 비디오 프레임과 어긋나므로, timestamp 정렬로 숨기지 않고
+    # 순서 버그를 예외로 명확히 드러냄
     for previous, current in zip(frames, frames[1:]):
         if (
             float(current["timestamp_sec"]),
@@ -2245,8 +2307,8 @@ def _assemble_chunk_caches(
     person_masks_payload = {
         "enabled": bool(cfg.person_masks),
         "dirname": MASKS_DIRNAME,
-        # Fixed-box mode stores the final mask only. Do not advertise a
-        # presence directory when no frame references one.
+        # 고정 박스 모드는 최종 마스크만 저장, 어떤 프레임도 참조하지 않으면
+        # presence 디렉터리를 노출하지 않음
         "presence_dirname": (
             PRESENCE_MASKS_DIRNAME
             if any(frame.get("person_presence_mask_filename") for frame in frames)
@@ -2321,14 +2383,14 @@ def _assemble_chunk_caches(
     return manifest
 
 
+# 캐시 매핑을 검증하고 대표 프레임들이 실제로 디코딩되는지 확인
 def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dict:
-    """Validate cache mappings and verify that representative frames decode.
+    """캐시 매핑을 검증하고 대표 프레임의 디코딩 가능 여부 확인
 
-    Direct chunk segments contain the exact AVI bytes written beside their chunk
-    manifests, so their safe alignment contract is structural: a valid local
-    index mapping and a decodable frame of the expected size. Comparing a hash
-    captured before lossy MJPEG encoding with decoded pixels creates false
-    mismatches and does not validate the virtual mapping.
+    직접 청크 segment는 청크 manifest 옆에 기록된 AVI 바이트를 그대로 담고 있으므로,
+    안전한 정렬 계약은 구조적으로 검증한다: 유효한 로컬 인덱스 매핑과 예상 크기로
+    디코딩되는 프레임인지만 확인한다. 손실 MJPEG 인코딩 이전에 캡처한 해시를
+    디코딩된 픽셀과 비교하면 오탐 불일치가 발생하며 가상 매핑을 검증하지도 못한다
     """
     if os.getenv("VLVERIFIER_SAMPLE_CACHE_VERIFY_ALIGNMENT", "1").strip().lower() in {
         "0", "false", "no", "off",
@@ -2449,8 +2511,8 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
                     "frame_no": int(frame_info.get("frame_no", 0) or 0),
                     "distance": int(distance),
                 })
-                # One mismatch is sufficient to reject the cache. Keep the
-                # validation overhead bounded on long recordings.
+                # 불일치 하나만으로도 캐시를 거부하기에 충분함, 긴 녹화에서
+                # 검증 오버헤드가 무한정 늘지 않도록 제한
                 break
         if not mismatches and checked != len(target_positions):
             mismatches.append({
@@ -2478,6 +2540,7 @@ def _verify_sample_cache_alignment(cache_dir: str | Path, manifest: dict) -> dic
         "mismatches": mismatches,
     }
 
+# 긴 영상을 청크 단위로 병렬 처리해 샘플 캐시 생성, 청크가 필요 없으면 단일 패스로 폴백
 def create_sample_cache_chunked(
     input_path: str,
     output_dir: str,
@@ -2555,9 +2618,9 @@ def create_sample_cache_chunked(
         ((available_memory or 0) / 1024**3),
     )
 
-    # Run all seek-based gate checks in the parent with one YOLO instance.
-    # This prevents every chunk worker from allocating its own TensorRT context
-    # merely to discover that its chunk has no person-mask work.
+    # seek 기반 gate 검사는 모두 부모 프로세스에서 YOLO 인스턴스 1개로 실행,
+    # 이렇게 하면 모든 청크 worker가 person-mask 작업이 없다는 것을 알아내기 위해
+    # 각자 TensorRT context를 할당하는 낭비를 방지
     if cfg.person_masks:
         engine_path = _existing_person_mask_engine(cfg.person_mask_engine)
         gate_model_source = str(engine_path) if engine_path else cfg.person_mask_model
@@ -2701,15 +2764,15 @@ def create_sample_cache_chunked(
             )
             return merged
 
-        # A bad cache cannot be handed to scene/OCR/VLM stages. Keep chunk
-        # parallelism enabled and fail visibly when the direct segment mapping
-        # or representative decoding check is invalid.
+        # 잘못된 캐시는 scene/OCR/VLM 단계로 넘길 수 없음, 청크 병렬 처리는 그대로
+        # 유지하되 직접 segment 매핑이나 대표 디코딩 검사가 실패하면 명확하게 실패시킴
         raise RuntimeError(
             "sample cache alignment mismatch after parallel chunk assembly: "
             f"checked={alignment['checked']} details={alignment['mismatches']}"
         )
 
 
+# 샘플 캐시 manifest.json 로드
 def load_sample_cache(cache_dir: str | Path) -> dict:
     manifest_path = Path(cache_dir) / MANIFEST_FILENAME
     if not manifest_path.exists():
@@ -2718,20 +2781,21 @@ def load_sample_cache(cache_dir: str | Path) -> dict:
         return json.load(f)
 
 
+# manifest가 청크 segment 방식(virtual assembly)으로 저장된 캐시인지 확인
 def is_segmented_sample_cache(manifest: dict) -> bool:
     return str(manifest.get("cache", {}).get("layout") or "").lower() == "segmented"
 
 
+# 흩어진 전역 위치들을 읽음, 정확한 seek을 캐시 segment별로 묶어서 처리
 def iter_sample_cache_selected_positions(
     cache_dir: str | Path,
     positions: list[int],
 ) -> Iterator[tuple[int, dict, np.ndarray]]:
-    """Read sparse global positions, grouping exact seeks by cache segment.
+    """흩어진 전역 위치를 읽음, 정확한 seek을 캐시 segment별로 그룹화
 
-    This is for integrity checks and other sparse consumers.  Each segment is
-    independently written MJPEG, so local frame seeking does not cross a
-    concat boundary.  Normal analysis ranges should use the sequential range
-    iterator below instead.
+    무결성 검사 등 sparse consumer를 위한 함수다. 각 segment는 독립적으로 기록된
+    MJPEG이라 로컬 프레임 seek이 concat 경계를 넘지 않는다. 일반적인 분석 구간은
+    아래의 순차 range iterator를 대신 사용해야 한다
     """
     cache_path = Path(cache_dir)
     manifest = load_sample_cache(cache_path)
@@ -2776,17 +2840,18 @@ def iter_sample_cache_selected_positions(
             cap.release()
 
 
+# legacy 또는 segment 방식 캐시 저장소에서 전역 위치 범위를 순차적으로 읽어 반환
 def iter_sample_cache_range(
     cache_dir: str | Path,
     start_pos: int,
     end_pos: int,
 ) -> Iterator[tuple[int, dict, np.ndarray]]:
-    """Yield global cache positions from legacy or segmented cache storage.
+    """legacy 또는 segment 방식 캐시 저장소에서 전역 위치 범위를 순차적으로 읽어 반환
 
-    A segmented cache stores original chunk AVIs independently. Overlap frames
-    remain in those files but are omitted from the global manifest. Every
-    manifest frame carries its exact segment path and local frame index, so no
-    reader relies on an AVI concat timestamp timeline.
+    segment 방식 캐시는 원본 청크 AVI를 독립적으로 저장한다. overlap 프레임은
+    그 파일들 안에 남아 있지만 전역 manifest에서는 제외된다. 모든 manifest 프레임은
+    정확한 segment 경로와 로컬 프레임 인덱스를 갖고 있어, 어떤 reader도 AVI concat
+    타임스탬프 타임라인에 의존하지 않는다
     """
     cache_path = Path(cache_dir)
     manifest = load_sample_cache(cache_path)
@@ -2837,9 +2902,9 @@ def iter_sample_cache_range(
                 current_segment = segment_filename
                 next_local_index = 0
 
-            # Decode forward from the segment start rather than relying on
-            # random AVI seeks.  A segment is only one core chunk (~2400
-            # samples), and normal range consumers remain sequential.
+            # 임의 AVI seek에 의존하지 않고 segment 시작부터 순방향으로 디코딩,
+            # segment는 core 청크 하나(~2400 샘플)뿐이고 일반 range consumer는
+            # 순차적으로 읽으므로 이 방식으로 충분
             while next_local_index <= local_index:
                 ret, frame = cap.read()
                 if not ret or frame is None:
@@ -2856,16 +2921,18 @@ def iter_sample_cache_range(
             cap.release()
 
 
+# 캐시 전체를 순회하며 (frame_info, frame) 쌍 생성
 def iter_sample_cache(cache_dir: str | Path) -> Iterator[tuple[dict, np.ndarray]]:
     manifest = load_sample_cache(cache_dir)
     for _, frame_info, frame in iter_sample_cache_range(cache_dir, 0, len(manifest.get("frames", []))):
         yield frame_info, frame
 
 
+# CLI 인자 파서 구성
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build sampled frame cache for video analysis passes.")
-    parser.add_argument("--input", "-i", required=True, help="Input .mp4 path")
-    parser.add_argument("--output", "-o", required=True, help="Output cache directory")
+    parser = argparse.ArgumentParser(description="영상 분석 단계용 샘플 프레임 캐시 생성")
+    parser.add_argument("--input", "-i", required=True, help="입력 .mp4 경로")
+    parser.add_argument("--output", "-o", required=True, help="출력 캐시 디렉터리")
     parser.add_argument("--sample-every", type=int, default=SampleCacheConfig.sample_every)
     parser.add_argument("--sample-fps", type=float, default=SampleCacheConfig.sample_fps)
     parser.add_argument("--resize-width", type=int, default=SampleCacheConfig.resize_width)
@@ -2875,17 +2942,17 @@ def parse_args() -> argparse.Namespace:
         default=SampleCacheConfig.decode_backend,
     )
     parser.add_argument("--person-mask-batch-size", type=int, default=SampleCacheConfig.person_mask_batch_size)
-    parser.add_argument("--person-masks", action="store_true", default=None, help="Enable YOLO person mask generation")
-    parser.add_argument("--no-person-masks", action="store_false", dest="person_masks", help="Disable YOLO person mask generation")
+    parser.add_argument("--person-masks", action="store_true", default=None, help="YOLO person mask 생성 활성화")
+    parser.add_argument("--no-person-masks", action="store_false", dest="person_masks", help="YOLO person mask 생성 비활성화")
     parser.add_argument("--person-mask-model", default=SampleCacheConfig.person_mask_model)
     parser.add_argument("--person-mask-dilate-px", type=int, default=SampleCacheConfig.person_mask_dilate_px)
     parser.add_argument("--person-mask-static-diff-threshold", type=float, default=SampleCacheConfig.person_mask_static_diff_threshold)
     parser.add_argument("--person-mask-static-changed-ratio-threshold", type=float, default=SampleCacheConfig.person_mask_static_changed_ratio_threshold)
     parser.add_argument("--person-mask-match-iou-threshold", type=float, default=SampleCacheConfig.person_mask_match_iou_threshold)
     parser.add_argument("--person-mask-fill-gap-sec", type=float, default=SampleCacheConfig.person_mask_fill_gap_sec)
-    parser.add_argument("--save-person-mask-previews", action="store_true", help="Save a few masked sample preview JPGs for debugging")
+    parser.add_argument("--save-person-mask-previews", action="store_true", help="디버깅용으로 마스킹된 샘플 미리보기 JPG 일부 저장")
     parser.add_argument("--person-mask-preview-limit", type=int, default=SampleCacheConfig.person_mask_preview_limit)
-    parser.add_argument("--chunked", action="store_true", help="Build sample cache by 5-minute chunks and merge it back")
+    parser.add_argument("--chunked", action="store_true", help="5분 단위 청크로 샘플 캐시를 생성한 뒤 다시 병합")
     parser.add_argument("--chunk-sec", type=float, default=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_SEC", "300")))
     parser.add_argument("--chunk-overlap-sec", type=float, default=float(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_OVERLAP_SEC", "30")))
     parser.add_argument("--chunk-workers", type=int, default=int(os.getenv("VLVERIFIER_SAMPLE_CACHE_CHUNK_WORKERS", "2")))
@@ -2893,6 +2960,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# CLI 진입점, 청크 모드 여부에 따라 단일 패스 또는 청크 병렬 캐시 생성 실행
 def main():
     args = parse_args()
     if args.debug:

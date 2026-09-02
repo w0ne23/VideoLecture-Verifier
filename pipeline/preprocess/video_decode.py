@@ -1,3 +1,4 @@
+# 영상 프레임 디코딩, OpenCV/FFmpeg(CUDA·VideoToolbox) 백엔드 자동 선택 및 폴백
 from __future__ import annotations
 
 import ctypes
@@ -17,10 +18,12 @@ log = logging.getLogger(__name__)
 _FFMPEG_HWACCEL_DEVICE_CACHE: dict[str, bool] = {}
 
 
+# GPU 전용 모드 여부, VLVERIFIER_GPU_ONLY 환경변수로 제어
 def _gpu_only_enabled() -> bool:
     return os.getenv("VLVERIFIER_GPU_ONLY", "0").strip().lower() not in {"", "0", "false", "no"}
 
 
+# OpenCV로 영상 메타데이터(fps/프레임 수/해상도/길이) 조회, 실패 시 None
 def _opencv_video_metadata(input_path: str) -> dict | None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -43,6 +46,7 @@ def _opencv_video_metadata(input_path: str) -> dict | None:
     }
 
 
+# ffprobe로 영상 메타데이터 조회 (OpenCV보다 정확한 fps/길이 정보), 실패 시 None
 def _ffprobe_video_metadata(input_path: str) -> dict | None:
     if shutil.which("ffprobe") is None:
         return None
@@ -123,6 +127,7 @@ def _ffprobe_video_metadata(input_path: str) -> dict | None:
         return None
 
 
+# 영상 메타데이터 조회, ffprobe 우선 시도 후 실패하면 OpenCV로 폴백
 def read_video_metadata(input_path: str) -> dict:
     metadata = _ffprobe_video_metadata(input_path) or _opencv_video_metadata(input_path)
     if metadata is None:
@@ -130,6 +135,7 @@ def read_video_metadata(input_path: str) -> dict:
     return metadata
 
 
+# 현재 ffmpeg 빌드가 지원하는 하드웨어 가속 방식 목록 조회
 def _ffmpeg_hwaccels() -> set[str]:
     if shutil.which("ffmpeg") is None:
         return set()
@@ -151,6 +157,7 @@ def _ffmpeg_hwaccels() -> set[str]:
     return accels
 
 
+# CUDA 런타임/드라이버 사용 가능 여부 확인 (디바이스 파일, nvidia-smi, libcuda 순으로 확인)
 def _cuda_runtime_available() -> bool:
     if platform.system().lower() == "darwin":
         return False
@@ -177,6 +184,7 @@ def _cuda_runtime_available() -> bool:
         return False
 
 
+# 지정 hwaccel로 실제 디코딩이 되는지 더미 입력으로 검증, 결과는 캐시 (cuda 외에는 항상 True로 간주)
 def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
     hwaccel = (hwaccel or "").strip().lower()
     if not hwaccel:
@@ -221,6 +229,9 @@ def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
     return available
 
 
+# 요청된 백엔드(preferred_backend, 없으면 환경변수/auto)를 실제 사용 가능한 (backend, hwaccel)
+# 조합으로 해석, GPU_ONLY 모드에서 요청한 가속을 쓸 수 없으면 예외, auto는 cuda -> (macOS)
+# videotoolbox -> opencv 순으로 폴백
 def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | None]:
     backend = (preferred_backend or os.getenv("VLVERIFIER_SLIDE_DECODE_BACKEND", "auto")).strip().lower()
     hwaccels = _ffmpeg_hwaccels()
@@ -252,6 +263,7 @@ def resolve_decode_backend(preferred_backend: str | None) -> tuple[str, str | No
     return "opencv", None
 
 
+# 목표 크기와 다르면 리사이즈, 같으면 그대로 반환
 def _resize_frame_if_needed(frame: np.ndarray, output_width: int | None, output_height: int | None) -> np.ndarray:
     if not output_width or not output_height:
         return frame
@@ -260,6 +272,7 @@ def _resize_frame_if_needed(frame: np.ndarray, output_width: int | None, output_
     return cv2.resize(frame, (int(output_width), int(output_height)), interpolation=cv2.INTER_AREA)
 
 
+# start/end 초 단위 구간을 fps 기준 시작 프레임 오프셋과 함께 정규화
 def _normalize_range(
     fps: float,
     start_sec: float | None,
@@ -271,6 +284,7 @@ def _normalize_range(
     return start, end, start_frame_offset
 
 
+# OpenCV로 프레임을 순회하며 sample_every 또는 sample_fps 기준으로 샘플링해 yield
 def _iter_frames_opencv(
     input_path: str,
     fps: float,
@@ -290,7 +304,7 @@ def _iter_frames_opencv(
         next_sample_ts = start
         if sample_fps is not None and sample_fps > 0:
             step = 1.0 / float(sample_fps)
-            # Align the first sample to the requested range start.
+            # 첫 샘플을 요청 구간 시작에 맞춤
             next_sample_ts = start
         while True:
             ret, frame = cap.read()
@@ -313,6 +327,8 @@ def _iter_frames_opencv(
         cap.release()
 
 
+# ffmpeg 서브프로세스로 rawvideo(bgr24) 프레임을 파이프로 읽어 순회, hwaccel(cuda 등)로
+# 하드웨어 디코딩 후 필요 시 스케일/포맷 필터 체인을 적용해 CPU 메모리로 프레임 전달
 def _iter_frames_ffmpeg(
     input_path: str,
     fps: float,
@@ -346,8 +362,8 @@ def _iter_frames_ffmpeg(
         frame_step = 1
         frame_no = start_frame_offset + 1
     else:
-        # FFmpeg select n is chunk-relative, so add the original frame offset
-        # to keep the same global sampling pattern across chunk boundaries.
+        # ffmpeg select의 n은 청크 상대적이므로, 청크 경계를 넘어서도 동일한 전역 샘플링
+        # 패턴을 유지하기 위해 원래 프레임 오프셋을 더함
         select_expr = f"select='not(mod(n+{start_frame_offset + 1}\\,{sample_every}))'"
         frame_no = start_frame_offset + 1
         while frame_no % sample_every != 0:
@@ -355,8 +371,8 @@ def _iter_frames_ffmpeg(
         frame_step = sample_every
 
     if hwaccel == "cuda":
-        # CUDA frames cannot be downloaded directly as bgr24 on many FFmpeg builds.
-        # Keep the tested chain: scale_cuda -> hwdownload -> format=nv12 -> format=bgr24.
+        # 많은 FFmpeg 빌드에서 CUDA 프레임을 bgr24로 바로 다운로드할 수 없음,
+        # 검증된 체인 유지: scale_cuda -> hwdownload -> format=nv12 -> format=bgr24
         filters.append("hwdownload")
         filters.append("format=nv12")
         filters.append("format=bgr24")
@@ -424,6 +440,8 @@ def _iter_frames_ffmpeg(
         raise RuntimeError(f"ffmpeg decode failed (hwaccel={hwaccel}, exit={ret}): {err_text}")
 
 
+# ffmpeg hwaccel 디코딩을 우선 시도, 중간에 실패하면 이미 처리한 프레임 이후부터 OpenCV로
+# 이어서 디코딩 (GPU_ONLY면 폴백 없이 예외 전파)
 def _iter_with_fallback(ffmpeg_iter, opencv_iter_factory, hwaccel: str):
     if _gpu_only_enabled():
         yield from ffmpeg_iter
@@ -442,6 +460,8 @@ def _iter_with_fallback(ffmpeg_iter, opencv_iter_factory, hwaccel: str):
         yield frame_no, timestamp, frame
 
 
+# 설정에 따라 ffmpeg(+hwaccel, 실패 시 OpenCV 폴백) 또는 OpenCV로 프레임 이터레이터 생성,
+# (iterator, 백엔드 설명 문자열) 반환
 def iter_video_frames(
     input_path: str,
     *,
@@ -505,6 +525,7 @@ def iter_video_frames(
     )
 
 
+# OpenCV로 지정 타임스탬프의 프레임 1장 읽기, 실패 시 None
 def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -519,6 +540,7 @@ def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float):
         cap.release()
 
 
+# ffmpeg로 지정 타임스탬프의 프레임 1장 읽기, 실패 시 None
 def _read_frame_by_timestamp_ffmpeg(
     input_path: str,
     timestamp_sec: float,
@@ -557,6 +579,8 @@ def _read_frame_by_timestamp_ffmpeg(
     return np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3)).copy()
 
 
+# 지정 타임스탬프의 프레임 1장 조회, ffmpeg(hwaccel) 우선 시도 후 실패하면 ffmpeg CPU,
+# 그마저 실패하면 OpenCV로 순차 폴백 (GPU_ONLY면 폴백 단계에서 예외)
 def read_frame_at_timestamp(
     input_path: str,
     timestamp_sec: float,
