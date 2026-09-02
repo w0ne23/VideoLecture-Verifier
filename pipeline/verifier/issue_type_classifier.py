@@ -740,7 +740,11 @@ def _call_anthropic(
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # os.getenv's default only applies when the var is unset — a set-but-empty
+    # ANTHROPIC_BASE_URL (as env_file produces from `ANTHROPIC_BASE_URL=`)
+    # silently built an empty base_url and broke every call from this
+    # classifier specifically (see the equivalent fix in pipeline/config.py).
+    base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
     client = Anthropic(api_key=api_key, base_url=base_url, max_retries=0)
     classifier_schema = {
         "type": "object",

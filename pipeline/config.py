@@ -222,7 +222,7 @@ def get_openai_client():
 
 def get_xai_client():
     current_key = os.getenv("XAI_API_KEY") or ""
-    current_base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
+    current_base_url = os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1"
     return _cached_client(
         "xai", f"{current_key}|{current_base_url}",
         lambda: (
@@ -235,7 +235,7 @@ def get_xai_client():
 
 def get_deepseek_client():
     current_key = os.getenv("DEEPSEEK_API_KEY") or ""
-    current_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    current_base_url = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
     return _cached_client(
         "deepseek", f"{current_key}|{current_base_url}",
         lambda: (
@@ -248,7 +248,7 @@ def get_deepseek_client():
 
 def get_ollama_client():
     current_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
-    current_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434/v1")
+    current_base_url = os.getenv("OLLAMA_BASE_URL") or "http://ollama:11434/v1"
     return _cached_client(
         "ollama", f"{current_key}|{current_base_url}",
         lambda: (
@@ -261,7 +261,11 @@ def get_ollama_client():
 
 def get_anthropic_client():
     current_key = os.getenv("ANTHROPIC_API_KEY") or ""
-    current_base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # .env documents "empty = SDK default", but os.getenv's default only kicks in
+    # when the var is unset — a set-but-empty ANTHROPIC_BASE_URL (as env_file
+    # produces from `ANTHROPIC_BASE_URL=`) silently built an empty base_url and
+    # broke every Anthropic call with a generic connection error.
+    current_base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
     return _cached_client(
         "anthropic", f"{current_key}|{current_base_url}",
         lambda: (
