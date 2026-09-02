@@ -1,9 +1,7 @@
-/**
- * 통계 페이지 표시 설정 + 인사이트 문구 생성 헬퍼.
- * 데이터는 GET /api/stats (백엔드 verification_stats 집계)에서 온다.
- */
+// 통계 페이지 표시 설정 + 인사이트 문구 생성 헬퍼
+// 데이터 출처: GET /api/stats (백엔드 verification_stats 집계)
 
-/** 지식 오류 유형 — 차트 색상은 전 그래프 공통. composite_issue = 슬라이드 오류. */
+// 지식 오류 유형 — 차트 색상은 전 그래프 공통, composite_issue = 슬라이드 오류
 export const ISSUE_TYPES = [
   { key: 'factual_error', label: '사실 오류', color: '#dc2626' },
   { key: 'temporal_error', label: '오래된 내용', color: '#d97706' },
@@ -15,7 +13,7 @@ export const ISSUE_TYPES = [
 export const ISSUE_TYPE_LABELS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.label]))
 export const ISSUE_TYPE_COLORS = Object.fromEntries(ISSUE_TYPES.map(t => [t.key, t.color]))
 
-/** 파이프라인 도메인 키 → 한글. 불명/미분류는 'etc'(기타)로 들어온다. */
+// 파이프라인 도메인 키 → 한글, 불명/미분류는 'etc'(기타)로 유입
 export const DOMAIN_LABELS = {
   engineering: '공학',
   natural_science: '자연과학',
@@ -27,7 +25,7 @@ export const DOMAIN_LABELS = {
   etc: '기타',
 }
 
-/** 영상 출처 태그 → 한글. */
+// 영상 출처 태그
 export const SOURCE_TAG_LABELS = {
   instructor: '교수자 제공',
   kocw: 'KOCW',
@@ -36,12 +34,13 @@ export const SOURCE_TAG_LABELS = {
   etc: '기타',
 }
 
-/** 강의 길이별 뷰: 오류 유형이 아니라 파이프라인 소요 시간(전처리/검증)을 보여준다. */
+// 강의 길이별 뷰 전용 — 오류 유형이 아니라 파이프라인 소요 시간(전처리/검증) 표시
 export const PROCESS_STAGES = [
   { key: 'preprocess', label: '전처리 시간', color: '#0d9488' },
   { key: 'verify', label: '검증 시간', color: '#e11d48' },
 ]
 
+// typeDist(유형별 건수)를 건수 내림차순으로 정렬, 0건 유형은 제외
 export function rankTypes(typeDist) {
   return ISSUE_TYPES
     .map(t => ({ ...t, value: typeDist?.[t.key] || 0 }))
@@ -49,6 +48,7 @@ export function rankTypes(typeDist) {
     .sort((a, b) => b.value - a.value)
 }
 
+// 뷰별(tag / duration / domain) 인사이트 카드 문구 생성 — { title, bullets[] } 반환
 export function buildInsight(view, rows) {
   if (!rows?.length) {
     return { title: '집계된 데이터가 없습니다', bullets: ['검증이 완료된 강의가 아직 없습니다.'] }
@@ -60,7 +60,7 @@ export function buildInsight(view, rows) {
       Object.entries(r.typeDist).forEach(([k, v]) => { all[k] = (all[k] || 0) + v })
     })
     const ranked = rankTypes(all)
-    // 출처마다 강의 개수가 달라 총 건수만 비교하면 왜곡되므로 강의당 평균으로 비교한다.
+    // 출처마다 강의 개수가 달라 총 건수 비교는 왜곡되므로 강의당 평균으로 비교
     const topAvg = rows
       .filter(r => r.lectureCount)
       .map(r => ({ ...r, avg: r.total / r.lectureCount }))
@@ -108,7 +108,7 @@ export function buildInsight(view, rows) {
   }
 }
 
-// 도메인별 뷰는 캐러셀이라 현재 표시 중인 도메인 하나만 받아 그 기준으로 설명을 만든다.
+// 도메인별 뷰는 캐러셀이라 현재 표시 중인 도메인 행 하나만 받아 그 기준으로 문구 생성
 export function buildDomainInsight(row) {
   if (!row) return { title: '도메인별 오류 유형 분포', bullets: ['표시할 도메인이 없습니다.'] }
   const ranked = rankTypes(row.typeDist)

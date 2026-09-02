@@ -1,6 +1,8 @@
+// LLM API 키 저장 API (/api/admin/llm-credentials)
+
 import { API_BASE, readError } from './client'
 
-/** Store an API key server-side and return only its reference and masked label. */
+// API 키를 서버에 저장하고 참조값 + 마스킹 라벨만 돌려받음 (원본 키는 클라이언트에 남기지 않음)
 export async function saveLlmCredential({ provider, model, apiKey }) {
   const res = await fetch(`${API_BASE}/admin/llm-credentials`, {
     method: 'POST',
