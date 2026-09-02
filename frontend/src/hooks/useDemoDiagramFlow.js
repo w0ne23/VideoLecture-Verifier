@@ -2,23 +2,25 @@ import { useEffect, useRef, useState } from 'react'
 import { DEMO_PHASES } from './useDemoPipelineFlow'
 import { NODE_BY_ID, NODE_IDS, TICKS } from '../components/verifier/diagramPipelineConstants'
 
-// 다이어그램 파이프라인 데모(/dev/verify-demo-diagram, /dev/verify-demo) 공용. 구조는
-// useDemoPipelineFlow와 같지만(업로드→진행→완료, 로컬 타이머만 사용) 한 틱에 여러 노드가
-// 동시에 활성화될 수 있다는 점이 다르다. 틱 간격은 페이지마다 다르게 쓸 수 있게 인자로 뺐다.
+// 다이어그램 파이프라인 데모(/dev/verify-demo-diagram, /dev/verify-demo) 공용
+// 구조는 useDemoPipelineFlow 와 같으나(업로드→진행→완료, 로컬 타이머), 한 틱에 여러 노드가
+// 동시에 활성화될 수 있는 점이 다름. 틱 간격은 페이지별로 다르게 쓸 수 있게 인자로 분리
 const DEFAULT_TICK_DELAY_MS = 1400
 const LAST_TICK_INDEX = TICKS.length - 1
 
-// 통합 멀티모달 텍스트 생성은 실제로 오래 걸리는 단계가 아니라서, 다른 단계처럼
-// 오래 머무르지 않고 한두 번만 깜빡인 뒤 바로 다음 단계로 넘어가게 짧게 잡는다.
+// 통합 멀티모달 텍스트 생성은 실제로 오래 걸리는 단계가 아니라, 한두 번만 깜빡이고
+// 바로 다음으로 넘어가도록 짧게 설정
 const QUICK_TICK_NODE_IDS = new Set(['integrated_text'])
 const QUICK_TICK_DELAY_MS = 1500
 
+// 파일명에서 확장자를 뗀 문자열
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
 }
 
+// tickIndex 기준 노드별 상태 맵 — 이전 틱은 done, 현재 틱은 run(또는 error)
 function buildStatus(tickIndex, { errorAtCurrent = false } = {}) {
-  // video는 파이프라인 진입 전(업로드 시점)에 이미 끝난 단계라 항상 done으로 표시한다.
+  // video 는 파이프라인 진입 전(업로드 시점)에 끝난 단계라 항상 done
   const status = Object.fromEntries(NODE_IDS.map(id => [id, id === 'video' ? 'done' : 'wait']))
   TICKS.forEach((ids, i) => {
     ids.forEach(id => {
@@ -31,6 +33,7 @@ function buildStatus(tickIndex, { errorAtCurrent = false } = {}) {
 
 const ALL_DONE_STATUS = Object.fromEntries(NODE_IDS.map(id => [id, 'done']))
 
+// tickDelayMs: 기본 틱 간격 (QUICK_TICK_NODE_IDS 가 포함된 틱은 QUICK_TICK_DELAY_MS 적용)
 export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
   const [phase, setPhase] = useState(DEMO_PHASES.UPLOAD)
   const [file, setFile] = useState(null)
@@ -63,7 +66,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
   function selectFile(nextFile) {
     if (!nextFile) return
     setFile(nextFile)
-    // 사용자가 제목을 직접 수정한 적이 없을 때만 파일명으로 자동 갱신한다.
+    // 사용자가 제목을 직접 수정한 적 없을 때만 파일명으로 자동 갱신
     setTitle(prev => (isTitleManual && prev.trim() ? prev : fileTitle(nextFile)))
   }
 
@@ -88,8 +91,7 @@ export function useDemoDiagramFlow(tickDelayMs = DEFAULT_TICK_DELAY_MS) {
     setAutoPlay(true)
   }
 
-  // 파이프라인 화면에서 "이전으로" — reset과 달리 이미 고른 파일·제목은 그대로 두고
-  // 업로드 화면으로만 돌아간다.
+  // 파이프라인 화면에서 "이전으로" — reset 과 달리 고른 파일·제목은 유지, 업로드 화면으로만 복귀
   function backToUpload() {
     setPhase(DEMO_PHASES.UPLOAD)
     setTickIndex(0)
