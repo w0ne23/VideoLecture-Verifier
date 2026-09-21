@@ -32,10 +32,6 @@ const STATUS_LABELS = {
   not_applicable: '대상 아님',
 }
 
-// 파이프라인이 웹 근거 검색을 수행하는 유형 (classified_issue_grounder.GROUNDABLE_CATEGORIES)
-// 나머지 유형(과도한 일반화·혼동 설명 등)은 웹 검색 대상 아님
-const GROUNDABLE_TYPES = new Set(['factual_error', 'temporal_error'])
-
 // 지식 오류 4개 카테고리 + 슬라이드 오류 = 5개 필터 버튼
 const KNOWLEDGE_CATEGORY_KEYS = ['factual_error', 'temporal_error', 'scope_overclaim', 'confusing_explanation']
 const CATEGORY_DEFS = [
@@ -383,19 +379,8 @@ function WebGroundingPanel({ item }) {
     )
   }
 
-  // 판정 못 난 경우 — 대상 유형이면 "판정 불가", 비대상 유형이면 "대상 아님"
-  const groundable = itemCategories(item).some(cat => GROUNDABLE_TYPES.has(cat))
-  return (
-    <DetailGroup title="웹 검색 결과" noDivider>
-      <div className="grounding-card grounding-card--na">
-        <p className="claim-detail-text">
-          {groundable
-            ? '웹 근거로는 판정하지 못했습니다.'
-            : `${STATUS_LABELS.not_applicable} — 이 유형은 웹 검색 대상이 아닙니다.`}
-        </p>
-      </div>
-    </DetailGroup>
-  )
+  // 판정 못 난 경우(근거 없음 / 대상 아님 / 판정 불가) — 섹션 자체를 숨김
+  return null
 }
 
 // 모델별 판단 목록 (model_judgments 우선, 없으면 severity 체크의 model_results 사용)
