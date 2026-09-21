@@ -41,6 +41,24 @@ export async function getLectureResult(lectureId) {
   return res.json()
 }
 
+// 강의자가 남긴 오류 항목별 평가 전체 조회 — { item_id: 'agree' | 'neutral' | 'disagree' }
+export async function getLectureReviews(lectureId) {
+  const res = await fetch(`${API_BASE}/lectures/${lectureId}/reviews`)
+  if (!res.ok) throw new Error(await readError(res, 'Reviews fetch failed'))
+  return res.json()
+}
+
+// 오류 항목 하나에 대한 평가 저장/수정
+export async function saveLectureReview(lectureId, itemId, rating) {
+  const res = await fetch(`${API_BASE}/lectures/${lectureId}/reviews/${encodeURIComponent(itemId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rating }),
+  })
+  if (!res.ok) throw new Error(await readError(res, 'Review save failed'))
+  return res.json()
+}
+
 // 검증 단계별 중간 산출물(raw JSON) 조회 — "검증 과정 보기" 화면에서 사용
 // stage: claim_extraction | issue_judge | issue_classification | web_grounding | final_verification | slide_review
 export async function getLectureArtifact(lectureId, stage) {

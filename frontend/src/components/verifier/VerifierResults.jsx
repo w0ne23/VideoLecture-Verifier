@@ -2,6 +2,7 @@
 // verifier: GET /lectures/{id}/result 응답 (final_confirmed_claims / needs_review_claims / slide_errors)
 
 import { useMemo, useState } from 'react'
+import { useLectureReviews } from '../../hooks/useLectureReviews'
 
 // --- 라벨 매핑 (백엔드 enum → 한글) ---------------------------------------------
 
@@ -414,8 +415,61 @@ function ModelJudgments({ item }) {
   )
 }
 
-// 지식 오류 카드 펼침 영역 — 문제 요약 + 복합 점수 + 모델별 판단 + 웹 검색 결과
-function ClaimDetail({ item }) {
+const REVIEW_RATINGS = [
+  { value: 'agree', label: '동의' },
+  { value: 'neutral', label: '중립' },
+  { value: 'disagree', label: '비동의' },
+]
+
+// 강의자 평가 컨트롤 — 동의/중립/비동의 선택 + 저장/수정 버튼
+// 라디오 선택은 로컬 초안(draft)일 뿐 즉시 반영되지 않고, 버튼을 눌러야 저장됨
+// (실수로 클릭 한 번에 평가가 바뀌는 것을 방지)
+function InstructorRatingControl({ itemId, reviews, onSave, isSaving }) {
+  const savedRating = reviews[itemId] ?? null
+  const [draft, setDraft] = useState(savedRating)
+
+  if (!itemId) return null
+
+  const hasChange = draft != null && draft !== savedRating
+  const saving = isSaving?.(itemId)
+  const buttonLabel = saving ? '저장 중…' : savedRating ? '수정' : '저장'
+
+  return (
+    <DetailGroup title="강의자 평가(해당 오류에 대한 동의 여부)" noDivider>
+      <div className="instructor-rating">
+        <div className="instructor-rating-options" role="radiogroup" aria-label="검증 결과 평가">
+          {REVIEW_RATINGS.map(option => (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={draft === option.value}
+              className={cx(
+                'instructor-rating-btn',
+                `instructor-rating-btn--${option.value}`,
+                draft === option.value && 'instructor-rating-btn--active'
+              )}
+              onClick={() => setDraft(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="btn instructor-rating-save"
+          disabled={!hasChange || saving}
+          onClick={() => onSave(itemId, draft)}
+        >
+          {buttonLabel}
+        </button>
+      </div>
+    </DetailGroup>
+  )
+}
+
+// 지식 오류 카드 펼침 영역 — 문제 요약 + 복합 점수 + 모델별 판단 + 웹 검색 결과 + 강의자 평가
+function ClaimDetail({ item, itemId, reviews, onSaveReview, isSavingReview }) {
   const problem = item.problem || {}
   const correctInfo = problem.correct_info
 
@@ -432,13 +486,14 @@ function ClaimDetail({ item }) {
       <CompositeScoringPanel item={item} />
       <ModelJudgments item={item} />
       <WebGroundingPanel item={item} />
+      <InstructorRatingControl itemId={itemId} reviews={reviews} onSave={onSaveReview} isSaving={isSavingReview} />
     </div>
   )
 }
 
 // 지식 오류 카드 — 요약 행(유형 칩·슬라이드·시각·심각도) + 펼침 상세
 // onSeek(startTime): 시각 버튼 클릭 시 영상 해당 지점으로 이동
-function ClaimCard({ item, index, categories, onSeek }) {
+function ClaimCard({ item, index, categories, onSeek, reviews, onSaveReview, isSavingReview }) {
   const [open, setOpen] = useState(false)
   const claimText = pick(item, ['resolved_claim', 'claim_text', 'claim', 'statement', 'text', 'content'])
   const severity = getSeverity(item)
@@ -498,7 +553,13 @@ function ClaimCard({ item, index, categories, onSeek }) {
       </div>
       {open && (
         <div className="claim-detail">
-          <ClaimDetail item={item} />
+          <ClaimDetail
+            item={item}
+            itemId={item.feedback_id || item.issue_id}
+            reviews={reviews}
+            onSaveReview={onSaveReview}
+            isSavingReview={isSavingReview}
+          />
         </div>
       )}
     </article>
@@ -506,7 +567,7 @@ function ClaimCard({ item, index, categories, onSeek }) {
 }
 
 // 슬라이드 오류 카드 — 요약 행(오류 유형·슬라이드·원문→수정문) + 펼침 상세(슬라이드 이미지 포함)
-function SlideErrorCard({ item, index }) {
+function SlideErrorCard({ item, index, reviews, onSaveReview, isSavingReview }) {
   const [open, setOpen] = useState(false)
   const imageUrl = item.slide_image_url || item.image_url || fileUrlFromStoragePath(item.slide_image_path || item.image_path)
   const slideTypeKey = item.error_type || 'slide_error'
@@ -561,6 +622,12 @@ function SlideErrorCard({ item, index }) {
             <DetailRow label="오류 유형" value={SLIDE_ERROR_TYPE_LABELS[item.error_type] || item.error_type} />
             <DetailRow label="판단 이유" value={item.reason} wide />
           </dl>
+          <InstructorRatingControl
+            itemId={item.slide_error_id}
+            reviews={reviews}
+            onSave={onSaveReview}
+            isSaving={isSavingReview}
+          />
         </div>
       )}
     </article>
@@ -636,7 +703,7 @@ function sortEntries(entries, mode) {
 // --- 화면 컴포넌트 ---------------------------------------------------------
 
 // 유형 필터 버튼 + 정렬 토글 + 카드 목록
-function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
+function IssueExplorer({ knowledgeItems, slideErrors, onSeek, reviews, onSaveReview, isSavingReview }) {
   const [activeCategory, setActiveCategory] = useState(null)
   const [sortMode, setSortMode] = useState('time')
 
@@ -708,6 +775,9 @@ function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
                   key={entry.item.slide_error_id || `slide-${entry.sourceIndex}`}
                   item={entry.item}
                   index={entry.sourceIndex}
+                  reviews={reviews}
+                  onSaveReview={onSaveReview}
+                  isSavingReview={isSavingReview}
                 />
               )
               : (
@@ -717,6 +787,9 @@ function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
                   index={entry.sourceIndex}
                   categories={entry.categories}
                   onSeek={onSeek}
+                  reviews={reviews}
+                  onSaveReview={onSaveReview}
+                  isSavingReview={isSavingReview}
                 />
               )
           )}
@@ -726,7 +799,9 @@ function IssueExplorer({ knowledgeItems, slideErrors, onSeek }) {
   )
 }
 
-export default function VerifierResults({ verifier, onSeek }) {
+export default function VerifierResults({ verifier, onSeek, lectureId }) {
+  const { reviews, saveReview, isSaving } = useLectureReviews(lectureId)
+
   if (!verifier) return null
 
   const confirmed = verifier.final_confirmed_claims || []
@@ -744,7 +819,14 @@ export default function VerifierResults({ verifier, onSeek }) {
         <strong className="result-total-value">{totalCount}</strong>
       </div>
 
-      <IssueExplorer knowledgeItems={knowledgeItems} slideErrors={slideErrors} onSeek={onSeek} />
+      <IssueExplorer
+        knowledgeItems={knowledgeItems}
+        slideErrors={slideErrors}
+        onSeek={onSeek}
+        reviews={reviews}
+        onSaveReview={saveReview}
+        isSavingReview={isSaving}
+      />
     </div>
   )
 }

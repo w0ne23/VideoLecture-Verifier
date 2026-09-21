@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal, get_db
@@ -21,11 +22,15 @@ from app.models import (
     Lecture,
     normalize_job_type,
 )
-from app.services import lecture_service
+from app.services import lecture_service, review_service
 from app.services.storage_service import save_upload, storage_relpath
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/lectures')
+
+
+class InstructorReviewIn(BaseModel):
+    rating: str
 
 
 # 강의 목록 조회, status로 상태 필터링
@@ -153,6 +158,18 @@ async def get_lecture_result(lecture_id: str, db: AsyncSession = Depends(get_db)
 @router.get('/{lecture_id}/artifacts/{stage}')
 async def get_lecture_artifact(lecture_id: str, stage: str, db: AsyncSession = Depends(get_db)):
     return await lecture_service.get_lecture_artifact(db, lecture_id, stage)
+
+
+# 강의자가 남긴 오류 항목별 평가 전체 조회 — { item_id: rating }
+@router.get('/{lecture_id}/reviews')
+async def get_lecture_reviews(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    return await review_service.list_reviews(db, lecture_id)
+
+
+# 오류 항목 하나에 대한 평가 저장/수정 (upsert)
+@router.put('/{lecture_id}/reviews/{item_id}')
+async def put_lecture_review(lecture_id: str, item_id: str, body: InstructorReviewIn, db: AsyncSession = Depends(get_db)):
+    return await review_service.upsert_review(db, lecture_id, item_id, body.rating)
 
 
 # 기존 강의에 대해 새 job 생성해 재실행, mode 미지정 시 기본 워크플로 사용
