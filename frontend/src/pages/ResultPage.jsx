@@ -67,7 +67,7 @@ export default function ResultPage() {
       )}
 
       {phase === PHASES.VERIFY_READY && (
-        <VerifierResults verifier={verifier} onSeek={seekTo} />
+        <VerifierResults verifier={verifier} onSeek={seekTo} lectureId={lectureId} />
       )}
 
       {phase === PHASES.VERIFY_READY && !verifier && (

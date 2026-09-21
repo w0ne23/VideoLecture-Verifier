@@ -1,6 +1,6 @@
 # DB ORM 모델과 관련 상수 정의
 import uuid
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -188,3 +188,28 @@ class VerificationStats(Base):
 
     verification_date = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# 강의자가 검증 오류 항목 하나에 남기는 평가값
+REVIEW_RATING_AGREE = 'agree'
+REVIEW_RATING_NEUTRAL = 'neutral'
+REVIEW_RATING_DISAGREE = 'disagree'
+REVIEW_RATINGS = {REVIEW_RATING_AGREE, REVIEW_RATING_NEUTRAL, REVIEW_RATING_DISAGREE}
+
+
+class InstructorReview(Base):
+    """강의자가 검증 결과의 오류 항목(claim/slide_error)별로 남기는 동의·중립·비동의 평가
+
+    item_id는 결과 JSON의 feedback_id/issue_id/slide_error_id — 재검증으로 결과가
+    새로 생성되면 항목이 바뀌어 이전 평가와 매칭되지 않을 수 있음(허용된 동작)
+    """
+
+    __tablename__ = 'instructor_reviews'
+    __table_args__ = (UniqueConstraint('lecture_id', 'item_id', name='uq_instructor_review_lecture_item'),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    lecture_id = Column(UUID(as_uuid=True), ForeignKey('lectures.id', ondelete='CASCADE'), nullable=False, index=True)
+    item_id = Column(String, nullable=False)
+    rating = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
