@@ -62,17 +62,16 @@ services:
       VLVERIFIER_SLIDE_OCR_SIMILARITY_THRESHOLD: "0.83"
       VLVERIFIER_SLIDE_OCR_ADJACENT_SIMILARITY_THRESHOLD: "0.83"
 
-      # LocalVLM — 슬라이드 후보 검토는 VLVerifier 직접 제공 전처리라 외부 API 대신 로컬 LLM(Ollama) 사용
-      # 상용 API 버전:
-      #   VLVERIFIER_VLM_PROVIDER: "openai"
-      #   VLVERIFIER_OPENAI_BASE_URL: "https://api.openai.com/v1"
-      #   VLVERIFIER_OPENAI_API_KEY: "${OPENAI_API_KEY}"
-      #   VLVERIFIER_OPENAI_MODEL: "gpt-5.6-luna"
+      # LocalVLM — 슬라이드 후보 검토, 상용 API 테스트를 위해 로컬(Ollama) 버전은 주석 처리:
+      # VLVERIFIER_VLM_PROVIDER: "${VLVERIFIER_VLM_PROVIDER:-ollama}"
+      # VLVERIFIER_OLLAMA_BASE_URL: "${VLVERIFIER_OLLAMA_BASE_URL:-http://ollama:11434}"
+      # VLVERIFIER_OLLAMA_MODEL: "${VLVERIFIER_OLLAMA_MODEL:-gemma4:12b}"
       VLVERIFIER_VLM_ENABLED: "${VLVERIFIER_VLM_ENABLED:-1}"
       VLVERIFIER_VLM_APPLY: "${VLVERIFIER_VLM_APPLY:-1}"
-      VLVERIFIER_VLM_PROVIDER: "${VLVERIFIER_VLM_PROVIDER:-ollama}"
-      VLVERIFIER_OLLAMA_BASE_URL: "${VLVERIFIER_OLLAMA_BASE_URL:-http://ollama:11434}"
-      VLVERIFIER_OLLAMA_MODEL: "${VLVERIFIER_OLLAMA_MODEL:-gemma4:12b}"
+      VLVERIFIER_VLM_PROVIDER: "openai"
+      VLVERIFIER_OPENAI_BASE_URL: "https://api.openai.com/v1"
+      VLVERIFIER_OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      VLVERIFIER_OPENAI_MODEL: "gpt-5.6-luna"
       VLVERIFIER_VLM_WORKERS: "15"
       VLVERIFIER_VLM_BATCH_IMAGES: "2"
       VLVERIFIER_VLM_BATCH_CANDIDATES: "1"
@@ -195,7 +194,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:80"
+      - "80:80"
     depends_on:
       - backend
 

@@ -6,6 +6,31 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# 1차 issue judge 응답 스키마 — claim_scores/issues를 요구 필드로 명시해야
+# provider(특히 Anthropic 네이티브 구조화 출력)가 프롬프트 지시만 믿고 필드를
+# 누락하는 것을 막을 수 있음 ({"type": "object", "additionalProperties": True}처럼
+# 빈 스키마를 주면 아무 필드 없는 응답도 유효해져 claim_scores가 통째로 빠질 수 있음)
+_ISSUE_CANDIDATE_SCORE_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claim_id": {"type": "string"},
+        "basis_code": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["claim_id", "basis_code", "confidence"],
+    "additionalProperties": False,
+}
+_ISSUE_CANDIDATE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claim_scores": {"type": "array", "items": _ISSUE_CANDIDATE_SCORE_ITEM_SCHEMA},
+        "issues": {"type": "array", "items": _ISSUE_CANDIDATE_SCORE_ITEM_SCHEMA},
+    },
+    "required": ["claim_scores", "issues"],
+    "additionalProperties": False,
+}
+
+
 # issue judge 배치 병렬 처리 worker 수, 환경변수 미설정/파싱 실패 시 기본값
 def _issue_judge_batch_max_workers() -> int:
     raw = (
@@ -402,8 +427,25 @@ def _judge_issue_candidates(
     )
     system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
     # provider별 변환은 _call_llm 내부에서 처리, OpenAI 호환 모델명 여부로 분기하지 않음 —
-    # Claude는 동일 요청을 강제 tool_use로, Gemini는 JSON MIME/schema로 각각 변환해야 함
-    response_format = {"type": "json_object"}
+    # Claude는 동일 요청을 강제 tool_use로, Gemini는 JSON MIME/schema로 각각 변환해야 함.
+    # claim_scores/issues를 required로 명시한 실제 스키마를 넘겨야 함 — 그냥
+    # {"type": "json_object"}만 주면 provider별 기본 폴백 스키마가
+    # {"additionalProperties": True}(빈 스키마)라 아무 필드 없는 응답도 유효해짐.
+    # OpenAI 실제 API가 요구하는 {"type": "json_schema", "json_schema": {...}} 형태를
+    # 그대로 줘야 함 — claim_common._call_llm의 OpenAI 분기는 response_format을
+    # 변환 없이 그대로 전달하므로(runtime_llm._call_openai_compatible과 달리 여기는
+    # {"type":"json_schema","schema":...} 같은 축약형을 감싸주지 않음), 축약형을 주면
+    # "Missing required parameter: response_format.json_schema" 400 에러가 남.
+    # _json_object_schema()는 이 중첩된 json_schema.schema 경로를 최우선으로 읽으므로
+    # Anthropic/Gemini 분기에도 그대로 호환됨
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "issue_judge_response",
+            "strict": True,
+            "schema": _ISSUE_CANDIDATE_RESPONSE_SCHEMA,
+        },
+    }
     api_calls = 0
     token_usage = cv._empty_token_usage()
 

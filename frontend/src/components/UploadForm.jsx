@@ -1,13 +1,14 @@
-// 강의 영상 업로드 카드 — 드래그&드롭 / 파일 선택 + 썸네일 미리보기 + 제목 입력
+// 강의 영상 업로드 카드 — 드래그&드롭 / 파일 선택 + 썸네일 미리보기 + 출처 태그 + 제목 입력
 // 상태·제출은 useUploadForm, 썸네일은 useVideoThumbnail 에 위임
 
 import { useRef } from 'react'
+import { LECTURE_SOURCE_TAGS } from '../constants/lectureTags'
 import { useUploadForm } from '../hooks/useUploadForm'
 import { useVideoThumbnail } from '../hooks/useVideoThumbnail'
 
 export default function UploadForm({ onUploaded }) {
   const inputRef = useRef(null)
-  const { file, title, errorMessage, isSubmitting, actions } = useUploadForm({ onUploaded })
+  const { file, title, sourceTag, errorMessage, isSubmitting, actions } = useUploadForm({ onUploaded })
   const thumbnailUrl = useVideoThumbnail(file)
 
   // 드롭된 파일 중 첫 번째만 사용
@@ -41,6 +42,18 @@ export default function UploadForm({ onUploaded }) {
           onChange={event => actions.selectFile(event.target.files?.[0])}
         />
       </div>
+      <label className="field upload-tag-field">
+        <span>출처 태그<span className="field-required">*</span></span>
+        <select
+          value={sourceTag}
+          onChange={event => actions.setSourceTag(event.target.value)}
+        >
+          <option value="" disabled>선택하세요</option>
+          {LECTURE_SOURCE_TAGS.map(tag => (
+            <option key={tag.value} value={tag.value}>{tag.label}</option>
+          ))}
+        </select>
+      </label>
       <div className="upload-title-row">
         <label className="field upload-title-field">
           <span>강의 제목</span>
@@ -54,7 +67,7 @@ export default function UploadForm({ onUploaded }) {
         <button
           type="button"
           className="btn btn--primary upload-title-submit"
-          disabled={!file || isSubmitting}
+          disabled={!file || !sourceTag || isSubmitting}
           onClick={actions.submit}
         >
           {isSubmitting ? '업로드 중...' : '검증 시작'}

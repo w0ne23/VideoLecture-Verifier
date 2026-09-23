@@ -6,7 +6,7 @@ import listIcon from '../assets/list-icon-teal.png'
 
 const ENTRIES = [
   {
-    path: '/upload',
+    path: '/dev/verify-demo',
     title: '검증할 강의 업로드',
     desc: '강의 영상을 업로드하고 검증을 시작합니다.',
     icon: uploadIcon,

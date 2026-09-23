@@ -927,7 +927,9 @@ def _create_sample_cache_impl(
     output_path = Path(output_dir)
     video_path, manifest_path, _, _, mask_previews_path = _prepare_output_dirs(output_path, cfg)
 
-    cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
+    # MJPEG(4:2:0/4:2:2 크로마 서브샘플링)은 홀수 높이를 못 받아 VideoWriter가 조용히
+    # 짝수로 잘라버림 — manifest에는 짝수 보정 전 값을 쓰면 실제 저장된 프레임과 어긋남
+    cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"])) // 2 * 2
     sampled_fps = float(cfg.sample_fps)
     writer = cv2.VideoWriter(
         str(video_path),
@@ -2051,7 +2053,9 @@ def _assemble_chunk_caches(
     # 패킷 트리밍, 연결, 재인코딩을 하지 않음
     _, merged_manifest_path, _, _, _ = _prepare_output_dirs(output_path, cfg)
 
-    cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
+    # 각 청크 worker의 VideoWriter도 동일하게 짝수로 잘리므로, 조립 단계의 "기대값"도
+    # 반드시 같은 보정을 거쳐야 segment_frame_size_mismatch가 오탐되지 않음
+    cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"])) // 2 * 2
     sampled_fps = float(cfg.sample_fps)
     assemble_started_at = time.perf_counter()
 

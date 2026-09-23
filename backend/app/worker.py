@@ -24,6 +24,10 @@ from app.services.model_settings_service import (
 
 logger = logging.getLogger(__name__)
 
+# 이 모듈이 처음 import될 때(=이번 워커 프로세스가 어떤 job도 처리하기 전)의 .env 원본값 스냅샷,
+# DB에 오버라이드가 없는 stage는 그냥 지우는 게 아니라 이 값으로 되돌려야 .env 폴백이 살아있음
+_STAGE_MODEL_ENV_DEFAULTS = {key: os.environ.get(key) for key in STAGE_MODEL_ENV_KEYS}
+
 PIPELINE_STAGE_KEYS = [
     'preprocess_slide_extract',
     'preprocess_audio_quality',
@@ -92,9 +96,14 @@ def pipeline_process(
         # 동시 작업이나 부모 프로세스에는 영향 없음
         runtime_model_settings = fetch_runtime_model_settings_sync()
         stage_models = runtime_model_settings.get('stage_models', {})
-        # 이전 잡에서 남은 stage env가 남지 않도록 허용 키를 먼저 비움
+        # 이전 잡에서 남은 stage env가 남지 않도록 허용 키를 먼저 .env 원본값으로 되돌림
+        # (그냥 pop만 하면 DB 설정이 비어있을 때 .env 폴백이 아니라 env 자체가 사라져버림)
         for env_key in STAGE_MODEL_ENV_KEYS:
-            os.environ.pop(env_key, None)
+            default = _STAGE_MODEL_ENV_DEFAULTS.get(env_key)
+            if default is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = default
         for env_key, value in stage_models.items():
             os.environ[env_key] = value
         # 레거시 env map은 기존 파이프라인 경로에서 계속 사용 가능, 새 어댑터는

@@ -40,6 +40,7 @@ from .issue_type_classifier import (
 
 
 SCHEMA_VERSION = "classified_slide_error_checker.v5"
+DEFAULT_MODELS = ("gpt",)
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MIN_SCORE = 0.0
 
@@ -99,11 +100,11 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
 # slide 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
-    try:
-        from .runtime_llm import configured_stage_models
-    except ImportError:
-        from runtime_llm import configured_stage_models
-    return configured_stage_models("slide")
+    configured = (
+        _split_csv(os.getenv("CLASSIFIED_SLIDE_ERROR_MODELS"))
+        or _split_csv(os.getenv("VERIFIER_CLASSIFIED_SLIDE_ERROR_MODELS"))
+    )
+    return configured or list(DEFAULT_MODELS)
 
 
 # 리스트를 지정 크기로 분할

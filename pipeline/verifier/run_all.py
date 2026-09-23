@@ -211,8 +211,6 @@ CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE = _env_int(
     "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
     _env_int("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", 5),
 )
-DEFAULT_ISSUE_JUDGE_MIN_CONFIDENCE = 0.70
-DEFAULT_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE = 0.85
 
 
 # stdout/stderr를 원래 스트림과 Docker 로그 스트림 양쪽에 동시에 기록하는 tee 래퍼
@@ -299,30 +297,63 @@ def _split_model_specs(value: str | None) -> list[str]:
 
 # issue_detect 스테이지에 설정된 모델 목록 조회
 def _default_issue_judge_models() -> list[str]:
-    from .runtime_llm import configured_stage_models
-    return configured_stage_models("issue_detect")
+    configured = (
+        _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
+        or _split_model_specs(os.getenv("VERIFIER_ISSUE_JUDGE_MODELS"))
+    )
+    return configured or ["gpt-5.4", "claude-sonnet-5"]
 
 
+def _is_openai_model(model: str) -> bool:
+    return str(model or "").lower().startswith(("gpt", "o1", "o3"))
+
+
+def _is_anthropic_model(model: str) -> bool:
+    lowered = str(model or "").lower()
+    return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
+
+
+# GPT/Claude judge 모델별 1차 confidence 임계값 반환 (GPT 0.8 / Claude 0.6 기본값)
 def _issue_judge_min_confidence_for_model(model: str | None = None) -> float:
-    """모든 judge에 공통으로 적용되는 1차 confidence 임계값 반환
+    def _bounded(value: float) -> float:
+        return max(0.0, min(1.0, value))
 
-    detector 후보는 provider나 모델명과 무관하게 단일 임계값을 사용한다.
-    인자는 worker 호출 호환성을 위해 남겨두지만, 모델별 임계값은
-    의도적으로 더 이상 참조하지 않는다
-    """
-    del model
-    return _env_float(
-        "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE",
-        DEFAULT_ISSUE_JUDGE_MIN_CONFIDENCE,
-    )
+    model_key = re.sub(r"[^0-9A-Za-z]+", "_", str(model or "").strip()).strip("_").upper()
+    env_candidates = []
+    if model_key:
+        env_candidates.append(f"VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_{model_key}")
+    if _is_anthropic_model(model):
+        env_candidates.extend(
+            ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_CLAUDE", "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_ANTHROPIC"]
+        )
+        default = 0.60
+    elif _is_openai_model(model):
+        env_candidates.extend(
+            ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_GPT", "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_OPENAI"]
+        )
+        default = 0.8
+    else:
+        default = _env_float("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", 0.8)
+
+    for key in env_candidates:
+        raw = os.getenv(key)
+        if raw is None:
+            continue
+        try:
+            return _bounded(float(str(raw).strip()))
+        except ValueError:
+            continue
+    return _bounded(default)
 
 
-# 단일 모델만으로도 issue를 유지시키는 강한 확신 임계값 조회
-def _issue_judge_single_model_keep_confidence() -> float:
-    return _env_float(
-        "VERIFIER_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE",
-        DEFAULT_ISSUE_JUDGE_SINGLE_MODEL_KEEP_CONFIDENCE,
-    )
+# GPT/Claude 점수 차이(Δ)가 이 값 이상이면 모델 간 불일치로 issue를 탈락시킴
+def _issue_judge_disagreement_reject_delta() -> float:
+    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_REJECT_DELTA", 0.40)
+
+
+# 둘 중 한쪽이라도 이 값 이상 확신하면 불일치 필터를 적용하지 않음
+def _issue_judge_disagreement_keep_confidence() -> float:
+    return _env_float("VERIFIER_ISSUE_JUDGE_DISAGREEMENT_KEEP_CONFIDENCE", 0.90)
 
 
 # 모델별 issue judge 결과를 claim_id 기준 confidence 조회 dict로 변환
@@ -346,108 +377,48 @@ def _issue_judge_score_lookup(
     return scores_by_claim
 
 
-# claim 1건에 대한 detector 투표를 집계해 후속 검증으로 넘길지 결정
-def _issue_judge_consensus_decision(
+# claim 1건의 GPT/Claude 점수만 뽑아 family(gpt/claude)별 dict로 변환
+def _issue_judge_family_scores(claim_scores: dict[str, float]) -> dict[str, float]:
+    family_scores: dict[str, float] = {}
+    for model, score in claim_scores.items():
+        if _is_openai_model(model):
+            family_scores["gpt"] = score
+        elif _is_anthropic_model(model):
+            family_scores["claude"] = score
+    return family_scores
+
+
+# GPT/Claude가 둘 다 채점했고 점수 차이가 크면(Δ≥threshold), 둘 중 하나라도
+# keep_confidence 이상으로 강하게 확신하지 않는 한 해당 claim을 불일치로 탈락시킴
+def _issue_judge_disagreement_rejection(
     claim_id: str,
-    *,
-    issue_models: list[str],
-    evaluated_models: list[str],
     scores_by_claim: dict[str, dict[str, float]],
-    single_keep_confidence: float | None = None,
-    majority_min_confidence: float | None = None,
-) -> dict:
-    """후속 검증 전에 detector 투표 결과를 확정
-
-    평가된 모델의 절반 이상이 독립적으로 공통 0.70 임계값 이상 점수를 주면 통과한다.
-    절반 합의가 없어도 단일 모델이 강한 확신 임계값에 도달하면 통과한다
-    """
-    single_keep_confidence = (
-        _issue_judge_single_model_keep_confidence()
-        if single_keep_confidence is None
-        else single_keep_confidence
+    *,
+    threshold: float | None = None,
+    keep_confidence: float | None = None,
+) -> dict | None:
+    threshold = _issue_judge_disagreement_reject_delta() if threshold is None else threshold
+    keep_confidence = (
+        _issue_judge_disagreement_keep_confidence()
+        if keep_confidence is None
+        else keep_confidence
     )
-    majority_min_confidence = (
-        _issue_judge_min_confidence_for_model()
-        if majority_min_confidence is None
-        else _clamp01(majority_min_confidence)
-    )
-    claim_scores = scores_by_claim.get(claim_id, {}) or {}
-    evaluated_count = len(evaluated_models)
-    if evaluated_count == 0:
-        return {"keep": False, "status": "all_models_failed"}
-    if not issue_models:
-        return {"keep": False, "status": "no_issue"}
-
-    evaluated_set = set(evaluated_models)
-    qualified_models = []
-    for model in issue_models:
-        if model not in evaluated_set:
-            continue
-        if _clamp01(claim_scores.get(model, 0.0)) >= majority_min_confidence:
-            qualified_models.append(model)
-
-    # "다수"는 strict majority가 아니라 절반 이상 합의, 따라서 4개
-    # 모델이면 2개, 5개 모델이면 3개가 0.70 이상일 때 통과
-    majority_required = (evaluated_count + 1) // 2
-    qualified_count = len(qualified_models)
-    if qualified_count >= majority_required:
-        status = "all_models_agreed" if qualified_count == evaluated_count else "partial_agreement"
-        return {
-            "keep": True,
-            "status": status,
-            "qualified_models": qualified_models,
-            "qualified_model_count": qualified_count,
-            "majority_required": majority_required,
-            "majority_min_confidence": round(majority_min_confidence, 6),
-        }
-
-    strong_models = [
-        model
-        for model in qualified_models
-        if _clamp01(claim_scores.get(model, 0.0)) >= single_keep_confidence
-    ]
-    if strong_models:
-        positive_model = max(
-            strong_models,
-            key=lambda model: _clamp01(claim_scores.get(model, 0.0)),
-        )
-        positive_confidence = _clamp01(claim_scores.get(positive_model, 0.0))
-        return {
-            "keep": True,
-            "status": "single_model_strong",
-            "positive_model": positive_model,
-            "positive_confidence": round(positive_confidence, 6),
-            "qualified_models": qualified_models,
-            "qualified_model_count": qualified_count,
-            "majority_required": majority_required,
-            "majority_min_confidence": round(majority_min_confidence, 6),
-        }
-
-    strongest_model = max(
-        qualified_models or [model for model in issue_models if model in evaluated_set],
-        key=lambda model: _clamp01(claim_scores.get(model, 0.0)),
-        default="",
-    )
-    strongest_confidence = _clamp01(claim_scores.get(strongest_model, 0.0)) if strongest_model else 0.0
-    status = (
-        "rejected_single_model_low_confidence"
-        if qualified_count == 1
-        else "rejected_below_majority"
-    )
+    family_scores = _issue_judge_family_scores(scores_by_claim.get(claim_id, {}) or {})
+    if "gpt" not in family_scores or "claude" not in family_scores:
+        return None
+    max_score = max(float(family_scores["gpt"]), float(family_scores["claude"]))
+    if max_score >= keep_confidence:
+        return None
+    delta = abs(float(family_scores["gpt"]) - float(family_scores["claude"]))
+    if delta < threshold:
+        return None
     return {
-        "keep": False,
-        "status": status,
-        "rejection": {
-            "claim_id": claim_id,
-            "reason": "below_majority_and_no_single_strong_model",
-            "positive_model": strongest_model,
-            "positive_confidence": round(strongest_confidence, 6),
-            "qualified_models": qualified_models,
-            "qualified_model_count": qualified_count,
-            "majority_required": majority_required,
-            "majority_min_confidence": round(majority_min_confidence, 6),
-            "strong_keep_confidence": round(single_keep_confidence, 6),
-        },
+        "claim_id": claim_id,
+        "gpt_confidence": round(float(family_scores["gpt"]), 6),
+        "claude_confidence": round(float(family_scores["claude"]), 6),
+        "confidence_delta": round(delta, 6),
+        "reject_delta": round(threshold, 6),
+        "strong_keep_confidence": round(keep_confidence, 6),
     }
 
 
@@ -688,14 +659,12 @@ def _build_issue_judge_comparison(
         issues_by_model_claim[model] = grouped
 
     all_model_agreed_count = 0
-    majority_agreement_count = 0
     single_model_only_count = 0
     no_issue_claim_count = 0
     disagreement_count = 0
-    rejected_single_model_count = 0
-    rejected_below_majority_count = 0
-    consensus_rejected_count = 0
+    rejected_by_disagreement_count = 0
     union_issue_claim_ids = set()
+    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
 
     for claim in claims:
         claim_id = str(claim.get("claim_id") or _claim_key(claim))
@@ -730,43 +699,32 @@ def _build_issue_judge_comparison(
                 model_rows[model] = {"status": "ok", "has_issue": False}
 
         evaluated_count = len(evaluated_models)
-        decision = _issue_judge_consensus_decision(
+        disagreement_rejection = _issue_judge_disagreement_rejection(
             claim_id,
-            issue_models=issue_models,
-            evaluated_models=evaluated_models,
-            scores_by_claim=scores_by_claim,
+            scores_by_claim,
+            threshold=disagreement_reject_delta,
         )
-        status = str(decision["status"])
-        consensus_rejection = decision.get("rejection")
-        if status == "all_models_failed":
-            pass
-        elif status == "no_issue":
+        if evaluated_count == 0:
+            status = "all_models_failed"
+        elif issue_models and disagreement_rejection:
+            status = "rejected_model_disagreement"
+            rejected_by_disagreement_count += 1
+        elif not issue_models:
+            status = "no_issue"
             no_issue_claim_count += 1
-        elif status == "all_models_agreed":
+        elif len(issue_models) == evaluated_count:
+            status = "all_models_agreed"
             all_model_agreed_count += 1
             union_issue_claim_ids.add(claim_id)
-        elif status == "single_model_strong":
+        elif len(issue_models) == 1:
+            status = "single_model_only"
             single_model_only_count += 1
             union_issue_claim_ids.add(claim_id)
-            positive_model = str(decision.get("positive_model") or "").strip()
-            if not positive_model and issue_models:
-                positive_model = issue_models[0]
-            if positive_model in exclusive_by_model:
-                exclusive_by_model[positive_model].append(claim_id)
-        elif status == "partial_agreement":
-            disagreement_count += 1
-            majority_agreement_count += 1
-            union_issue_claim_ids.add(claim_id)
-        elif status == "rejected_single_model_low_confidence":
-            rejected_single_model_count += 1
-            consensus_rejected_count += 1
-        elif status == "rejected_below_majority":
-            rejected_below_majority_count += 1
-            consensus_rejected_count += 1
+            exclusive_by_model[issue_models[0]].append(claim_id)
         else:
-            consensus_rejected_count += 1
-
-        decision_details = decision.get("rejection") or decision
+            status = "partial_agreement"
+            disagreement_count += 1
+            union_issue_claim_ids.add(claim_id)
 
         by_claim.append({
             "claim_id": claim_id,
@@ -779,10 +737,7 @@ def _build_issue_judge_comparison(
                 "status": status,
                 "issue_model_count": len(issue_models),
                 "issue_models": issue_models,
-                "qualified_model_count": decision_details.get("qualified_model_count", 0),
-                "majority_required": decision_details.get("majority_required", 0),
-                "majority_min_confidence": decision_details.get("majority_min_confidence", _issue_judge_min_confidence_for_model()),
-                "single_model_rejection": consensus_rejection or {},
+                "model_disagreement_rejection": disagreement_rejection or {},
             },
         })
 
@@ -800,13 +755,9 @@ def _build_issue_judge_comparison(
             "issue_counts_by_model": issue_counts,
             "all_models_agreed_count": all_model_agreed_count,
             "partial_agreement_count": disagreement_count,
-            "majority_agreement_count": majority_agreement_count,
             "single_model_only_count": single_model_only_count,
-            "rejected_single_model_low_confidence_count": rejected_single_model_count,
-            "rejected_below_majority_count": rejected_below_majority_count,
-            "consensus_rejected_count": consensus_rejected_count,
-            "majority_min_confidence": _issue_judge_min_confidence_for_model(),
-            "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
+            "rejected_by_model_disagreement_count": rejected_by_disagreement_count,
+            "model_disagreement_reject_delta": disagreement_reject_delta,
             "no_issue_claim_count": no_issue_claim_count,
         },
         "exclusive_by_model": exclusive_by_model,
@@ -829,29 +780,12 @@ def _write_issue_judge_merged_output(
     duplicate_claim_ids: list[str] = []
     skipped_without_claim_id = 0
     scores_by_claim = _issue_judge_score_lookup(models=models, judge_results=judge_results)
-    rejected_single_model: dict[str, dict] = {}
+    disagreement_reject_delta = _issue_judge_disagreement_reject_delta()
+    rejected_by_disagreement: dict[str, dict] = {}
     failed_models = [
         model for model in models
         if (judge_results.get(model, {}) or {}).get("ok") is False
     ]
-    evaluated_models = [model for model in models if model not in failed_models]
-    issue_models_by_claim: dict[str, list[str]] = {}
-    for model in evaluated_models:
-        for issue in (judge_results.get(model, {}) or {}).get("issues", []) or []:
-            if not isinstance(issue, dict):
-                continue
-            claim_id = str(issue.get("claim_id", "") or "").strip()
-            if claim_id and model not in issue_models_by_claim.setdefault(claim_id, []):
-                issue_models_by_claim[claim_id].append(model)
-    decisions_by_claim = {
-        claim_id: _issue_judge_consensus_decision(
-            claim_id,
-            issue_models=issue_models,
-            evaluated_models=evaluated_models,
-            scores_by_claim=scores_by_claim,
-        )
-        for claim_id, issue_models in issue_models_by_claim.items()
-    }
 
     for model in models:
         result = judge_results.get(model, {}) or {}
@@ -864,13 +798,13 @@ def _write_issue_judge_merged_output(
             if not claim_id:
                 skipped_without_claim_id += 1
                 continue
-            decision = decisions_by_claim.get(claim_id, {})
-            if not decision.get("keep", False):
-                rejection = decision.get("rejection") or {
-                    "claim_id": claim_id,
-                    "reason": str(decision.get("status", "rejected")),
-                }
-                rejected_single_model.setdefault(claim_id, rejection)
+            disagreement_rejection = _issue_judge_disagreement_rejection(
+                claim_id,
+                scores_by_claim,
+                threshold=disagreement_reject_delta,
+            )
+            if disagreement_rejection:
+                rejected_by_disagreement.setdefault(claim_id, disagreement_rejection)
                 continue
 
             source_summary = {
@@ -902,7 +836,6 @@ def _write_issue_judge_merged_output(
             row["detected_by_models"] = [model]
             row["representative_model"] = model
             row["source_model_issues"] = [source_summary]
-            row["detector_consensus"] = decision
             seen_by_claim[claim_id] = row
             merged_issues.append(row)
 
@@ -913,13 +846,6 @@ def _write_issue_judge_merged_output(
         model: len((judge_results.get(model, {}) or {}).get("issues", []) or [])
         for model in models
     }
-    decision_statuses = [
-        str(decision.get("status") or "")
-        for decision in decisions_by_claim.values()
-    ]
-    rejected_single_model_count = decision_statuses.count("rejected_single_model_low_confidence")
-    rejected_below_majority_count = decision_statuses.count("rejected_below_majority")
-    consensus_rejected_count = rejected_single_model_count + rejected_below_majority_count
     summary = {
         "input_model_count": len(models),
         "failed_models": failed_models,
@@ -928,11 +854,8 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "duplicate_claim_count": len(set(duplicate_claim_ids)),
         "skipped_without_claim_id": skipped_without_claim_id,
-        "rejected_single_model_low_confidence_count": rejected_single_model_count,
-        "rejected_below_majority_count": rejected_below_majority_count,
-        "consensus_rejected_count": consensus_rejected_count,
-        "majority_min_confidence": _issue_judge_min_confidence_for_model(),
-        "single_model_strong_keep_confidence": _issue_judge_single_model_keep_confidence(),
+        "rejected_by_model_disagreement_count": len(rejected_by_disagreement),
+        "model_disagreement_reject_delta": disagreement_reject_delta,
     }
     payload = {
         "schema_version": "issue_judge_merged.v1",
@@ -943,7 +866,7 @@ def _write_issue_judge_merged_output(
         "dedupe_key": "claim_id",
         "summary": summary,
         "issues": merged_issues,
-        "rejected_single_model_low_confidence": list(rejected_single_model.values()),
+        "rejected_by_model_disagreement": list(rejected_by_disagreement.values()),
     }
     path = output_dir / f"{base_stem}_issue_judge.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -998,8 +921,7 @@ def run_issue_judge_only(
         cached_summary = summary_payload.get("summary", {}) or {}
         cached_merged_summary = merged_issue_judge.get("summary", {}) or {}
         cached_models = summary_payload.get("models") or merged_issue_judge.get("models") or []
-        current_majority_threshold = _issue_judge_min_confidence_for_model()
-        current_single_threshold = _issue_judge_single_model_keep_confidence()
+        current_disagreement_delta = _issue_judge_disagreement_reject_delta()
         def _matches_policy(value: object, expected: float) -> bool:
             try:
                 return abs(float(value) - expected) < 1e-9
@@ -1009,10 +931,8 @@ def run_issue_judge_only(
         cache_policy_matches = (
             list(cached_models) == list(issue_judge_models or _default_issue_judge_models())
             and
-            _matches_policy(cached_summary.get("majority_min_confidence"), current_majority_threshold)
-            and _matches_policy(cached_merged_summary.get("majority_min_confidence"), current_majority_threshold)
-            and _matches_policy(cached_summary.get("single_model_strong_keep_confidence"), current_single_threshold)
-            and _matches_policy(cached_merged_summary.get("single_model_strong_keep_confidence"), current_single_threshold)
+            _matches_policy(cached_summary.get("model_disagreement_reject_delta"), current_disagreement_delta)
+            and _matches_policy(cached_merged_summary.get("model_disagreement_reject_delta"), current_disagreement_delta)
         )
         if cache_policy_matches:
             print(f"  ⏭  issue judge — 출력 파일 존재, 스킵")
@@ -1628,8 +1548,8 @@ def run_classified_issue_pipeline(
     detector_rows.extend([
         ("통합 후보", f"{issue_judge_result.get('issue_judge_count', 0)}개"),
         (
-            "합의 기준 미달 기각",
-            f"{issue_judge_summary.get('consensus_rejected_count', issue_judge_summary.get('rejected_single_model_low_confidence_count', 0))}개",
+            "모델 간 불일치 기각",
+            f"{issue_judge_summary.get('rejected_by_model_disagreement_count', 0)}개",
         ),
         ("모델 실패", ", ".join(issue_judge_summary.get("failed_models", []) or []) or "없음"),
     ])

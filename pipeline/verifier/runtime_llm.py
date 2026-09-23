@@ -52,6 +52,14 @@ def _litellm_enabled() -> bool:
     }
 
 
+# 웹 UI/DB에 endpoint가 등록되어 있어도 무시하고 항상 .env 기반 레거시 provider 직접
+# 호출로 강제, DB·모델 등록 화면 자체는 그대로 유지되고 이 스위치만 끄면 즉시 원복됨
+def _runtime_config_ignored() -> bool:
+    return (os.getenv("VLVERIFIER_IGNORE_RUNTIME_CONFIG") or "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def _gateway_model_name(model: str) -> str:
     """stage에 선택된 구체적인 모델명 반환
 
@@ -358,6 +366,8 @@ def resolve_runtime_binding(stage: str, model_spec: str = "") -> dict[str, Any] 
     model_spec이 주어지면 정확히 일치하는 모델만 선택, provider 별칭이 조용히
     다른 설정된 모델을 고르지 않도록 방지
     """
+    if _runtime_config_ignored():
+        return None
     config = _load_config()
     endpoints = {
         str(item.get("id") or ""): item

@@ -48,7 +48,8 @@ export default function ResultPage() {
   return (
     <div className="detail">
       <div className="detail-head">
-        <button type="button" className="btn" onClick={goToList}>← 목록으로</button>
+        {/* 목록에서 보던 페이지로 복원되도록 history back 사용, 스트림 종료(onExit)의 목록 이동과는 별개 */}
+        <button type="button" className="btn" onClick={() => navigate(-1)}>← 목록으로</button>
         <h2>{lecture.title || lectureId}</h2>
         {phase === PHASES.VERIFY_READY && (
           <button type="button" className="btn" onClick={() => navigate(`/result/${lectureId}/stages`)}>

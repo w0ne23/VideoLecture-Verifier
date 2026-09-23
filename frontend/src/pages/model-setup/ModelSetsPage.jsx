@@ -539,7 +539,7 @@ export default function ModelSetsPage() {
                 className="ms-name-input"
                 type="text"
                 value={name}
-                placeholder="예: 오픈소스 개발자대회 시연용"
+                placeholder="예: 한성대학교 공학경진대회 시연용"
                 onChange={event => setName(event.target.value)}
               />
             </div>

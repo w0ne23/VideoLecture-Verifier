@@ -45,18 +45,18 @@ export const TICKS = [
 //   앞 단계에서 영상이 오래 걸리면 뒤 단계는 오디오가 오래 걸리도록 배분을 반대로 뒤집음
 // - 검증: 슬라이드 검증(2단계)이 발화 검증(5단계)보다 훨씬 먼저 끝나도록 각 단계도 짧게 설정
 const NODE_DURATIONS_MS = {
-  slide_extract: 95_000,
-  slide_analyze: 75_000,
-  audio_quality: 65_000,
-  voice_transcribe: 105_000,
-  integrated_text: 30_000,
-  claim_extract: 100_000,
-  issue_detect: 110_000,
-  issue_classify: 15_000,
-  issue_filter: 15_000,
-  issue_judge: 15_000,
-  slide_inspect: 60_000,
-  syntax_verify: 55_000,
+  slide_extract: 10_000,
+  slide_analyze: 10_000,
+  audio_quality: 5_000,
+  voice_transcribe: 5_000,
+  integrated_text: 10_000,
+  claim_extract: 7_000,
+  issue_detect: 7_000,
+  issue_classify: 7_000,
+  issue_filter: 7_000,
+  issue_judge: 7_000,
+  slide_inspect: 10_000,
+  syntax_verify: 10_000,
   error_output: 5_000,
 }
 

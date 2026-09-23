@@ -17,6 +17,24 @@ from typing import Any, Callable
 
 
 SCHEMA_VERSION = "issue_types.v3"
+DEFAULT_MODELS = (
+    "gpt-5.4",
+    "claude-sonnet-5",
+    "grok-4.5",
+)
+DEFAULT_MODEL_WEIGHTS = {
+    "gpt": 0.4,
+    "openai": 0.4,
+    "claude": 0.4,
+    "cluade": 0.4,
+    "anthropic": 0.4,
+    "grok": 0.2,
+    "xai": 0.2,
+    "qwen": 0.2,
+    "vllm": 0.2,
+    "gemini": 0.2,
+    "google": 0.2,
+}
 # LLM이 확률을 내는 4유형, composite_issue는 별도 routing 결과로 유지
 ISSUE_TYPES = (
     "temporal_error",
@@ -90,11 +108,11 @@ def _split_csv(value: str | None) -> list[str]:
 # issue_classify 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
-    try:
-        from .runtime_llm import configured_stage_models
-    except ImportError:
-        from runtime_llm import configured_stage_models
-    return configured_stage_models("issue_classify")
+    configured = (
+        _split_csv(os.getenv("ISSUE_TYPE_CLASSIFIER_MODELS"))
+        or _split_csv(os.getenv("VERIFIER_ISSUE_TYPE_CLASSIFIER_MODELS"))
+    )
+    return configured or list(DEFAULT_MODELS)
 
 
 # issue의 고유 식별자 조회, issue_id/claim_id가 없으면 내용 기반 해시로 생성
@@ -444,6 +462,479 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     return {"provider": "runtime", "alias": raw, "resolved_model": raw}
 
 
+# reasoning-effort 접미사(-low/-medium/-high/-xhigh)가 붙은 gpt/o 계열 모델 스펙 분리
+def _parse_openai_model_spec(model_spec: str) -> tuple[str, str | None]:
+    spec = str(model_spec or "").strip()
+    if not spec:
+        return spec, None
+
+    match = re.match(
+        r"^(?P<model>(?:gpt|o)[A-Za-z0-9.-]*?)-(?P<effort>low|medium|high|xhigh)$",
+        spec,
+    )
+    if match:
+        return match.group("model"), match.group("effort")
+    return spec, None
+
+
+def _usage_value(obj: Any, *names: str) -> int:
+    for name in names:
+        value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _openai_like_usage(resp: Any, provider: str, model: str) -> dict[str, Any]:
+    usage = getattr(resp, "usage", None)
+    completion_details = (
+        getattr(usage, "completion_tokens_details", None)
+        or getattr(usage, "output_tokens_details", None)
+    )
+    prompt_details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    result = {
+        "provider": provider,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
+        "tool_input_tokens": 0,
+        "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
+    }
+    web_search_requests = 0
+    web_search_queries: list[str] = []
+    web_search_sources: list[str] = []
+    for item in getattr(resp, "output", []) or []:
+        if getattr(item, "type", "") != "web_search_call":
+            continue
+        web_search_requests += 1
+        action = getattr(item, "action", None)
+        query = str(getattr(action, "query", "") or "").strip()
+        if query and query not in web_search_queries:
+            web_search_queries.append(query)
+        for candidate in getattr(action, "queries", None) or []:
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in web_search_queries:
+                web_search_queries.append(candidate)
+        for source in getattr(action, "sources", None) or []:
+            url = str(getattr(source, "url", "") or "").strip()
+            if url and url not in web_search_sources:
+                web_search_sources.append(url)
+    result["web_search_requests"] = web_search_requests
+    result["web_search_queries"] = web_search_queries
+    result["web_search_sources"] = web_search_sources
+    return result
+
+
+def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
+    usage = getattr(resp, "usage", None)
+    input_tokens = _usage_value(usage, "input_tokens")
+    output_tokens = _usage_value(usage, "output_tokens")
+    content_blocks = list(getattr(resp, "content", []) or [])
+    text_length = sum(
+        len(str(getattr(block, "text", "") or ""))
+        for block in content_blocks
+        if getattr(block, "type", "") == "text"
+    )
+    return {
+        "provider": "anthropic",
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": 0,
+        "tool_input_tokens": 0,
+        "cached_input_tokens": _usage_value(usage, "cache_read_input_tokens"),
+        "cache_creation_input_tokens": _usage_value(usage, "cache_creation_input_tokens"),
+        "total_tokens": input_tokens + output_tokens,
+        "response_metadata": {
+            "response_id": str(getattr(resp, "id", "") or ""),
+            "response_model": str(getattr(resp, "model", "") or model),
+            "stop_reason": str(getattr(resp, "stop_reason", "") or ""),
+            "stop_sequence": str(getattr(resp, "stop_sequence", "") or ""),
+            "content_block_types": [
+                str(getattr(block, "type", "") or "") for block in content_blocks
+            ],
+            "text_length": text_length,
+            "text_empty": text_length == 0,
+        },
+    }
+
+
+def _gemini_usage(resp: Any, model: str) -> dict[str, Any]:
+    usage = getattr(resp, "usage_metadata", None) or getattr(resp, "usageMetadata", None)
+    input_tokens = _usage_value(usage, "prompt_token_count", "promptTokenCount")
+    output_tokens = _usage_value(usage, "candidates_token_count", "candidatesTokenCount")
+    reasoning_tokens = _usage_value(usage, "thoughts_token_count", "thoughtsTokenCount")
+    tool_input_tokens = _usage_value(usage, "tool_use_prompt_token_count", "toolUsePromptTokenCount")
+    cached_input_tokens = _usage_value(usage, "cached_content_token_count", "cachedContentTokenCount")
+    total_tokens = _usage_value(usage, "total_token_count", "totalTokenCount")
+    return {
+        "provider": "gemini",
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "tool_input_tokens": tool_input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens + reasoning_tokens + tool_input_tokens,
+    }
+
+
+def _chat_completion_text(resp: Any) -> str:
+    choices = getattr(resp, "choices", []) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    return getattr(message, "content", "") or ""
+
+
+# OpenAI 호환(vllm/xai/deepseek/ollama 포함) provider 직접 호출, web_search는 OpenAI Responses API 전용
+def _call_openai_like(
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    web_search: bool = False,
+    web_search_max_calls: int = 2,
+    web_search_force: bool = False,
+    web_search_context_size: str | None = None,
+    structured_schema: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.") from exc
+
+    if provider == "openai":
+        from config import get_openai_api_config
+
+        api_key, base_url = get_openai_api_config()
+        base_url = base_url or None
+    elif provider == "vllm":
+        api_key = (
+            os.getenv("LOCAL_LLM_API_KEY")
+            or os.getenv("VLLM_API_KEY")
+            or os.getenv("Qwen_3.6")
+        )
+        base_url = (
+            os.getenv("LOCAL_LLM_BASE_URL")
+            or os.getenv("VLLM_BASE_URL")
+            or os.getenv("QWEN_BASE_URL")
+        )
+    elif provider == "xai":
+        api_key = os.getenv("XAI_API_KEY")
+        base_url = os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1"
+    elif provider == "deepseek":
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
+    elif provider == "ollama":
+        api_key = os.getenv("OLLAMA_API_KEY", "ollama") or "ollama"
+        base_url = os.getenv("OLLAMA_BASE_URL") or "http://ollama:11434/v1"
+    else:
+        raise ValueError(f"지원하지 않는 OpenAI 호환 provider: {provider}")
+    if not api_key:
+        env_name = {
+            "openai": "OPENAI_API_KEY",
+            "vllm": "LOCAL_LLM_API_KEY (또는 VLLM_API_KEY/Qwen_3.6)",
+            "xai": "XAI_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "ollama": "OLLAMA_API_KEY",
+        }[provider]
+        raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
+    if provider == "vllm" and not base_url:
+        raise RuntimeError("LOCAL_LLM_BASE_URL(또는 VLLM_BASE_URL)가 설정되지 않았습니다.")
+    reasoning_effort = None
+    if provider == "openai":
+        model, reasoning_effort = _parse_openai_model_spec(model)
+
+    timeout = _env_float(
+        f"ISSUE_TYPE_CLASSIFIER_{provider.upper()}_TIMEOUT_SEC",
+        _env_float("ISSUE_TYPE_CLASSIFIER_TIMEOUT_SEC", 240.0),
+    )
+    client = (
+        OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        if base_url
+        else OpenAI(api_key=api_key, timeout=timeout)
+    )
+    use_web_search = provider == "openai" and bool(web_search)
+    if use_web_search:
+        # OpenAI가 web_search와 JSON 모드 동시 사용을 거부하므로, 최종 verifier는
+        # 엄격한 JSON-only 프롬프트와 기존 파서에 의존한다.
+        search_tool: dict[str, Any] = {"type": "web_search"}
+        context_size = str(web_search_context_size or "").strip().lower()
+        if context_size in {"low", "medium", "high"}:
+            search_tool["search_context_size"] = context_size
+        kwargs = {
+            "model": model,
+            "input": prompt,
+            "tools": [search_tool],
+            "tool_choice": "required" if web_search_force else "auto",
+            "max_tool_calls": max(1, int(web_search_max_calls)),
+            "max_output_tokens": max_tokens,
+            "include": ["web_search_call.action.sources"],
+        }
+        if reasoning_effort:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+    else:
+        messages = [{"role": "user", "content": prompt}]
+        response_format = {"type": "json_object"}
+        if structured_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "strict": True,
+                    "schema": structured_schema,
+                },
+            }
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "response_format": response_format,
+        }
+        if not reasoning_effort and model.lower() != "gpt-5.6-luna":
+            kwargs["temperature"] = 0.0
+        seed = _env_seed()
+        if seed is not None:
+            kwargs["seed"] = seed
+        if provider == "openai":
+            kwargs["max_completion_tokens"] = max_tokens
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+        else:
+            kwargs["max_tokens"] = max_tokens
+            if provider == "deepseek":
+                kwargs["extra_body"] = {
+                    "thinking": {
+                        "type": os.getenv("ISSUE_TYPE_CLASSIFIER_DEEPSEEK_THINKING", "disabled")
+                    }
+                }
+            elif provider == "vllm":
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": False}
+                }
+
+    attempts = _env_int("ISSUE_TYPE_CLASSIFIER_API_RETRIES", 2, min_value=0) + 1
+    retry_wait = _env_float("ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC", 10.0, min_value=0.0)
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = (
+                client.responses.create(**kwargs)
+                if use_web_search
+                else client.chat.completions.create(**kwargs)
+            )
+            break
+        except Exception as exc:
+            message = str(exc)
+            retry_kwargs = dict(kwargs)
+            changed_kwargs = False
+            if "temperature" in message and "temperature" in retry_kwargs:
+                retry_kwargs.pop("temperature", None)
+                changed_kwargs = True
+            if "max_completion_tokens" in message and "max_completion_tokens" in retry_kwargs:
+                retry_kwargs["max_tokens"] = retry_kwargs.pop("max_completion_tokens")
+                changed_kwargs = True
+            if "response_format" in message and "response_format" in retry_kwargs:
+                retry_kwargs.pop("response_format", None)
+                changed_kwargs = True
+            if "seed" in message.lower() and "seed" in retry_kwargs:
+                retry_kwargs.pop("seed", None)
+                changed_kwargs = True
+            if changed_kwargs:
+                kwargs = retry_kwargs
+            last_exc = exc
+            if attempt >= attempts:
+                raise
+            print(
+                f"    [{provider}:{model}] API 재시도 {attempt}/{attempts - 1}: {exc}",
+                flush=True,
+            )
+            if retry_wait:
+                time.sleep(retry_wait)
+    else:
+        raise RuntimeError("LLM API 호출 실패") from last_exc
+    text = str(getattr(resp, "output_text", "") or "") if use_web_search else _chat_completion_text(resp)
+    return text, _openai_like_usage(resp, provider, model)
+
+
+def _call_anthropic(
+    *, model: str, prompt: str, max_tokens: int, structured_schema: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any]]:
+    try:
+        from anthropic import Anthropic
+    except ImportError as exc:
+        raise RuntimeError("anthropic 패키지가 설치되어 있지 않습니다.") from exc
+    try:
+        from ..utils import anthropic_structured_output_request_kwargs
+    except ImportError:
+        from utils import anthropic_structured_output_request_kwargs
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
+    # os.getenv의 default는 변수 자체가 없을 때만 적용됨 — env_file이
+    # `ANTHROPIC_BASE_URL=`처럼 값은 있지만 빈 문자열로 설정하면 조용히 빈
+    # base_url이 만들어져 모든 호출이 연결 오류로 실패하므로 `or`로 폴백한다.
+    base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
+    client = Anthropic(api_key=api_key, base_url=base_url)
+    classifier_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "classifications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "id": {"type": "string"},
+                        "probabilities": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "factual_error": {"type": "number", "minimum": 0, "maximum": 1},
+                                "temporal_error": {"type": "number", "minimum": 0, "maximum": 1},
+                                "confusing_explanation": {"type": "number", "minimum": 0, "maximum": 1},
+                                "scope_overclaim": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": [
+                                "factual_error",
+                                "temporal_error",
+                                "confusing_explanation",
+                                "scope_overclaim",
+                            ],
+                        },
+                        "reason": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["id", "probabilities", "reason", "confidence"],
+                },
+            }
+        },
+        "required": ["classifications"],
+    }
+    schema = structured_schema or classifier_schema
+    try:
+        from anthropic import transform_schema
+
+        schema = transform_schema(schema)
+    except (ImportError, AttributeError, TypeError, ValueError):
+        schema = dict(schema)
+
+    request_kwargs = dict(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+        system="분석 결과를 지정된 JSON Schema에 맞는 JSON 객체로만 반환하세요. 설명 문장이나 markdown fence는 출력하지 마세요.",
+    )
+    request_kwargs.update(
+        anthropic_structured_output_request_kwargs(
+            schema,
+            create_method=client.messages.create,
+        )
+    )
+    if "sonnet-5" not in model.lower():
+        request_kwargs["temperature"] = 0.0
+    try:
+        resp = client.messages.create(**request_kwargs)
+    except TypeError as e:
+        if "temperature" not in str(e) or "temperature" not in request_kwargs:
+            raise
+        request_kwargs.pop("temperature", None)
+        resp = client.messages.create(**request_kwargs)
+    content_blocks = list(getattr(resp, "content", []) or [])
+    tool_blocks = [
+        block for block in content_blocks
+        if getattr(block, "type", "") == "tool_use"
+    ]
+    if tool_blocks:
+        tool_input = getattr(tool_blocks[0], "input", None)
+        if isinstance(tool_input, dict):
+            return json.dumps(tool_input, ensure_ascii=False), _anthropic_usage(resp, model)
+    text_blocks = [
+        getattr(block, "text", "")
+        for block in content_blocks
+        if getattr(block, "type", "") == "text"
+    ]
+    return "".join(text_blocks), _anthropic_usage(resp, model)
+
+
+def _call_gemini(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
+    try:
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다.") from exc
+    try:
+        from ..config import get_gemini_client_sequence
+        from ..utils import api_call_with_retry, is_retryable_api_error
+    except ImportError:
+        from config import get_gemini_client_sequence
+        from utils import api_call_with_retry, is_retryable_api_error
+
+    client_sequence = get_gemini_client_sequence()
+    if not client_sequence:
+        raise RuntimeError("GOOGLE_API_KEY_1, GOOGLE_API_KEY 또는 GEMINI_API_KEY가 설정되지 않았습니다.")
+
+    del max_tokens
+    cfg_kwargs: dict[str, Any] = {
+        "temperature": 0.0,
+        "response_mime_type": "application/json",
+    }
+    thinking_budget = os.getenv("ISSUE_TYPE_CLASSIFIER_GEMINI_THINKING_BUDGET")
+    if thinking_budget is not None and str(thinking_budget).strip() != "":
+        try:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=int(thinking_budget))
+        except ValueError:
+            pass
+
+    contents = [types.Part.from_text(text=prompt)]
+
+    if len(client_sequence) == 1:
+        _client_name, client = client_sequence[0]
+
+        def call_api():
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+
+        resp = api_call_with_retry(call_api)
+        return resp.text or "", _gemini_usage(resp, model)
+
+    last_exc: Exception | None = None
+    for index, (client_name, client) in enumerate(client_sequence):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+            return resp.text or "", _gemini_usage(resp, model)
+        except Exception as exc:
+            last_exc = exc
+            if is_retryable_api_error(exc) and index < len(client_sequence) - 1:
+                print(f"    [gemini:{model}] API ERROR [{client_name}]: {exc}", flush=True)
+                print("      ↺ 다음 Gemini API 키로 전환", flush=True)
+                continue
+            raise
+
+    raise RuntimeError("Gemini 호출 실패") from last_exc
+
+
 def _call_llm(
     *,
     model_spec: str,
@@ -456,49 +947,65 @@ def _call_llm(
     structured_schema: dict[str, Any] | None = None,
     stage: str = "issue_classify",
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
-    """선택된 classifier 모델을 런타임 게이트웨이로 호출"""
+    """선택된 classifier 모델 호출. 웹 UI에서 선택한 endpoint 바인딩이 있으면 우선 사용,
+    없으면(web_search 호출 포함) provider 직접 호출로 폴백"""
     try:
         from .runtime_llm import call_runtime_llm, resolve_runtime_binding
     except ImportError:
         from runtime_llm import call_runtime_llm, resolve_runtime_binding
 
-    runtime_binding = resolve_runtime_binding(stage, model_spec)
-    if not runtime_binding:
-        raise RuntimeError(
-            f"{stage} 단계의 선택 모델을 런타임 바인딩으로 해석하지 못했습니다: {model_spec}"
-        )
-    runtime_result = call_runtime_llm(
-        runtime_binding,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        temperature=0.0,
-        response_format=(
-            None
-            if web_search
-            else (
-                {"type": "json_schema", "schema": structured_schema}
+    runtime_binding = None if web_search else resolve_runtime_binding(stage, model_spec)
+    if runtime_binding:
+        runtime_result = call_runtime_llm(
+            runtime_binding,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            response_format=(
+                {
+                    "type": "json_schema",
+                    "schema": structured_schema,
+                }
                 if structured_schema
                 else {"type": "json_object"}
-            )
-        ),
-        model_spec=model_spec,
-        stage=stage,
-        web_search=web_search,
-        web_search_max_calls=web_search_max_calls,
-        web_search_force=web_search_force,
-        web_search_context_size=web_search_context_size,
-    )
-    if runtime_result is None:
-        raise RuntimeError(
-            f"{stage} 단계가 지원하지 않는 런타임 프로토콜입니다: {model_spec}"
+            ),
+            model_spec=model_spec,
+            stage=stage,
         )
-    text, usage = runtime_result
-    resolved = {
-        "provider": runtime_binding.get("provider", ""),
-        "alias": model_spec,
-        "resolved_model": runtime_binding.get("resolved_model", model_spec),
-        "endpoint_ref": runtime_binding.get("endpoint_ref", ""),
-    }
+        if runtime_result is not None:
+            text, usage = runtime_result
+            resolved = {
+                "provider": runtime_binding.get("provider", ""),
+                "alias": model_spec,
+                "resolved_model": runtime_binding.get("resolved_model", model_spec),
+                "endpoint_ref": runtime_binding.get("endpoint_ref", ""),
+            }
+            return text, usage, resolved
+
+    resolved = _resolve_model_spec(model_spec)
+    provider = resolved["provider"]
+    model = resolved["resolved_model"]
+    if provider == "anthropic":
+        text, usage = _call_anthropic(
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            structured_schema=structured_schema,
+        )
+    elif provider == "gemini":
+        text, usage = _call_gemini(model=model, prompt=prompt, max_tokens=max_tokens)
+    else:
+        text, usage = _call_openai_like(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            web_search=web_search,
+            web_search_max_calls=web_search_max_calls,
+            web_search_force=web_search_force,
+            web_search_context_size=web_search_context_size,
+            structured_schema=structured_schema,
+        )
     return text, usage, resolved
 
 
@@ -510,9 +1017,15 @@ def _call_model_for_batch(
     current_date: str,
     max_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """모델 1개에 batch 1개를 요청하고, 응답을 id별 분류 행으로 정규화한다."""
+    """모델 1개에 batch 1개를 요청하고, 응답을 id별 분류 행으로 정규화한다.
+
+    각 행에 model/provider/resolved_model을 반드시 태깅해야 한다 — 이게 빠지면
+    가중 앙상블(_weighted_scores)이 model_weights를 조회할 키가 없어 모든 점수가
+    0으로 계산되고, 그 결과 저마진(low_margin) 타이브레이크에서 ISSUE_TYPES 튜플의
+    첫 항목(temporal_error)으로 쏠리는 조용한 오분류가 발생한다.
+    """
     prompt = _build_prompt(batch, current_date)
-    text, usage, _resolved = _call_llm(
+    text, usage, resolved = _call_llm(
         model_spec=model,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -520,40 +1033,57 @@ def _call_model_for_batch(
     )
     try:
         raw_rows = _parse_response(text)
+        parse_exc: Exception | None = None
     except Exception as exc:
-        return (
-            [
-                {
-                    "id": item["id"],
-                    "status": "parse_failed",
-                    "parse_error": f"모델 응답 파싱 실패: {exc}",
-                }
-                for item in batch
-            ],
-            usage,
-        )
+        raw_rows = []
+        parse_exc = exc
+
+    by_id = {
+        str(raw.get("id") or "").strip(): raw
+        for raw in raw_rows
+        if isinstance(raw, dict) and str(raw.get("id") or "").strip()
+    }
 
     rows: list[dict[str, Any]] = []
-    for raw in raw_rows:
-        if not isinstance(raw, dict):
+    for item in batch:
+        issue_id = item["id"]
+        base = {
+            "id": issue_id,
+            "model": model,
+            "provider": resolved["provider"],
+            "resolved_model": resolved["resolved_model"],
+        }
+        if parse_exc is not None:
+            rows.append({
+                **base,
+                "status": "parse_failed",
+                "parse_error": f"모델 응답 파싱 실패: {parse_exc}",
+            })
             continue
-        issue_id = str(raw.get("id") or "").strip()
-        if not issue_id:
+        raw = by_id.get(issue_id)
+        if raw is None:
+            rows.append({
+                **base,
+                "status": "parse_failed",
+                "parse_error": "모델 응답에 해당 id가 없습니다",
+            })
             continue
         probabilities, error = _normalize_probabilities(raw.get("probabilities"))
         if error or probabilities is None:
             rows.append({
-                "id": issue_id,
+                **base,
                 "status": "parse_failed",
                 "parse_error": error or "probabilities 파싱 실패",
             })
             continue
         top_type, top_probability = _top_probability_type(probabilities)
+        normalized_top_type = _normalize_issue_type(top_type) or top_type
         rows.append({
-            "id": issue_id,
+            **base,
             "status": "ok",
             "probabilities": probabilities,
-            "top_issue_type": _normalize_issue_type(top_type) or top_type,
+            "top_issue_type": normalized_top_type,
+            "top_issue_type_label": _issue_type_label(normalized_top_type),
             "top_probability": top_probability,
             "confidence": _safe_float(raw.get("confidence"), default=top_probability),
             "reason": str(raw.get("reason") or ""),
@@ -736,13 +1266,63 @@ def _aggregate_token_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
     return dict(totals)
 
 
+# model에 해당하는 DEFAULT_MODEL_WEIGHTS 조회 키(모델명/provider 계열) 결정
+def _canonical_model_weight_key(model: str, result: dict[str, Any] | None = None) -> str:
+    lowered = str(model or "").strip().lower()
+    provider = str((result or {}).get("provider", "") or "").strip().lower()
+    if lowered in DEFAULT_MODEL_WEIGHTS:
+        return lowered
+    if provider in DEFAULT_MODEL_WEIGHTS:
+        return provider
+    if lowered.startswith(("gpt", "o1", "o3")):
+        return "gpt"
+    if lowered.startswith("claude") or lowered.startswith(("sonnet", "haiku", "opus")):
+        return "claude"
+    if lowered.startswith("grok") or provider == "xai":
+        return "grok"
+    if lowered.startswith("gemini") or provider == "gemini":
+        return "gemini"
+    return lowered
+
+
+# "model=weight" 콤마 구분 문자열을 파싱, 미지정 모델은 DEFAULT_MODEL_WEIGHTS로 보강 후 정규화
 def _parse_model_weights(value: str | None, models: list[str], model_results: dict[str, dict[str, Any]]) -> dict[str, float]:
-    """선택된 모든 모델에 동일한 투표 가중치 부여"""
-    del value, model_results
-    if not models:
-        return {}
-    equal = 1.0 / len(models)
-    return {model: round(equal, 6) for model in models}
+    configured: dict[str, float] = {}
+    for part in _split_csv(value):
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        key = key.strip().lower()
+        try:
+            configured[key] = max(0.0, float(raw_value))
+        except ValueError:
+            continue
+
+    weights = {}
+    for model in models:
+        result = model_results.get(model, {})
+        keys = [
+            str(model or "").strip().lower(),
+            _canonical_model_weight_key(model, result),
+            str(result.get("provider", "") or "").strip().lower(),
+        ]
+        weight = None
+        for key in keys:
+            if key in configured:
+                weight = configured[key]
+                break
+        if weight is None:
+            for key in keys:
+                if key in DEFAULT_MODEL_WEIGHTS:
+                    weight = DEFAULT_MODEL_WEIGHTS[key]
+                    break
+        weights[model] = float(weight if weight is not None else 1.0)
+
+    total = sum(weights.values())
+    if total <= 0:
+        equal = 1.0 / max(len(models), 1)
+        return {model: equal for model in models}
+    return {model: round(weight / total, 6) for model, weight in weights.items()}
 
 
 # 모델별 확률에 가중치를 곱해 유형별 가중 점수 합산, 실패/파싱 오류 모델의 가중치는 missing_weight로 집계
@@ -1403,8 +1983,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-date", default=os.getenv("ISSUE_TYPE_CLASSIFIER_CURRENT_DATE", "2026-05-12"))
     parser.add_argument(
         "--model-weights",
-        default=None,
-        help="사용 중단된 호환 옵션, 선택된 모델은 항상 동일 가중치를 받음",
+        default=os.getenv("ISSUE_TYPE_CLASSIFIER_MODEL_WEIGHTS", "gpt=0.4,claude=0.4,grok=0.2"),
+        help="comma separated model=weight overrides, default: gpt=0.4,claude=0.4,grok=0.2",
     )
     parser.add_argument(
         "--low-margin-threshold",

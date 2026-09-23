@@ -175,17 +175,21 @@ def _status_from_score(score: float) -> str:
 
 # grounding 스테이지에 설정된 모델 목록 조회
 def _grounding_model_specs() -> list[str]:
-    try:
-        from .runtime_llm import configured_stage_models
-    except ImportError:
-        from runtime_llm import configured_stage_models
-    return configured_stage_models("grounding")
+    configured = (
+        _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODELS"))
+        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODELS"))
+        or _split_csv(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MODEL"))
+        or _split_csv(os.getenv("VERIFIER_GROUNDING_MODEL"))
+    )
+    return configured or ["gpt"]
 
 
 # pre-verifier 근거 수집에 사용할 첫 번째 grounding 모델 조회
 def _pre_verifier_evidence_model() -> str:
-    configured = _grounding_model_specs()
-    return configured[0] if configured else ""
+    return (
+        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_MODEL", "").strip()
+        or "gpt-5.6-luna-medium"
+    )
 
 
 # pre-verifier 근거 수집의 최대 tool call 횟수 조회
@@ -252,7 +256,10 @@ def _pre_verifier_evidence_max_fetch_attempts() -> int:
 
 # 의미 유사도 판정에 사용할 모델 조회
 def _pre_verifier_evidence_semantic_model() -> str:
-    return _pre_verifier_evidence_model()
+    return (
+        os.getenv("CLASSIFIED_ISSUE_EVIDENCE_SEMANTIC_MODEL", "").strip()
+        or _pre_verifier_evidence_model()
+    )
 
 
 # 의미 유사도 판정 LLM 호출의 최대 토큰 수 조회

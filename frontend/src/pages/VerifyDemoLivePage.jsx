@@ -6,7 +6,7 @@ import { DEMO_PHASES } from '../hooks/useDemoPipelineFlow'
 import { useTimedDiagramFlow } from '../hooks/useTimedDiagramFlow'
 import { useVideoThumbnail } from '../hooks/useVideoThumbnail'
 import { getLectureResult } from '../api/pipeline'
-import { NODE_BY_ID, NODE_SCHEDULE, bigPhaseFor, formatDuration, laneToneFor } from '../components/verifier/diagramPipelineConstants'
+import { NODE_BY_ID, NODE_SCHEDULE, bigPhaseFor, laneToneFor } from '../components/verifier/diagramPipelineConstants'
 
 // [개발용] 발표용 데모 (/dev/verify-demo) — 실제 흐름(/upload → /verify/:id → /result/:id)과
 // 화면·문구가 동일하게 보이도록 만듦. 백엔드 파이프라인 없이 어떤 영상을 넣어도 다이어그램이
@@ -16,7 +16,7 @@ import { NODE_BY_ID, NODE_SCHEDULE, bigPhaseFor, formatDuration, laneToneFor } f
 //   마지막 노드(피드백) 끝나면 자동 정지. 스톱워치는 경과 시간만 표시(목표 총 시간 없음)
 // - 완료 화면 결과물은 실제 파이프라인이 없어 이미 검증 끝난 강의 하나의 결과를 재사용
 //   (매번 /api/lectures/{id}/result 호출 → 그 강의 결과가 바뀌면 데모에도 반영, 강의 교체는 아래 상수만 변경)
-const DEMO_RESULT_LECTURE_ID = '9018dee3-a130-4c0e-a4a2-45caaf8c4136'
+const DEMO_RESULT_LECTURE_ID = '123b6d58-d827-4cc7-b3bc-4654e673a4cd'
 
 // 통합 텍스트·피드백은 "만들어내는" 단계라 "진행 중" 대신 "생성 중" 으로 표현
 const GENERATION_STAGE_LABELS = new Set(['멀티모달 통합 텍스트', '피드백'])
@@ -115,7 +115,7 @@ function DemoUploadStep({ flow }) {
 }
 
 function DemoPipelineStep({ flow, onViewResult }) {
-  const { title, file, phase, status, activeIds, activeLabels, elapsedMs, actions } = flow
+  const { title, file, phase, status, activeIds, activeLabels, actions } = flow
   const isDone = phase === DEMO_PHASES.DONE
   const stageMessage = isDone
     ? '모든 단계가 완료되었습니다.'
@@ -137,7 +137,6 @@ function DemoPipelineStep({ flow, onViewResult }) {
       <div className="vf-pipe demo-standard-width">
         <div className="vf-progress-row">
           <div className="vf-progress-message"><strong>{bigPhase}</strong>: {stageMessage}</div>
-          <span className="vf-stopwatch">{formatDuration(elapsedMs)}</span>
         </div>
         <PipelineStageBars phase={phase} activeIds={activeIds} />
         <DiagramPipeline status={status} diffLine diffNode compact />
@@ -182,7 +181,7 @@ function DemoResultStep({ flow, videoUrl, navigate }) {
   return (
     <div className="detail">
       <div className="detail-head">
-        <button type="button" className="btn" onClick={() => navigate('/')}>← 메인으로</button>
+        <button type="button" className="btn" onClick={() => navigate('/lectures')}>← 목록으로</button>
         <h2>{title || file?.name || '강의'}</h2>
         <button
           type="button"

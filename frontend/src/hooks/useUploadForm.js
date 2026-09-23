@@ -4,10 +4,6 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { uploadLecture } from '../api/pipeline'
 
-// 업로드 화면에 출처 태그 선택 UI 가 없어, 백엔드 필수값을 채우려고 항상 '기타'로 전송
-// 기존 강의의 출처 필터·통계는 그대로 유지
-const DEFAULT_SOURCE_TAG = 'etc'
-
 // 파일명에서 확장자를 뗀 문자열
 function fileTitle(file) {
   return file?.name ? file.name.replace(/\.[^.]+$/, '') : ''
@@ -18,6 +14,7 @@ export function useUploadForm({ onUploaded } = {}) {
   const [file, setFile] = useState(null)
   const [title, setTitle] = useState('')
   const [isTitleManual, setIsTitleManual] = useState(false)
+  const [sourceTag, setSourceTag] = useState('')
   const [localError, setLocalError] = useState('')
 
   const mutation = useMutation({
@@ -26,6 +23,7 @@ export function useUploadForm({ onUploaded } = {}) {
       setFile(null)
       setTitle('')
       setIsTitleManual(false)
+      setSourceTag('')
       setLocalError('')
       onUploaded?.(created.id)
     },
@@ -47,11 +45,15 @@ export function useUploadForm({ onUploaded } = {}) {
 
   function submit() {
     if (!file || mutation.isPending) return
+    if (!sourceTag) {
+      setLocalError('출처 태그를 선택해 주세요.')
+      return
+    }
     setLocalError('')
     mutation.mutate({
       file,
       title: title.trim() || fileTitle(file),
-      sourceTag: DEFAULT_SOURCE_TAG,
+      sourceTag,
     })
   }
 
@@ -59,6 +61,7 @@ export function useUploadForm({ onUploaded } = {}) {
     setFile(null)
     setTitle('')
     setIsTitleManual(false)
+    setSourceTag('')
     setLocalError('')
     mutation.reset()
   }
@@ -68,8 +71,9 @@ export function useUploadForm({ onUploaded } = {}) {
   return {
     file,
     title,
+    sourceTag,
     errorMessage: localError || mutationError,
     isSubmitting: mutation.isPending,
-    actions: { selectFile, setTitle: setTitleManual, submit, reset },
+    actions: { selectFile, setTitle: setTitleManual, setSourceTag, submit, reset },
   }
 }

@@ -1,6 +1,7 @@
 // 강의 목록 그리드 — 검색·정렬·출처 필터 적용 후 페이지네이션
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listLectures } from '../api/pipeline'
 import { lectureTagLabel } from '../constants/lectureTags'
@@ -66,7 +67,20 @@ export default function LectureList({ onSelect, filters = {} }) {
     queryKey: ['lectures'],
     queryFn: () => listLectures(),
   })
-  const [page, setPage] = useState(0)
+
+  // 페이지 번호를 URL(?page=)에 담아, 상세 화면(/verify/:id)에 갔다가 뒤로가기로
+  // 돌아왔을 때 보고 있던 페이지가 그대로 복원되도록 함(컴포넌트 상태는 언마운트되면 사라짐)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const page = Math.max(0, parseInt(searchParams.get('page') ?? '0', 10) || 0)
+  function setPage(updater) {
+    const next = Math.max(0, typeof updater === 'function' ? updater(page) : updater)
+    setSearchParams(prev => {
+      const params = new URLSearchParams(prev)
+      if (next > 0) params.set('page', String(next))
+      else params.delete('page')
+      return params
+    }, { replace: true })
+  }
 
   // 출처 필터 + 제목 검색 적용 후 정렬
   const visible = useMemo(() => {
@@ -83,15 +97,23 @@ export default function LectureList({ onSelect, filters = {} }) {
 
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
 
-  // 검색어·정렬·필터 변경 시 첫 페이지로 복귀
+  // 검색어·정렬·필터가 "바뀔 때"만 첫 페이지로 복귀 (마운트 시점 최초 실행은 건너뜀 —
+  // 상세 화면에서 돌아왔을 때 URL의 page가 곧바로 0으로 덮어써지는 것을 방지)
+  const skipNextFilterReset = useRef(true)
   useEffect(() => {
+    if (skipNextFilterReset.current) {
+      skipNextFilterReset.current = false
+      return
+    }
     setPage(0)
   }, [query, sort, sourceFilter])
 
   // 필터 결과가 줄어 현재 페이지가 범위를 벗어나면 마지막 페이지로 당김
+  // 목록이 아직 로딩 중일 때는 pageCount가 임시로 1이므로, 로딩 완료 후에만 확인
   useEffect(() => {
+    if (isLoading) return
     setPage(current => Math.min(current, pageCount - 1))
-  }, [pageCount])
+  }, [pageCount, isLoading])
 
   if (isLoading) return <p className="list-note">목록을 불러오는 중...</p>
   if (error) return <p className="error-text">목록 조회 실패: {String(error?.message || error)}</p>

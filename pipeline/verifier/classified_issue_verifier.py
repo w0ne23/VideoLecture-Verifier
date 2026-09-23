@@ -204,14 +204,21 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, _safe_float(value, default))), 6)
 
 
+DEFAULT_MODELS = ("gpt-5.4", "claude-sonnet-5", "grok-4.5")
+
+
 # verify 스테이지에 설정된 모델 목록 조회
 def _default_models() -> list[str]:
     _load_env()
-    try:
-        from .runtime_llm import configured_stage_models
-    except ImportError:
-        from runtime_llm import configured_stage_models
-    return configured_stage_models("verify")
+    configured = _split_csv(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODELS"))
+    models = configured or list(DEFAULT_MODELS)
+    verifier_gpt_model = os.getenv("CLASSIFIED_ISSUE_VERIFIER_GPT_MODEL", "").strip()
+    if verifier_gpt_model:
+        models = [
+            verifier_gpt_model if str(model).strip().lower() in {"gpt", "openai"} else model
+            for model in models
+        ]
+    return models
 
 
 # 리스트를 지정 크기로 분할
@@ -1934,12 +1941,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="콤마/공백 구분 모델 목록, 기본값은 verify 스테이지 바인딩",
+        help="콤마/공백 구분 모델 목록, 기본값: CLASSIFIED_ISSUE_VERIFIER_MODELS 또는 gpt/claude/grok",
     )
     parser.add_argument(
         "--model-weights",
-        default=None,
-        help="사용 중단된 호환 옵션, 선택된 모델은 항상 동일 가중치를 받음",
+        default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS", "gpt=0.4,claude=0.4,grok=0.2"),
+        help="comma separated model=weight overrides, default: gpt=0.4,claude=0.4,grok=0.2",
     )
     parser.add_argument(
         "--batch-size",
